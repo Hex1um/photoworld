@@ -396,6 +396,7 @@ var EXAMPLES = ["data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBAUE
   var waterMap = new Uint8Array(WORLD * WORLD);   // 水面标记
   var waterLevel = 0.5;                           // 水面高度
   var fogTop = 6;                                 // 积雾高度上限（低于它的洼地会起雾）
+  var noHFog = /nofog/.test(location.search);
   var cR0 = new Uint8ClampedArray(WORLD * WORLD);
   var cG0 = new Uint8ClampedArray(WORLD * WORLD);
   var cB0 = new Uint8ClampedArray(WORLD * WORLD);
@@ -419,6 +420,9 @@ var EXAMPLES = ["data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBAUE
   var view = document.getElementById('view');
   var vctx = view.getContext('2d');
   var RW = 0, RH = 0, imgData = null, buf32 = null, projScale = 0, xMap = null;
+  var wMask = null;          // 本帧哪些像素是水面（倒影 pass 用）
+  var hasWater = false;      // 这个世界到底有没有水
+  var waterFrac = 0;         // 水面占比
   var quality = 1, qAvg = 16, qTimer = 0;
 
   /* ---------------- 模型 ---------------- */
@@ -712,7 +716,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     for (y = Math.max(0, hy - 4); y < hy; y++) { ar += rows[y][0]; ag += rows[y][1]; ab += rows[y][2]; n++; }
     if (n) skyHor = [ar / n | 0, ag / n | 0, ab / n | 0];
   }
-  var TANF = Math.tan(1.15 / 2);
+  // 视野：水平 87°（原来 66° 在横屏上像隧道），竖屏再把垂直视野压到 74° 以内，
+  // 否则手机上垂直方向会被放大到失真。projScale 由两者取严决定。
+  var FOV_H = 1.52, FOV_V_MAX = 1.30;
+  var TANF = Math.tan(FOV_H / 2);
   var voxTotal = 0;
 
   function samplePhoto(u, v, out) {
@@ -754,7 +761,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
         if (hU < mns) mns = hU; if (hD < mns) mns = hD;
         if (mxs - mns > 1.6) continue;                       // 不平 → 不是水面
         var r = cR0[i], g = cG0[i], b = cB0[i];
-        if (!(b > r * 1.06 && b > g * 0.94)) continue;       // 不够蓝 → 是草地/岩石
+        if (!(b > r * 1.16 && b > g * 1.05)) continue;       // 要真的偏蓝，青绿的草地不算
         waterMap[i] = 1; n++;
       }
     }
@@ -853,9 +860,11 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
         var cg2 = tmpc[1] * 1.06 + 0.01;
         var cb2 = tmpc[2] * 1.06 + 0.01;
         if (wgt > 0) {
-          cr2 = cr2 * (1 - wgt) + (avg[0] * 0.55 + PC[ps] * 0.55) * wgt;
-          cg2 = cg2 * (1 - wgt) + (avg[1] * 0.55 + PC[ps + 1] * 0.55) * wgt;
-          cb2 = cb2 * (1 - wgt) + (avg[2] * 0.55 + PC[ps + 2] * 0.55) * wgt;
+          // 远景本来掺模型颜色头，但那个头整体偏冷，整片世界会被带成青灰。
+          // 改成掺「同一位置的照片取样」：远景也还是这张图，只是更暗更糊。
+          cr2 = cr2 * (1 - wgt) + (avg[0] * 0.34 + tmpc[0] * 0.72) * wgt;
+          cg2 = cg2 * (1 - wgt) + (avg[1] * 0.34 + tmpc[1] * 0.72) * wgt;
+          cb2 = cb2 * (1 - wgt) + (avg[2] * 0.34 + tmpc[2] * 0.72) * wgt;
         }
         var hTint = 0.92 + (hh / HMAX) * 0.16;
         var fR = Math.min(255, cr2 * jit * hTint * 255);
@@ -930,7 +939,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     // 锚点每张照片重建时都要清空，否则上一张的记忆会串到这张
     for (i = 0; i < anchorMap.length; i++) anchorMap[i] = 0;
     resetSeen();
-    detectWater();
+    waterFrac = detectWater();
+    hasWater = waterFrac > 0;
     // 积雾高度：只用最低的那一小撮洼地起雾。取 15/85 分位的相对位置，
     // 否则"整片世界都很低"的照片会被雾整片糊掉
     var hsamp = [];
@@ -957,13 +967,31 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     var bal = Math.max(0.55, Math.min(1.35, tL / mLum));
     var balR = bal, balG = bal, balB = bal;
     void mL;
+    // vibrance：越灰的地块提得越多，已经很艳的地方几乎不动。
+    // 直接提"离灰度的距离"，不会给灰地凭空加色，所以不会脏。
     for (i2 = 0; i2 < heights.length; i2++) {
-      cR0[i2] = Math.min(255, cR0[i2] * balR);
-      cG0[i2] = Math.min(255, cG0[i2] * balG);
-      cB0[i2] = Math.min(255, cB0[i2] * balB);
+      var vr = cR0[i2] * balR, vg = cG0[i2] * balG, vb = cB0[i2] * balB;
+      var vl = vr * 0.299 + vg * 0.587 + vb * 0.114;
+      var vmx = vr > vg ? (vr > vb ? vr : vb) : (vg > vb ? vg : vb);
+      var vmn = vr < vg ? (vr < vb ? vr : vb) : (vg < vb ? vg : vb);
+      var vsat = vmx > 2 ? (vmx - vmn) / vmx : 0;
+      var vk = 1.10 + 0.20 * (1 - vsat);          // 1.10 ~ 1.30
+      cR0[i2] = Math.min(255, vl + (vr - vl) * vk);
+      cG0[i2] = Math.min(255, vl + (vg - vl) * vk);
+      cB0[i2] = Math.min(255, vl + (vb - vl) * vk);
       cR[i2] = cR0[i2]; cG[i2] = cG0[i2]; cB[i2] = cB0[i2];
     }
 
+
+    if (/colinfo/.test(location.search)) {
+      var sA = 0, sB = 0, sC = 0;
+      for (var ci = 0; ci < cR0.length; ci += 97) { sA += cR0[ci]; sB += cG0[ci]; sC += cB0[ci]; }
+      var cnN = Math.ceil(cR0.length / 97);
+      document.title = 'albedo=' + (sA / cnN).toFixed(0) + ',' + (sB / cnN).toFixed(0) + ',' + (sC / cnN).toFixed(0) +
+        ' ground=' + (groundRGB[0] * 255).toFixed(0) + ',' + (groundRGB[1] * 255).toFixed(0) + ',' + (groundRGB[2] * 255).toFixed(0) +
+        ' bal=' + bal.toFixed(2) + ' hz=' + horizFrac.toFixed(2) + ' fogTop=' + fogTop.toFixed(1) +
+        ' water=' + waterLevel.toFixed(1) + ' hasWater=' + hasWater + ' wfrac=' + waterFrac.toFixed(3);
+    }
 
     voxTotal = 0;
     for (i = 0; i < heights.length; i++) voxTotal += baseH[i];
@@ -1041,7 +1069,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
 
   /* ---------------- 实时变化 ---------------- */
   var live = false, chaos = 0.45, mem = 0.35;
-  var tick = 0, cursor = 0, CHUNK = 9000;
+  var tick = 0, cursor = 0;
 
   var chgAcc = 0;
   var rewriteTotal = 0;      // 累计改写次数（叙事用，不随时间清零）
@@ -1049,7 +1077,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
   var seenT = null;          // 每个地块最后一次出现在视野里的时刻
   var simT = 0;              // 世界时间（秒）
   var VIEW_D2 = 240 * 240;   // 和渲染最远距离对齐，远山也算"看得见"
-  var COS_VIEW = Math.cos(1.15 * 0.5 + 0.10);   // 视野半角再放一点，避免屏幕边缘突变
+  var COS_VIEW = Math.cos(FOV_H * 0.5 + 0.10);   // 视野半角再放一点，避免屏幕边缘突变
 
   function resetSeen() {
     seenT = new Float32Array(WORLD * WORLD);
@@ -1076,7 +1104,6 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
 
     var anchor = mem;
     var amp = Math.pow(chaos, 0.85) * 21 * (0.24 + (1 - anchor) * 0.76);
-    var devLim = 9 + (1 - anchor) * 12;
     var freq = 0.015 + chaos * 0.095;
     var k = Math.min(0.6, dt * (0.32 + rate * (0.7 + chaos * 2.6)));
     var perTick = Math.round(5000 + chaos * 22000);
@@ -1120,14 +1147,13 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
       relightCell(i);
 
       // 颜色不再逐帧抖动亮度：只随"遗忘程度"把配色缓缓推向一个更灰、更冷的版本
-      var forget = forgetI;
-      if (forget > 0.01) {
+      if (forgetI > 0.01) {
         var l0 = cR0[i] * 0.3 + cG0[i] * 0.59 + cB0[i] * 0.11;
         var cool = 0.86, warm = 1.02;
         var tgR = (l0 * 0.96 + (cR0[i] - l0) * 0.34) * cool;
         var tgG = (l0 * 1.00 + (cG0[i] - l0) * 0.34) * 1.0;
         var tgB = (l0 * 1.06 + (cB0[i] - l0) * 0.34) * warm;
-        var wf = 0.02 * forget * ramp;
+        var wf = 0.02 * forgetI * ramp;
         cR[i] += (tgR - cR[i]) * wf;
         cG[i] += (tgG - cG[i]) * wf;
         cB[i] += (tgB - cB[i]) * wf;
@@ -1136,7 +1162,11 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     cursor = end >= WORLD * WORLD ? 0 : end;
   }
 
-  /* ---------------- 图像重投影（DIBR）：把照片本身当成世界 ---------------- */
+  /* ---------------- 照片立牌（实验，默认关闭，?dibr=1 打开） ----------------
+     注意：这里**没有用模型的高度图当深度**，所有源点的前方距离都是常数 D，
+     所以它本质是"一张贴在相机前的照片平面 + 点溅射视差"，不是真正的深度重投影。
+     命名沿用 DIBR 只是历史原因，README 里标为实验特性。 */
+
   var SRC = 256;
   var srcPos = null, srcCol = null, srcValid = null, zbuf = null, dibrReady = false;
   var camYBuild = 20;
@@ -1169,7 +1199,6 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
         srcValid[i] = 1;
       }
     }
-    dibrReady = true;
     dibrReady = true;
   }
 
@@ -1227,13 +1256,27 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
       }
     }
 
-    // 空洞：横向抹平（Oasis 那种"模型补出来的地方有点糊"的感觉）
+    // 空洞：左→右一遍、右→左一遍（只做左→右时，右缘的洞会留成天空色），再上下补一遍
     for (var y4 = 0; y4 < H; y4++) {
-      var row = y4 * Wd, last = 0;
+      var row = y4 * Wd, last = 0, lastZ = 0;
       for (var x4 = 0; x4 < Wd; x4++) {
         var d4 = row + x4;
-        if (zbuf[d4] !== 0) last = buf[d4];
-        else if (last !== 0) buf[d4] = last;
+        if (zbuf[d4] !== 0) { last = buf[d4]; lastZ = zbuf[d4]; }
+        else if (last !== 0) { buf[d4] = last; zbuf[d4] = lastZ; }
+      }
+      last = 0; lastZ = 0;
+      for (var x5 = Wd - 1; x5 >= 0; x5--) {
+        var d5 = row + x5;
+        if (zbuf[d5] !== 0) { last = buf[d5]; lastZ = zbuf[d5]; }
+        else if (last !== 0) { buf[d5] = last; zbuf[d5] = lastZ; }
+      }
+    }
+    for (var x6 = 0; x6 < Wd; x6++) {
+      var prev = 0;
+      for (var y6 = 0; y6 < H; y6++) {
+        var d6 = y6 * Wd + x6;
+        if (zbuf[d6] !== 0) prev = buf[d6];
+        else if (prev !== 0) { buf[d6] = prev; zbuf[d6] = 1; }
       }
     }
     vctx.putImageData(imgData, 0, 0);
@@ -1269,8 +1312,14 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
       view.width = RW; view.height = RH;
       imgData = vctx.createImageData(RW, RH);
       buf32 = new Uint32Array(imgData.data.buffer);
-      // 垂直投影必须和水平用同一套像素/单位，否则 1×1 的体素在宽屏上会被横向拉长
-      projScale = (RW / 2) / Math.tan(1.15 / 2);
+      wMask = new Uint8Array(RW * RH);
+      // 垂直投影必须和水平用同一套像素/单位，否则 1×1 的体素在宽屏上会被横向拉长。
+      // 先按水平视野算，再保证垂直视野不超过 FOV_V_MAX（竖屏时这条会生效）。
+      var hsFov = (RW / 2) / Math.tan(FOV_H / 2);
+      var vsFov = (RH / 2) / Math.tan(FOV_V_MAX / 2);
+      projScale = hsFov > vsFov ? hsFov : vsFov;
+      TANF = (RW / 2) / projScale;                       // 实际的水平半角
+      COS_VIEW = Math.cos(Math.atan(TANF) + 0.10);
     }
   }
   window.addEventListener('resize', resize);
@@ -1292,18 +1341,24 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     var hazeG = skyHor[1] * 0.55 + groundRGB[1] * 0.45;
     var hazeB = skyHor[2] * 0.55 + groundRGB[2] * 0.45;
 
-    // 天空：纯蓝天（照片只作为"眼前看到的东西"参与推算，不当背景板）
+    if (hasWater && wMask) wMask.fill(0);
+
+    // 天空：以蓝天为底，按照片地面的冷暖把色调偏一点（暖照片配一顶冷蓝天会打架）
+    var warmK = (groundRGB[0] - groundRGB[2]) * 2.2;
+    warmK = warmK < 0 ? 0 : (warmK > 1 ? 1 : warmK);
+    var skTopR = 58 + 30 * warmK, skTopG = 124 + 10 * warmK, skTopB = 206 - 26 * warmK;
+    var skHorR = 190 + 26 * warmK, skHorG = 219 + 4 * warmK, skHorB = 246 - 30 * warmK;
     for (var y3 = 0; y3 < H; y3++) {
       var kk = (y3 - horizon) / H, tr, tg, tb;
       if (kk < 0) {
         var t1 = Math.min(1, -kk * 1.45);
         t1 = t1 * t1 * (3 - 2 * t1);
-        tr = 190 + (58 - 190) * t1;
-        tg = 219 + (124 - 219) * t1;
-        tb = 246 + (206 - 246) * t1;
+        tr = skHorR + (skTopR - skHorR) * t1;
+        tg = skHorG + (skTopG - skHorG) * t1;
+        tb = skHorB + (skTopB - skHorB) * t1;
       } else {
         var t2 = Math.min(1, kk * 3.0);
-        tr = 190 + 18 * t2; tg = 219 + 8 * t2; tb = 246 - 14 * t2;
+        tr = skHorR + 18 * t2; tg = skHorG + 8 * t2; tb = skHorB - 14 * t2;
       }
       buf.fill((255 << 24) | (tm(tb) << 16) | (tm(tg) << 8) | tm(tr), y3 * Wd, y3 * Wd + Wd);
     }
@@ -1315,7 +1370,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
 
     var fwdX = -Math.sin(yaw), fwdZ = -Math.cos(yaw);
     var rgtX = Math.cos(yaw), rgtZ = -Math.sin(yaw);
-    var tanf = Math.tan(1.15 / 2);
+    var tanf = TANF;
     var maxZ = 230;
 
     for (var sx = 0; sx < Wd; sx++) {
@@ -1356,11 +1411,12 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
           var lMild = 0.66 + 0.34 * lig;
           // 冷暖分离：受光面偏暖、背光面偏冷。这是"高级感"最便宜的来源
           var tnt = tintMap[idx];
-          var tR = 1.046 - 0.118 * tnt, tG = 1.008 - 0.040 * tnt, tB = 0.968 + 0.096 * tnt;
+          var tR = 1.072 - 0.152 * tnt, tG = 1.008 - 0.046 * tnt, tB = 0.958 + 0.126 * tnt;
           // 高度雾：低于雾线的洼地积水成雾海，山脊露在外面
           var hFog = (fogTop - hs2) / 4.5;
           if (hFog < 0) hFog = 0; else if (hFog > 1) hFog = 1;
           hFog *= hFog;
+          if (noHFog) hFog = 0;               // 调试：?nofog=1 关掉高度雾
 
           var baseD = camY - hs2;
           // 地形高过眼睛时，平面反投影无解（会拉出竖条），这一列改用平面纹理
@@ -1397,6 +1453,11 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
               if (hzp > 0.74) hzp = 0.74;
             }
             var lp2 = lMild * (1.04 - 0.14 * (yy - y0) / Math.max(1, y1 - y0));
+            // 远景逐格亮度抖动：比提分辨率便宜得多，能把"糊成一片"打散
+            if (zz > 110) {
+              var dq = (((ix * 37 + iz * 61) & 7) - 3.5) * 0.0075;
+              lp2 *= 1 + dq;
+            }
             if (yy >= y1 - 2) lp2 *= 0.90;                    // 方块下沿压暗，出立体节奏
             var r4 = cR[idx] * lp2 * tR, g4 = cG[idx] * lp2 * tG, b4 = cB[idx] * lp2 * tB;
             if (isW) {
@@ -1413,6 +1474,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
             g4 = g4 * nh + hazeG * hzp;
             b4 = b4 * nh + hazeB * hzp;
             buf[yy * Wd + sx] = (255 << 24) | (tm(b4) << 16) | (tm(g4) << 8) | tm(r4);
+            if (isW && wMask) wMask[yy * Wd + sx] = 1;
           }
           yBuf = sy;
         }
@@ -1420,6 +1482,30 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
         step *= 1.014;
       }
     }
+    // 水面倒影：沿地平线把上半屏垂直翻转、压暗，再随波纹抖一点 x
+    if (hasWater && wMask) {
+      var mirrorH = horizon * 2;
+      for (var ry = Math.floor(horizon) + 1; ry < H; ry++) {
+        var syM = mirrorH - ry;
+        if (syM < 0 || syM >= H) continue;
+        var rowM = ry * Wd, rowS = (syM | 0) * Wd;
+        var wob = Math.sin(ry * 0.21 + clock * 1.7) * 2.5;
+        for (var rx = 0; rx < Wd; rx++) {
+          var mi = rowM + rx;
+          if (!wMask[mi]) continue;
+          var sxp = rx + wob;
+          if (sxp < 0) sxp = 0; else if (sxp > Wd - 1) sxp = Wd - 1;
+          if (wMask[rowS + (sxp | 0)]) continue;      // 镜子那边也是水，就不叠
+          var c0 = buf[mi], c1 = buf[rowS + (sxp | 0)];
+          var ar = (c0 & 255), ag = (c0 >> 8) & 255, ab = (c0 >> 16) & 255;
+          var br = (c1 & 255) * 0.62, bg = ((c1 >> 8) & 255) * 0.64, bb = ((c1 >> 16) & 255) * 0.70;
+          var k = 0.42;
+          var nr = ar + (br - ar) * k, ng = ag + (bg - ag) * k, nb = ab + (bb - ab) * k;
+          buf[mi] = (255 << 24) | ((nb | 0) << 16) | ((ng | 0) << 8) | (nr | 0);
+        }
+      }
+    }
+
     vctx.putImageData(imgData, 0, 0);
   }
 
@@ -1660,7 +1746,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     cam.y = heights[bz * WORLD + bx];
     cam.vy = 0; cam.ground = true;
     yaw = 0;
-    pitch = Math.max(-0.10, Math.min(0.20, (horizFrac - 0.5) * 2 * Math.tan(1.15 / 2)));
+    pitch = Math.max(-0.10, Math.min(0.20, (horizFrac - 0.5) * 2 * TANF));
     introT = 1;      // 开场：先从高处俯视，再落到人眼高度
   }
 

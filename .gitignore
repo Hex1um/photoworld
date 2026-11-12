@@ -6,3 +6,6 @@ thumbs.db
 _d*.html
 _w*.png
 w_*.png
+
+# CI 工作流需要 token 具备 workflow 权限才能推送；拿到权限后删掉下面这行再提交
+.github/workflows/
