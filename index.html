@@ -117,7 +117,7 @@
   /* 扁平 → 像素化立体：先压扁成一条，再逐格跳成立方 */
   @keyframes extrude {
     0% { opacity:0;
-         transform:perspective(640px) translateY(.22em) rotateX(-62deg) scale(.98, .34);
+         transform:perspective(1100px) rotateX(-30deg) skewX(-24deg) scale(1.05, .84);
          text-shadow:
                 0 0 0 rgba(0,0,0,0),
                 0 0 0 rgba(0,0,0,0),
@@ -131,9 +131,10 @@
                 0 0 0 rgba(0,0,0,0),
                 0 0 0 rgba(0,0,0,0),
                 0 0 0 rgba(0,0,0,0); }
-    18% { opacity:1; }
+    20% { opacity:1;
+          transform:perspective(1100px) rotateX(-30deg) skewX(-24deg) scale(1.05, .84); }
     100% { opacity:1;
-           transform:perspective(640px) translateY(0) rotateX(0deg) scale(1, 1);
+           transform:perspective(900px) translateY(0) rotateX(0deg) skewX(0deg) scale(1, 1);
            text-shadow:
                 0.1140em 0.1140em 0 rgb(152,106,44),
                 0.1520em 0.1520em 0 rgb(116,78,30),
@@ -290,7 +291,7 @@ var EXAMPLES = ["data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBAUE
   if (/wflat/.test(location.search)) {
     var wf = document.createElement('style');
     wf.textContent = '.t-name .L{animation:none!important;opacity:1!important;' +
-      'transform:perspective(640px) translateY(.22em) rotateX(-62deg) scale(.98,.34)!important;text-shadow:none!important}';
+      'transform:perspective(1100px) rotateX(-30deg) skewX(-24deg) scale(1.05,.84)!important;text-shadow:none!important}';
     document.head.appendChild(wf);
   }
   // 调试：?wstate=秒 → 把字母的立体化动画冻结在某一时刻，便于截图检查
@@ -800,7 +801,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     }
     var nS = Math.ceil(heights.length / 7);
     var meanC = (sumC / nS) || 1, meanL = (sumL / nS) || 1;
-    var gain = (groundLum * 255) / Math.max(20, meanC * meanL * 0.95);
+    var gain = (groundLum * 255 * 1.28) / Math.max(20, meanC * meanL * 0.95);
     gain = Math.max(0.55, Math.min(2.1, gain));
     for (i = 0; i < heights.length; i++) {
       cR0[i] = Math.min(255, cR0[i] * gain);
@@ -952,7 +953,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
       view.width = RW; view.height = RH;
       imgData = vctx.createImageData(RW, RH);
       buf32 = new Uint32Array(imgData.data.buffer);
-      projScale = (RH / 2) / Math.tan(1.15 / 2);
+      // 垂直投影必须和水平用同一套像素/单位，否则 1×1 的体素在宽屏上会被横向拉长
+      projScale = (RW / 2) / Math.tan(1.15 / 2);
     }
   }
   window.addEventListener('resize', resize);
@@ -975,7 +977,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     if (photoHi && !/nobg/.test(location.search)) {
       var NB = 256;
       var nb2 = NB - 1;
-      var shift = (yaw / 1.15) * nb2;
+      var shift = 0;              // 天空固定，不随转头平移/旋转
       var vScale = NB / H;
       var v0 = horizFrac * NB;
       if (!xMap) xMap = new Uint16Array(Wd);
@@ -1025,6 +1027,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     var maxZ = 230;
 
     for (var sx = 0; sx < Wd; sx++) {
+      var hPrev = -1;
       var u = ((sx + 0.5) / Wd) * 2 - 1;
       var dx = fwdX + rgtX * u * tanf;
       var dz = fwdZ + rgtZ * u * tanf;
@@ -1051,8 +1054,11 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
 
           var y0 = sy | 0; if (y0 < 0) y0 = 0;
           var y1 = yBuf | 0; if (y1 > H) y1 = H;
+          hPrev = h;
 
           // 光照只做轻微调制：照片自己已经带有真实的明暗与阴影
+          // 与更近一格的落差错开 ≥1 时，这一段是人眼看到的"侧面"
+          var wall = (hPrev >= 0 && h - hPrev >= 2);
           var lig = litMap[idx] * aoMap[idx];
           if (lig < 0.30) lig = 0.30; else if (lig > 1.35) lig = 1.35;
           var lMild = 0.66 + 0.34 * lig;
@@ -1062,14 +1068,33 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
           var flatCol = baseD <= 0.8;
           if (baseD < 0.6) baseD = 0.6;
 
+          if (wall && y1 - y0 > 5) {
+            // 立方体侧面：一整个面用同一种暗色，边界干脆
+            var wR = cR[idx] * 0.82, wG = cG[idx] * 0.82, wB = cB[idx] * 0.82;
+            var wsp = (y1 - y0) || 1;
+            for (var wy = y0; wy < y1; wy++) {
+              var wf = 1.0 - 0.22 * (wy - y0) / wsp;    // 上沿最亮，向下压暗
+              var wr = wR * wf + hazeR * 0.12, wg = wG * wf + hazeG * 0.12, wb = wB * wf + hazeB * 0.12;
+              buf[wy * Wd + sx] = (255 << 24) | (((wb > 255 ? 255 : wb) | 0) << 16)
+                                | (((wg > 255 ? 255 : wg) | 0) << 8) | ((wr > 255 ? 255 : wr) | 0);
+            }
+            yBuf = sy;
+            z += step; step *= 1.014;
+            continue;
+          }
+
           for (var yy = y0; yy < y1; yy++) {
             var dyh = (yy + 0.5) - horizon;
             if (dyh < 1.5) dyh = 1.5;
             var zz = flatCol ? z : baseD * projScale / dyh;   // 该像素对应的地面深度
             var wx2 = cam.x + dx * zz, wz2 = cam.z + dz * zz;
+            // 地面用固定世界尺度的平铺纹理，避免透视把照片纵向拉成条纹
+            var TILE = 72;
+            var tu = (wx2 + 4096) / TILE, tv = (wz2 + 4096) / TILE;
+            var uu2 = tu - Math.floor(tu);
+            var vv2 = g0 + (g1v - g0) * (tv - Math.floor(tv));
             var fz3 = PZ - wz2;
-            var uu2, vv2;
-            if (fz3 > 6 && !flatCol) {
+            if (false) {
               uu2 = 0.5 + ((wx2 - PX) / fz3) / (2 * TANF);
               var gk2 = (1.7 / fz3) / (2 * TANF) * 1.1;
               if (gk2 > 1) gk2 = 1;
