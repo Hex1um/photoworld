@@ -14,7 +14,9 @@
          color:#e8e4dc; -webkit-user-select:none; user-select:none; }
   #stage { position:relative; width:100%; height:100%; overflow:hidden; }
   #view { position:absolute; inset:0; width:100%; height:100%; display:block;
-          image-rendering:pixelated; image-rendering:crisp-edges; }
+          /* 注意：这里只能用 pixelated，后面再写 crisp-edges 会把它覆盖掉，
+             低分辨率画布会被平滑放大，整屏发糊 */
+          image-rendering:pixelated; }
 
   #fade { position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
           z-index:5; pointer-events:none; opacity:0; }
@@ -63,13 +65,60 @@
   input[type=range]::-moz-range-thumb { width:12px; height:12px; border:none; border-radius:50%; background:#e2b34a; }
   #panelUI .cap { font-size:9.5px; color:#6f7787; letter-spacing:.08em; margin-top:6px; line-height:1.6; }
 
+  /* ---------- 漂移预设 ---------- */
+  #presets { display:flex; gap:5px; margin:0 0 9px; }
+  .chip { flex:1; font-family:inherit; font-size:9.5px; letter-spacing:.05em; color:#a9a294;
+    background:rgba(200,190,175,.07); border:1px solid rgba(200,190,175,.2); border-radius:99px;
+    padding:4px 0; cursor:pointer; transition:.16s; }
+  .chip:hover { color:#e8e4dc; border-color:rgba(200,190,175,.44); }
+  .chip.on { background:rgba(226,179,74,.22); border-color:rgba(226,179,74,.66); color:#f6e8ca; }
+  #anchorRow { display:flex; align-items:center; justify-content:space-between; gap:6px;
+    margin-top:8px; padding-top:8px; border-top:1px solid rgba(200,190,175,.12); }
+  #anchorBtn { font-family:inherit; font-size:9px; letter-spacing:.06em; color:#cfe0ee; flex:none;
+    background:rgba(120,170,220,.13); border:1px solid rgba(140,190,235,.32); border-radius:5px;
+    padding:4px 7px; cursor:pointer; transition:.16s; }
+  #anchorBtn:hover { background:rgba(120,170,220,.28); border-color:rgba(160,205,245,.6); }
+
+  /* ---------- 小地图 ---------- */
+  #mapwrap { position:absolute; right:12px; bottom:150px; width:96px; pointer-events:none;
+    background:rgba(10,16,26,.55); border:1px solid rgba(200,190,175,.16); border-radius:6px; padding:4px; }
+  #map { width:100%; height:auto; display:block; border-radius:3px; }
+  #hudBtns { position:absolute; right:12px; bottom:118px; display:flex; flex-direction:column;
+    align-items:flex-end; gap:6px; }
+  #hudBtns button { pointer-events:auto; cursor:pointer; font-family:inherit; font-size:10px;
+    letter-spacing:.06em; color:#e8e4dc; background:rgba(10,16,26,.62);
+    border:1px solid rgba(220,210,195,.26); border-radius:5px; padding:5px 9px; transition:.16s; }
+  #hudBtns button:hover { background:rgba(226,179,74,.2); border-color:rgba(226,179,74,.6); }
+
+  /* ---------- 叙事行 ---------- */
+  #story { position:absolute; left:50%; bottom:16px; transform:translateX(-50%); white-space:nowrap;
+    font-size:10.5px; letter-spacing:.14em; color:rgba(228,221,209,.6); pointer-events:none;
+    text-shadow:0 2px 12px rgba(0,0,0,.9); opacity:0; transition:opacity .6s; }
+  #story.show { opacity:1; }
+  #story b { color:#f2e4c6; font-weight:600; font-variant-numeric:tabular-nums; }
+
+  /* ---------- 轻提示 ---------- */
+  #toast { position:absolute; left:50%; top:26%; transform:translate(-50%,-8px); pointer-events:none;
+    font-size:11px; letter-spacing:.16em; color:#e9f2fa; background:rgba(10,18,28,.78);
+    border:1px solid rgba(140,190,235,.34); border-radius:6px; padding:7px 14px;
+    opacity:0; transition:opacity .35s, transform .35s; }
+  #toast.on { opacity:1; transform:translate(-50%,0); }
+
+  /* ---------- 键位提示 ---------- */
+  #hint { position:absolute; right:14px; top:150px; text-align:right; font-size:9px;
+    letter-spacing:.12em; line-height:1.85; color:rgba(228,221,209,.3); }
+  #hint b { color:rgba(228,221,209,.62); font-weight:600; }
+
+  /* ---------- 干净模式：只留世界 ---------- */
+  #hud, #fx { transition:opacity .4s; }
+  body.clean #hud, body.clean #fx { opacity:0; }
+  body.clean #hud { pointer-events:none; }
+
   #thumb { position:absolute; right:12px; bottom:12px; width:82px; padding:4px;
     background:rgba(10,16,26,.6); border:1px solid rgba(200,190,175,.16); border-radius:6px; }
   #thumb img { width:100%; display:block; border-radius:3px; }
   #thumb div { font-size:8.5px; letter-spacing:.14em; color:#7b8595; text-align:center; margin-top:3px; }
-  #again { position:absolute; right:12px; bottom:130px; pointer-events:auto; cursor:pointer;
-    background:rgba(10,16,26,.62); border:1px solid rgba(220,210,195,.28); color:#e8e4dc;
-    border-radius:5px; padding:5px 9px; font-size:10.5px; letter-spacing:.06em; font-family:inherit; }
+  #again { pointer-events:auto; }
 
   /* ---------- 开幕幕（排版节奏对齐 ASTRA·4D） ---------- */
   #panel { position:absolute; inset:0; z-index:30; display:flex; flex-direction:column;
@@ -93,7 +142,7 @@
     font-size:clamp(9.5px,1.25vw,11.5px); letter-spacing:.42em; color:#e2b34a;
     opacity:0; animation:rise 700ms cubic-bezier(.22,1,.36,1) 120ms forwards; }
   .t-kicker em { width:28px; height:1px; background:rgba(226,179,74,.6); font-style:normal; }
-  .t-name { position:relative; font-size:clamp(26px,8.6vw,96px); font-weight:900; line-height:.96;
+  .t-name { position:relative; font-size:clamp(26px,8.0vw,92px); font-weight:900; line-height:.96;
     letter-spacing:-.02em; padding-right:.09em;
     filter:drop-shadow(0 22px 58px rgba(3,6,12,.55));
     opacity:0; animation:fadeIn 520ms ease 180ms forwards; }
@@ -154,8 +203,8 @@
     100% { left:101%; opacity:0; }
   }
   @keyframes fadeIn { from{opacity:0} to{opacity:1} }
-  .t-sub { margin-top:clamp(15px,3vw,28px); font-size:clamp(12.5px,1.65vw,16px); font-weight:300;
-    line-height:1.9; color:rgba(228,221,209,.86); max-width:50ch;
+  .t-sub { margin-top:clamp(22px,4vw,42px); font-size:clamp(12.5px,1.65vw,16px); font-weight:400;
+    line-height:1.85; color:rgba(240,234,224,.92); max-width:64ch;
     opacity:0; animation:rise 800ms cubic-bezier(.22,1,.36,1) 340ms forwards; }
   .t-sub b { font-weight:600; color:#f8f3e9; }
   .t-actions { margin-top:clamp(20px,4vw,34px); display:flex; align-items:center; gap:12px; flex-wrap:wrap;
@@ -207,10 +256,13 @@
     #examples img { width:46px; height:46px; }
     .t-controls { font-size:9.5px; gap:8px; letter-spacing:.1em; }
     #panelUI { left:8px; bottom:8px; width:164px; padding:8px 9px 9px; }
-    #thumb { width:60px; right:8px; bottom:8px; }
-    #again { right:8px; bottom:104px; }
+    #thumb { width:56px; right:8px; bottom:8px; }
+    #hudBtns { right:8px; bottom:100px; }
+    #mapwrap { width:72px; right:8px; bottom:158px; }
     #stats { font-size:9.5px; padding:6px 8px; right:8px; top:8px; }
     #badge { font-size:9px; padding:4px 7px; }
+    #hint { display:none; }
+    #story { font-size:9px; letter-spacing:.1em; bottom:10px; }
   }
 </style>
 </head>
@@ -226,15 +278,21 @@
       推理 <b id="s-ms">--</b> ms<br>
       体素 <b id="s-vox">0</b><br>
       地块 <b id="s-cell">0</b><br>
-      改写 <b id="s-chg">0</b>/s<br>
+      改写 <b id="s-chg">0</b> 格<br>
       FPS <b id="s-fps">--</b>
     </div>
+    <div id="hint"><b>H</b> 隐藏界面<br><b>E</b> 锚定记忆<br><b>双击空格</b> 飞行</div>
     <div id="cross"></div>
 
     <div id="panelUI">
       <div class="row">
         <span class="lab">实时变化</span>
         <span class="sw" id="sw"><i></i></span>
+      </div>
+      <div id="presets">
+        <button class="chip" data-p="calm">宁静</button>
+        <button class="chip" data-p="dream">梦游</button>
+        <button class="chip" data-p="ruin">崩坏</button>
       </div>
       <div id="sliders" class="off">
         <div class="row"><span class="lab">混乱度</span><span class="val" id="v-chaos">0.45</span></div>
@@ -243,10 +301,21 @@
         <input type="range" id="r-mem" min="0" max="100" value="35">
       </div>
       <div class="cap">混乱度越高，地形重排越剧烈<br>记忆力为 0 时只根据上一帧生成<br>（马尔可夫链，不再参考照片）</div>
+      <div id="anchorRow">
+        <span class="lab">记忆锚点 <b id="v-anchor" style="color:#cfe0ee">0</b></span>
+        <button id="anchorBtn">锚定这里</button>
+      </div>
     </div>
 
+    <div id="hudBtns">
+      <button id="shot">存对比图</button>
+      <button id="again">换一张</button>
+    </div>
+    <div id="mapwrap"><canvas id="map" width="128" height="128"></canvas></div>
+    <div id="story"></div>
+    <div id="toast"></div>
+
     <div id="thumb"><img id="thumbimg" alt=""><div>输入</div></div>
-    <button id="again">换一张</button>
   </div>
 
   <div id="panel">
@@ -263,7 +332,7 @@
       <div id="drop">也可以直接把照片拖进这个窗口</div>
       <div id="examples"><span id="examples-note">示例</span></div>
       <div class="t-controls">
-        <span>左半屏 行走</span><i></i><span>右半屏 转视角</span><i></i><span>WASD 移动</span><i></i><span>实时变化 开关</span>
+        <span>WASD 移动</span><i></i><span>空格 跳 · 双击 飞</span><i></i><span>E 锚定记忆</span><i></i><span>H 隐藏界面</span>
       </div>
     </div>
     <div class="t-foot">零依赖 · 浏览器内推理 · 混乱度 / 记忆力</div>
@@ -323,9 +392,30 @@
   var cB = new Uint8ClampedArray(WORLD * WORLD);
   var litMap = new Float32Array(WORLD * WORLD);   // 每格静态光照（含投影阴影）
   var aoMap = new Float32Array(WORLD * WORLD);    // 环境光遮蔽（洼地更暗）
+  var tintMap = new Float32Array(WORLD * WORLD);  // 0=受光偏暖 1=背光/阴影偏冷
+  var anchorMap = new Float32Array(WORLD * WORLD);// 记忆锚点：1=钉死在原照片上
+  var waterMap = new Uint8Array(WORLD * WORLD);   // 水面标记
+  var waterLevel = 0.5;                           // 水面高度
+  var fogTop = 6;                                 // 积雾高度上限（低于它的洼地会起雾）
   var cR0 = new Uint8ClampedArray(WORLD * WORLD);
   var cG0 = new Uint8ClampedArray(WORLD * WORLD);
   var cB0 = new Uint8ClampedArray(WORLD * WORLD);
+
+  /* 后期色调映射：暗部轻压、高光柔化。输入 0..2.0（索引 511），
+     所以超过 255 的高光也有过渡，而不是硬截断成一片死白。 */
+  var TONE = new Uint8Array(512);
+  (function () {
+    for (var ti = 0; ti < 512; ti++) {
+      var x = ti / 255, y;
+      if (x <= 0.72) y = x * (0.96 + 0.055 * x);       // 暗部略压，黑更实
+      else {
+        var t = (x - 0.72) / 0.62; if (t > 1) t = 1;
+        y = 0.72 + 0.28 * (1 - Math.pow(1 - t, 2.1));   // 肩部平缓，高光不死白
+      }
+      TONE[ti] = Math.max(0, Math.min(255, y * 255)) | 0;
+    }
+  })();
+  function tm(v) { return TONE[v < 0 ? 0 : (v > 511 ? 511 : v | 0)]; }
 
   var view = document.getElementById('view');
   var vctx = view.getContext('2d');
@@ -562,6 +652,40 @@
     return (a + (b - a) * fc) * (1 - fr) + (d + (e - d) * fc) * fr;
   }
 
+  /* ---------------- 水面：低洼 + 平坦 + 偏蓝，三个条件同时满足才认 ----------------
+     判定不可信（占比过少或过多）就整体放弃，宁可没有水，也不能把草地画成海。 */
+  function detectWater() {
+    var x, z, i, n = 0;
+    for (i = 0; i < waterMap.length; i++) waterMap[i] = 0;
+    for (z = 2; z < WORLD - 2; z++) {
+      for (x = 2; x < WORLD - 2; x++) {
+        i = z * WORLD + x;
+        if (baseH[i] > 3.2) continue;
+        var hL = baseH[i - 1], hR = baseH[i + 1], hU = baseH[i - WORLD], hD = baseH[i + WORLD];
+        var mxs = hL > hR ? hL : hR, mns = hL < hR ? hL : hR;
+        if (hU > mxs) mxs = hU; if (hD > mxs) mxs = hD;
+        if (hU < mns) mns = hU; if (hD < mns) mns = hD;
+        if (mxs - mns > 1.6) continue;                       // 不平 → 不是水面
+        var r = cR0[i], g = cG0[i], b = cB0[i];
+        if (!(b > r * 1.06 && b > g * 0.94)) continue;       // 不够蓝 → 是草地/岩石
+        waterMap[i] = 1; n++;
+      }
+    }
+    var frac = n / (WORLD * WORLD);
+    if (frac < 0.012 || frac > 0.62) {                        // 判定不可信，整体放弃
+      for (i = 0; i < waterMap.length; i++) waterMap[i] = 0;
+      waterLevel = 0.5;
+      return 0;
+    }
+    // 水位取这些格子的 82 分位，让水淹过洼地的凹凸，看起来是一整片
+    var hs = [];
+    for (i = 0; i < waterMap.length; i++) if (waterMap[i]) hs.push(baseH[i]);
+    hs.sort(function (a, b) { return a - b; });
+    waterLevel = (hs[Math.floor(hs.length * 0.82)] || 2) + 0.4;
+    if (waterLevel < 1.4) waterLevel = 1.4;
+    return frac;
+  }
+
   function buildWorld(PH, PC, avg) {
     var x, z, i;
     var tmpc = [0, 0, 0];
@@ -715,6 +839,19 @@
       }
     }
 
+    /* ---------- 水面与积雾高度 ---------- */
+    // 锚点每张照片重建时都要清空，否则上一张的记忆会串到这张
+    for (i = 0; i < anchorMap.length; i++) anchorMap[i] = 0;
+    detectWater();
+    // 积雾高度：只用最低的那一小撮洼地起雾。取 15/85 分位的相对位置，
+    // 否则"整片世界都很低"的照片会被雾整片糊掉
+    var hsamp = [];
+    for (i = 0; i < heights.length; i += 11) hsamp.push(baseH[i]);
+    hsamp.sort(function (a, b) { return a - b; });
+    var p15 = hsamp[Math.floor(hsamp.length * 0.15)] || 1;
+    var p85 = hsamp[Math.floor(hsamp.length * 0.85)] || HMAX;
+    fogTop = p15 + Math.max(0.9, (p85 - p15) * 0.17);
+
     buildLighting();
 
     // 自动曝光 + 白平衡：让世界的整体亮度和色相都对齐照片的地面色
@@ -770,14 +907,28 @@
         var diff = (nx / nl) * sunX + (1 / nl) * sunY + (nz / nl) * sunZ;
         if (diff < 0) diff = 0;
 
-        // 朝太阳方向步进，被更高地形挡住就是阴影
-        var shadow = 1;
-        for (var t = 1.2; t < 15; t += 1.2) {
+        // 朝太阳方向连续步进，记录最大的"遮挡高度"而不是碰到就断。
+        // 遮挡量 → 半影：贴着的山脚是柔和渐变，不再是一条硬边。
+        var occ = -1;
+        for (var t = 0.8; t < 16; t += 1.1) {
           var sx2 = Math.round(x + sunHX * t), sz2 = Math.round(z + sunHZ * t);
           if (sx2 < 0 || sx2 >= WORLD || sz2 < 0 || sz2 >= WORLD) break;
-          if (baseH[sz2 * WORLD + sx2] > h + sunSlope * t + 0.5) { shadow = 0.46; break; }
+          var ov = baseH[sz2 * WORLD + sx2] - (h + sunSlope * t);
+          if (ov > occ) occ = ov;
         }
-        litMap[i] = Math.min(1.46, 0.40 + 0.86 * diff) * shadow;
+        var pen;                                    // 1 = 全受光，0 = 全遮挡
+        if (occ <= 0) pen = 1;
+        else if (occ >= 3.4) pen = 0;
+        else { pen = 1 - occ / 3.4; pen = pen * pen * (3 - 2 * pen); }
+
+        // 归一化：水平朝上的地面在太阳直射下 ≈ 1（否则平地会被当成"背光"，整屏发蓝）
+        var ndl = diff / (sunY > 0.35 ? sunY : 0.35);
+        if (ndl > 1) ndl = 1;
+        var shadow = 0.62 + 0.38 * pen;             // 阴影只压到 0.62，暗部交给冷色去补
+        litMap[i] = (0.62 + 0.56 * ndl) * shadow;
+        // 冷暖：正对太阳 → 暖；背光/阴影 → 冷（平方分布让大部分地面留在暖侧）
+        var litK = ndl * pen;
+        tintMap[i] = 1 - litK * litK;
       }
     }
   }
@@ -793,8 +944,12 @@
     var nl = Math.sqrt(nx * nx + 1 + nz * nz);
     var diff = (nx / nl) * sunX + (1 / nl) * sunY + (nz / nl) * sunZ;
     if (diff < 0) diff = 0;
-    var tgt = Math.min(1.46, 0.40 + 0.86 * diff);
+    var ndl = diff / (sunY > 0.35 ? sunY : 0.35);
+    if (ndl > 1) ndl = 1;
+    var tgt = 0.62 + 0.56 * ndl;
     litMap[i] += (tgt - litMap[i]) * 0.06;    // 缓慢跟随，杜绝亮度突跳
+    var tnt = 1 - ndl * ndl;
+    tintMap[i] += (tnt - tintMap[i]) * 0.06;
   }
 
   /* ---------------- 实时变化 ---------------- */
@@ -802,6 +957,7 @@
   var tick = 0, cursor = 0, CHUNK = 9000;
 
   var chgAcc = 0;
+  var rewriteTotal = 0;      // 累计改写次数（叙事用，不随时间清零）
 
   function driftStep(dt) {
     if (!live) return;
@@ -822,14 +978,20 @@
     for (var i = cursor; i < end; i++) {
       var x = i % WORLD, z = (i / WORLD) | 0;
       var cur = heights[i];
+      // 记忆锚点：这一格被钉在照片上，周围照旧崩坏 —— 全局 mem 只是下限
+      var aMap = anchorMap[i];
+      var anchorI = aMap > anchor ? aMap : anchor;
+      var ampI = amp * (1 - (anchorI - anchor) * 0.92);
+      var forgetI = 1 - anchorI;
       // 噪声只朝一个方向平移（不再沿对角/反向，避免看起来像在旋转）
       var nz2 = (fbm(x * freq + tick * 0.30, z * freq + tick * 0.18, seedMap + 77) - 0.5) * 2
               + (fbm(x * 0.022 + tick * 0.14, z * 0.022 + tick * 0.09, seedMap + 133) - 0.5);
       var ddx = x - cam.x, ddz = z - cam.z;
       var dd = Math.sqrt(ddx * ddx + ddz * ddz);
       var nf = dd < 30 ? (0.26 + 0.74 * (dd / 30)) : 1;
-      var tgt = baseH[i] * anchor + cur * (1 - anchor) + nz2 * amp * nf;
-      var center = baseH[i] * anchor + (HMAX * 0.5) * (1 - anchor);
+      var tgt = baseH[i] * anchorI + cur * (1 - anchorI) + nz2 * ampI * nf;
+      var center = baseH[i] * anchorI + (HMAX * 0.5) * (1 - anchorI);
+      var devLim = 9 + (1 - anchorI) * 12;
       var lo = center - devLim, hi = center + devLim;
       if (tgt < lo) tgt = lo;
       if (tgt > hi) tgt = hi;
@@ -845,6 +1007,7 @@
       relightCell(i);
 
       // 颜色不再逐帧抖动亮度：只随"遗忘程度"把配色缓缓推向一个更灰、更冷的版本
+      var forget = forgetI;
       if (forget > 0.01) {
         var l0 = cR0[i] * 0.3 + cG0[i] * 0.59 + cB0[i] * 0.11;
         var cool = 0.86, warm = 1.02;
@@ -966,6 +1129,10 @@
   var cam = { x: PX + 0.5, y: 20, z: PZ + 0.5, vy: 0, ground: true };
   var yaw = 0, pitch = -0.05;
   var keys = {}, vel = { x: 0, z: 0 }, started = false;
+  var clock = 0;          // 秒，给水面波纹用
+  var introT = 0;         // 开场运镜：1 → 0
+  var fly = false;        // 自由飞行
+  var anchorN = 0;        // 锚点次数
 
   function groundAt(wx, wz) {
     var ix = wx | 0, iz = wz | 0;
@@ -975,9 +1142,9 @@
 
   function resize() {
     var cw = window.innerWidth, chh = window.innerHeight;
-    var targetW = Math.round((cw < 700 ? 400 : 640) * quality);
+    var targetW = Math.round((cw < 700 ? 420 : 780) * quality);
     var targetH = Math.round(targetW * chh / cw);
-    var px = targetW * targetH, cap = 340000 * quality * quality;
+    var px = targetW * targetH, cap = 420000 * quality * quality;
     if (px > cap) {
       var sc2 = Math.sqrt(cap / px);
       targetW = Math.max(120, Math.round(targetW * sc2));
@@ -1001,8 +1168,9 @@
     // 默认走稳定的体素渲染；图像重投影属于实验特性，用 ?dibr=1 打开
     if (/dibr/.test(location.search) && dibrReady) { renderDIBR(); return; }
     var H = RH, Wd = RW, buf = buf32;
-    var horizon = H * 0.5 + pitch * projScale;
-    var camY = cam.y + 1.62;
+    var iE = introT * introT * (3 - 2 * introT);          // 开场运镜强度 1 → 0
+    var horizon = H * 0.5 + (pitch + iE * 0.085) * projScale;
+    var camY = cam.y + 1.62 + iE * 7.5;
 
     var hR = skyHor[0], hG = skyHor[1], hB = skyHor[2];
     // 雾色：照片地平线色，掺一点天顶色，保证远近同一天光
@@ -1023,7 +1191,7 @@
         var t2 = Math.min(1, kk * 3.0);
         tr = 190 + 18 * t2; tg = 219 + 8 * t2; tb = 246 - 14 * t2;
       }
-      buf.fill((255 << 24) | ((tb | 0) << 16) | ((tg | 0) << 8) | (tr | 0), y3 * Wd, y3 * Wd + Wd);
+      buf.fill((255 << 24) | (tm(tb) << 16) | (tm(tg) << 8) | tm(tr), y3 * Wd, y3 * Wd + Wd);
     }
     // 远处的雾也混向这层蓝天
     hazeR = 170; hazeG = 200; hazeB = 228;
@@ -1052,41 +1220,49 @@
         if (ix < 0 || ix >= WORLD || iz < 0 || iz >= WORLD) break;
         var idx = iz * WORLD + ix;
         var h = heights[idx];
-        var sy = horizon + (camY - h) * projScale / z;
+        var isW = waterMap[idx];
+        // 水面画在一个统一高度上，洼地被水填平
+        var hs2 = (isW && h < waterLevel) ? waterLevel : h;
+        var sy = horizon + (camY - hs2) * projScale / z;
         if (sy < yBuf) {
           // 大气雾：只混向"照片地平线色"，不再采到天空/云，避免山脊被天空色切成浅色块
           var haze = (z - 85) / 200;
           if (haze < 0) haze = 0; else if (haze > 0.60) haze = 0.60;
 
-          // 静态光照（方向来自照片）+ 环境光遮蔽，逐帧一致，不会闪
-          var sh = litMap[idx] * aoMap[idx];
-          if (sh < 0.20) sh = 0.20; else if (sh > 1.62) sh = 1.62;
-
           var y0 = sy | 0; if (y0 < 0) y0 = 0;
           var y1 = yBuf | 0; if (y1 > H) y1 = H;
-          hPrev = h;
 
-          // 光照只做轻微调制：照片自己已经带有真实的明暗与阴影
           // 与更近一格的落差错开 ≥1 时，这一段是人眼看到的"侧面"
-          var wall = (hPrev >= 0 && h - hPrev >= 1);
+          // （原来的写法先覆盖了 hPrev 再比较，条件永远不成立，侧面从没画出来过）
+          var wall = (hPrev >= 0 && hs2 - hPrev >= 1);
+          hPrev = hs2;
+
           var lig = litMap[idx] * aoMap[idx];
           if (lig < 0.30) lig = 0.30; else if (lig > 1.35) lig = 1.35;
           var lMild = 0.66 + 0.34 * lig;
-          var hCell = h;
-          var baseD = camY - hCell;
+          // 冷暖分离：受光面偏暖、背光面偏冷。这是"高级感"最便宜的来源
+          var tnt = tintMap[idx];
+          var tR = 1.046 - 0.118 * tnt, tG = 1.008 - 0.040 * tnt, tB = 0.968 + 0.096 * tnt;
+          // 高度雾：低于雾线的洼地积水成雾海，山脊露在外面
+          var hFog = (fogTop - hs2) / 4.5;
+          if (hFog < 0) hFog = 0; else if (hFog > 1) hFog = 1;
+          hFog *= hFog;
+
+          var baseD = camY - hs2;
           // 地形高过眼睛时，平面反投影无解（会拉出竖条），这一列改用平面纹理
           var flatCol = baseD <= 0.8;
           if (baseD < 0.6) baseD = 0.6;
 
           if (wall && y1 - y0 > 3) {
             // 立方体侧面：一整个面用同一种暗色，边界干脆
-            var wR = cR[idx] * 0.82, wG = cG[idx] * 0.82, wB = cB[idx] * 0.82;
+            var wR = cR[idx] * 0.78 * tR * (0.86 + 0.14 * tnt);
+            var wG = cG[idx] * 0.78 * tG * (0.90 + 0.10 * tnt);
+            var wB = cB[idx] * 0.78 * tB * (1.0);
             var wsp = (y1 - y0) || 1;
             for (var wy = y0; wy < y1; wy++) {
-              var wf = 1.0 - 0.22 * (wy - y0) / wsp;    // 上沿最亮，向下压暗
+              var wf = 1.0 - 0.26 * (wy - y0) / wsp;    // 上沿最亮，向下压暗
               var wr = wR * wf + hazeR * 0.12, wg = wG * wf + hazeG * 0.12, wb = wB * wf + hazeB * 0.12;
-              buf[wy * Wd + sx] = (255 << 24) | (((wb > 255 ? 255 : wb) | 0) << 16)
-                                | (((wg > 255 ? 255 : wg) | 0) << 8) | ((wr > 255 ? 255 : wr) | 0);
+              buf[wy * Wd + sx] = (255 << 24) | (tm(wb) << 16) | (tm(wg) << 8) | tm(wr);
             }
             yBuf = sy;
             z += step; step *= 1.014;
@@ -1097,18 +1273,32 @@
             var dyh = (yy + 0.5) - horizon;
             if (dyh < 1.5) dyh = 1.5;
             var zz = flatCol ? z : baseD * projScale / dyh;   // 该像素对应的地面深度
-            var wx2 = cam.x + dx * zz, wz2 = cam.z + dz * zz;
-            // 地表颜色来自模型推理的颜色头（而不是把照片贴在平面上）
+            // 距离雾 + 高度雾（低洼处更浓）
             var hzp = (zz - 150) / 240;
             if (hzp < 0) hzp = 0; else if (hzp > 0.34) hzp = 0.34;
-            var lp = lMild * (1.04 - 0.14 * (yy - y0) / Math.max(1, y1 - y0));
-            var r4 = cR[idx] * lp, g4 = cG[idx] * lp, b4 = cB[idx] * lp;
+            if (hFog > 0) {
+              var hfD = (zz - 18) / 38;
+              if (hfD < 0) hfD = 0; else if (hfD > 1) hfD = 1;
+              hzp += (1 - hzp) * hFog * hfD * 0.50;
+              if (hzp > 0.74) hzp = 0.74;
+            }
+            var lp2 = lMild * (1.04 - 0.14 * (yy - y0) / Math.max(1, y1 - y0));
+            if (yy >= y1 - 2) lp2 *= 0.90;                    // 方块下沿压暗，出立体节奏
+            var r4 = cR[idx] * lp2 * tR, g4 = cG[idx] * lp2 * tG, b4 = cB[idx] * lp2 * tB;
+            if (isW) {
+              // 水面：滚动波纹 + 稀疏波光（越远越弱，避免远处整片发白）
+              var rp = fbm(ix * 0.42 + clock * 0.55, iz * 0.42 + clock * 0.30, seedMap + 61);
+              r4 *= 0.92 + rp * 0.16; g4 *= 0.95 + rp * 0.13; b4 *= 1.0 + rp * 0.08;
+              if (rp > 0.60) {
+                var spn = (rp - 0.60) * 2.4 * (1 - (zz > 150 ? 1 : zz / 150)) * 115;
+                r4 += spn; g4 += spn * 0.97; b4 += spn * 0.80;
+              }
+            }
             var nh = 1 - hzp;
             r4 = r4 * nh + hazeR * hzp;
             g4 = g4 * nh + hazeG * hzp;
             b4 = b4 * nh + hazeB * hzp;
-            buf[yy * Wd + sx] = (255 << 24) | (((b4 > 255 ? 255 : b4) | 0) << 16)
-                              | (((g4 > 255 ? 255 : g4) | 0) << 8) | ((r4 > 255 ? 255 : r4) | 0);
+            buf[yy * Wd + sx] = (255 << 24) | (tm(b4) << 16) | (tm(g4) << 8) | tm(r4);
           }
           yBuf = sy;
         }
@@ -1144,9 +1334,18 @@
   window.addEventListener('keydown', function (e) {
     var k = e.key.toLowerCase();
     keys[k] = true;
-    if (k === ' ') { if (cam.ground) { cam.vy = 6.4; cam.ground = false; } e.preventDefault(); }
+    if (k === ' ' && !e.repeat) {
+      var now0 = performance.now();
+      if (now0 - lastSpaceT < 340) { setFly(!fly); lastSpaceT = 0; }
+      else { lastSpaceT = now0; if (!fly && cam.ground) { cam.vy = 6.4; cam.ground = false; } }
+      e.preventDefault();
+    }
+    if (e.repeat) return;
+    if (k === 'h') toggleClean();
+    if (k === 'e' && started) anchorHere();
   });
   window.addEventListener('keyup', function (e) { keys[e.key.toLowerCase()] = false; });
+  var lastSpaceT = 0;
 
   var touchMove = { x: 0, y: 0 }, stickId = null, lookId = null, lp = { x: 0, y: 0 }, stickC = { x: 0, y: 0 };
   view.addEventListener('touchstart', function (e) {
@@ -1194,6 +1393,25 @@
   var hud = document.getElementById('hud');
   var prev = document.getElementById('prev');
 
+  /* 加载时滚动的碎语：成本≈0，性格 +100 */
+  var loadPh = ['正在想象山的另一边…', '给水面留一点光…', '把地平线往后推一点…', '核对阴影的方向…', '正在忘掉照片的边框…'];
+  var loadPhI = 0, loadTimer = 0, stageTxt = '正在重建这个空间';
+  function setStage(t) {
+    stageTxt = t;
+    barTxt.textContent = t + ' · ' + loadPh[loadPhI % loadPh.length];
+  }
+  function startLoadPhrases() {
+    if (loadTimer) clearInterval(loadTimer);
+    loadTimer = setInterval(function () {
+      loadPhI++;
+      barTxt.textContent = stageTxt + ' · ' + loadPh[loadPhI % loadPh.length];
+    }, 950);
+  }
+  function stopLoadPhrases() {
+    if (loadTimer) clearInterval(loadTimer);
+    loadTimer = 0;
+  }
+
   function readFile(file) {
     if (!file) return;
     var url = URL.createObjectURL(file);
@@ -1210,13 +1428,18 @@
 
   function run(img, url) {
     curUrl = url;
+    // 每张新照片都是一局新的：锚点、累计改写、飞行状态全部归零
+    anchorN = 0; rewriteTotal = 0; fly = false;
+    document.getElementById('v-anchor').textContent = '0';
     panel.classList.add('gone');
     setTimeout(function () {
       if (panel.classList.contains('gone')) panel.style.display = 'none';
     }, 600);
     busy.style.display = 'flex';
     bar.style.width = '6%';
-    barTxt.textContent = '读取像素';
+    loadPhI = 0;
+    setStage('读取像素');
+    startLoadPhrases();
     setTimeout(function () {
       prev.width = 96; prev.height = 96;
       var g = prev.getContext('2d');
@@ -1246,7 +1469,7 @@
       }
       analyzeShading();
       bar.style.width = '28%';
-      barTxt.textContent = '模型推理';
+      setStage('模型推理');
 
       setTimeout(function () {
         var t0 = performance.now();
@@ -1271,13 +1494,14 @@
           }
         }
         bar.style.width = '64%';
-        barTxt.textContent = '构建世界';
+        setStage('构建世界');
         setTimeout(function () {
           var sd = location.search.match(/seed=([0-9]+)/);
           seedMap = sd ? (parseInt(sd[1], 10) || 7) : (1 + Math.floor(Math.random() * 99999));
           buildWorld(PHl, PCl, avg);
           bar.style.width = '100%';
           setTimeout(function () {
+            stopLoadPhrases();
             busy.style.display = 'none';
             hud.style.display = 'block';
             document.getElementById('thumbimg').src = url;
@@ -1285,7 +1509,9 @@
             land();
             fadeIn(curUrl);
             started = true;
+            drawMap();
             if (/live/.test(location.search)) setLive(true);
+            else updateStory();
             var ssm = location.search.match(/sim=([0-9.]+)/);
             if (ssm && window.__simFrames) window.__simFrames(parseFloat(ssm[1]));
           }, 100);
@@ -1296,9 +1522,10 @@
 
   var curUrl = null;
   var fadeA = 0, fadeOn = false, fadeStart = 0;
+  var noFade = /nofade/.test(location.search);     // 调试：截图时跳过照片淡出
   var fadeEl = document.getElementById('fade');
   function fadeIn(url) {
-    if (!url) { fadeEl.style.opacity = '0'; fadeOn = false; return; }
+    if (!url || noFade) { fadeEl.style.opacity = '0'; fadeOn = false; return; }
     fadeEl.src = url;
     fadeA = 1; fadeOn = true; fadeStart = performance.now();
     fadeEl.style.opacity = '1';
@@ -1320,6 +1547,7 @@
     cam.vy = 0; cam.ground = true;
     yaw = 0;
     pitch = Math.max(-0.10, Math.min(0.20, (horizFrac - 0.5) * 2 * Math.tan(1.15 / 2)));
+    introT = 1;      // 开场：先从高处俯视，再落到人眼高度
   }
 
   /* ---------------- 主循环 ---------------- */
@@ -1351,6 +1579,8 @@
     lastT = now;
 
     if (started) {
+      clock += dt;
+      if (introT > 0) introT = Math.max(0, introT - dt / 1.9);
       var speed = keys['shift'] ? 11 : 5.6;
       var mz = (keys['w'] ? 1 : 0) - (keys['s'] ? 1 : 0);
       var mx = (keys['d'] ? 1 : 0) - (keys['a'] ? 1 : 0);
@@ -1359,24 +1589,44 @@
       if (len > 1) { mx /= len; mz /= len; }
       var fx = -Math.sin(yaw), fz = -Math.cos(yaw);
       var rx = Math.cos(yaw), rz = -Math.sin(yaw);
-      var tx = (fx * mz + rx * mx) * speed, tz = (fz * mz + rz * mx) * speed;
-      vel.x += (tx - vel.x) * Math.min(1, dt * 14);
-      vel.z += (tz - vel.z) * Math.min(1, dt * 14);
 
-      var nx = cam.x + vel.x * dt, nz = cam.z + vel.z * dt;
-      var gh = groundAt(nx, nz);
-      if (gh >= 0 && gh <= cam.y + 1.05) { cam.x = nx; cam.z = nz; }
-      else {
-        var gx = groundAt(cam.x + vel.x * dt, cam.z);
-        if (gx >= 0 && gx <= cam.y + 1.05) cam.x += vel.x * dt; else vel.x = 0;
-        var gz = groundAt(cam.x, cam.z + vel.z * dt);
-        if (gz >= 0 && gz <= cam.y + 1.05) cam.z += vel.z * dt; else vel.z = 0;
+      if (fly) {
+        // 自由飞行：沿视线方向走，空格上升，Shift 加速
+        var fs = keys['shift'] ? 26 : 12;
+        var cp = Math.cos(pitch), sp2 = Math.sin(pitch);
+        var tvx = (fx * cp * mz + rx * mx) * fs;
+        var tvz = (fz * cp * mz + rz * mx) * fs;
+        vel.x += (tvx - vel.x) * Math.min(1, dt * 8);
+        vel.z += (tvz - vel.z) * Math.min(1, dt * 8);
+        cam.x += vel.x * dt; cam.z += vel.z * dt;
+        cam.y += (sp2 * mz * fs + (keys[' '] ? 10 : 0)) * dt;
+        if (cam.x < 1) cam.x = 1; else if (cam.x > WORLD - 2) cam.x = WORLD - 2;
+        if (cam.z < 1) cam.z = 1; else if (cam.z > WORLD - 2) cam.z = WORLD - 2;
+        var gf = groundAt(cam.x, cam.z);
+        if (gf < 0) gf = 1;
+        if (cam.y < gf) cam.y = gf;
+        if (cam.y > 170) cam.y = 170;
+        cam.vy = 0; cam.ground = false;
+      } else {
+        var tx = (fx * mz + rx * mx) * speed, tz = (fz * mz + rz * mx) * speed;
+        vel.x += (tx - vel.x) * Math.min(1, dt * 14);
+        vel.z += (tz - vel.z) * Math.min(1, dt * 14);
+
+        var nx = cam.x + vel.x * dt, nz = cam.z + vel.z * dt;
+        var gh = groundAt(nx, nz);
+        if (gh >= 0 && gh <= cam.y + 1.05) { cam.x = nx; cam.z = nz; }
+        else {
+          var gx = groundAt(cam.x + vel.x * dt, cam.z);
+          if (gx >= 0 && gx <= cam.y + 1.05) cam.x += vel.x * dt; else vel.x = 0;
+          var gz = groundAt(cam.x, cam.z + vel.z * dt);
+          if (gz >= 0 && gz <= cam.y + 1.05) cam.z += vel.z * dt; else vel.z = 0;
+        }
+        cam.vy -= 22 * dt;
+        cam.y += cam.vy * dt;
+        var g2 = groundAt(cam.x, cam.z);
+        if (g2 < 0) g2 = 1;
+        if (cam.y <= g2) { cam.y = g2; cam.vy = 0; cam.ground = true; } else cam.ground = false;
       }
-      cam.vy -= 22 * dt;
-      cam.y += cam.vy * dt;
-      var g2 = groundAt(cam.x, cam.z);
-      if (g2 < 0) g2 = 1;
-      if (cam.y <= g2) { cam.y = g2; cam.vy = 0; cam.ground = true; } else cam.ground = false;
 
       driftAcc += dt;
       if (driftAcc > 0.033) { driftStep(driftAcc); driftAcc = 0; }
@@ -1401,6 +1651,8 @@
       fadeEl.style.opacity = fadeA > 0 ? fadeA.toFixed(3) : '0';
     }
 
+    if (storyHide && now > storyHide) { storyHide = 0; storyEl.classList.remove('show'); }
+
     qAvg = qAvg * 0.9 + dt * 1000 * 0.1;
     qTimer += dt;
     if (qTimer > 1.6) {
@@ -1414,8 +1666,11 @@
       hudT = now;
       if (started) {
         document.getElementById('s-fps').textContent = fpsA > 0.05 ? Math.round(fpsN / fpsA) : 0;
-        document.getElementById('s-chg').textContent = Math.round(chgAcc * 2);
+        rewriteTotal += chgAcc;
+        document.getElementById('s-chg').textContent = Math.round(rewriteTotal).toLocaleString('en-US');
         chgAcc = 0;
+        updateStory();
+        drawMap();
       }
       fpsA = 0; fpsN = 0;
     }
@@ -1470,7 +1725,8 @@
     sw.className = 'sw' + (live ? ' on' : '');
     sliders.className = live ? '' : 'off';
     dot.className = live ? 'live' : '';
-    badgeTxt.textContent = live ? 'PHOTO → WORLD · 实时变化中' : 'PHOTO → WORLD · 本地模型';
+    if (!fly) badgeTxt.textContent = live ? 'PHOTO → WORLD · 实时变化中' : 'PHOTO → WORLD · 本地模型';
+    updateStory();
   }
   sw.addEventListener('click', function () { setLive(!live); });
 
@@ -1478,13 +1734,196 @@
   rc.addEventListener('input', function () {
     chaos = +rc.value / 100;
     document.getElementById('v-chaos').textContent = chaos.toFixed(2);
+    markChips('');
   });
   rm.addEventListener('input', function () {
     mem = +rm.value / 100;
     document.getElementById('v-mem').textContent = mem.toFixed(2);
+    markChips('');
   });
   document.getElementById('v-chaos').textContent = chaos.toFixed(2);
   document.getElementById('v-mem').textContent = mem.toFixed(2);
+
+  /* ---------------- 预设 ---------------- */
+  var PRESETS = {
+    calm:  { chaos: 0.15, mem: 0.85, label: '宁静' },
+    dream: { chaos: 0.45, mem: 0.35, label: '梦游' },
+    ruin:  { chaos: 0.92, mem: 0.05, label: '崩坏' }
+  };
+  var chips = document.querySelectorAll('#presets .chip');
+  function markChips(key) {
+    for (var ci = 0; ci < chips.length; ci++) {
+      chips[ci].className = 'chip' + (chips[ci].getAttribute('data-p') === key ? ' on' : '');
+    }
+  }
+  function applyPreset(key) {
+    var p = PRESETS[key];
+    if (!p) return;
+    chaos = p.chaos; mem = p.mem;
+    rc.value = Math.round(chaos * 100); rm.value = Math.round(mem * 100);
+    document.getElementById('v-chaos').textContent = chaos.toFixed(2);
+    document.getElementById('v-mem').textContent = mem.toFixed(2);
+    markChips(key);
+    if (!live) setLive(true);
+    toast('预设 · ' + p.label);
+  }
+  for (var cn = 0; cn < chips.length; cn++) {
+    (function (btn) {
+      btn.addEventListener('click', function () { applyPreset(btn.getAttribute('data-p')); });
+    })(chips[cn]);
+  }
+
+  /* ---------------- 小地图 ---------------- */
+  var mapCv = document.getElementById('map');
+  var mapCtx = mapCv.getContext('2d');
+  var mapImg = mapCtx.createImageData(128, 128);
+  var mapBuf = new Uint32Array(mapImg.data.buffer);
+  function drawMap() {
+    if (!started) return;
+    var st = WORLD / 128;
+    for (var mj = 0; mj < 128; mj++) {
+      var wz0 = (mj * st) | 0;
+      var row = mj * 128;
+      for (var mi = 0; mi < 128; mi++) {
+        var ii = wz0 * WORLD + ((mi * st) | 0);
+        var hh = heights[ii];
+        var l = 24 + (hh / HMAX) * 150;
+        var rr = l * 0.88, gg = l * 0.95, bb = l * 1.02;
+        if (waterMap[ii]) { rr = 32; gg = 76; bb = 116; }
+        if (anchorMap[ii] > 0.35) { rr = 92; gg = 194; bb = 232; }
+        mapBuf[row + mi] = (255 << 24) | ((bb | 0) << 16) | ((gg | 0) << 8) | (rr | 0);
+      }
+    }
+    var pmi = (cam.x / st) | 0, pmj = (cam.z / st) | 0;
+    for (var dz4 = -1; dz4 <= 1; dz4++) {
+      for (var dx4 = -1; dx4 <= 1; dx4++) {
+        var px4 = pmi + dx4, py4 = pmj + dz4;
+        if (px4 < 0 || px4 > 127 || py4 < 0 || py4 > 127) continue;
+        mapBuf[py4 * 128 + px4] = (255 << 24) | (56 << 16) | (176 << 8) | 240;
+      }
+    }
+    mapCtx.putImageData(mapImg, 0, 0);
+  }
+
+  /* ---------------- 叙事行 ---------------- */
+  var storyEl = document.getElementById('story');
+  var storyHide = 0;
+  function forgetRatio() {
+    var s = 0, n = 0;
+    for (var i = 0; i < heights.length; i += 41) { s += Math.abs(heights[i] - baseH[i]); n++; }
+    return Math.min(1, (s / n) / (HMAX * 0.34));
+  }
+  function updateStory() {
+    if (!started) return;
+    if (!live) {
+      storyEl.innerHTML = '世界停在原地 · 打开「实时变化」，它会开始忘记这张照片';
+      storyHide = performance.now() + 6500;
+    } else {
+      storyEl.innerHTML = '它已经忘记这张照片 <b>' + Math.round(forgetRatio() * 100) + '%</b>' +
+        (anchorN ? ' · 锚点 <b>' + anchorN + '</b> 处记忆被钉住' : ' · 按 E 可以把某块地形钉在照片里');
+      storyHide = performance.now() + 9000;
+    }
+    storyEl.classList.add('show');
+  }
+
+  /* ---------------- 轻提示 ---------------- */
+  var toastEl = document.getElementById('toast'), toastTimer = 0;
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove('on'); }, 1900);
+  }
+
+  /* ---------------- 记忆锚点 ---------------- */
+  function anchorHere() {
+    var ax = Math.round(cam.x - Math.sin(yaw) * 7);
+    var az = Math.round(cam.z - Math.cos(yaw) * 7);
+    var R = 9, hit = 0;
+    for (var dz5 = -R; dz5 <= R; dz5++) {
+      for (var dx5 = -R; dx5 <= R; dx5++) {
+        var d5 = Math.sqrt(dx5 * dx5 + dz5 * dz5);
+        if (d5 > R) continue;
+        var xx5 = ax + dx5, zz5 = az + dz5;
+        if (xx5 < 1 || xx5 >= WORLD - 1 || zz5 < 1 || zz5 >= WORLD - 1) continue;
+        var w5 = d5 > R - 3 ? (R - d5) / 3 : 1;      // 边缘软过渡
+        var i5 = zz5 * WORLD + xx5;
+        if (anchorMap[i5] < w5) anchorMap[i5] = w5;
+        // 立刻往原照片拉一把，让"救回记忆"这个动作看得见
+        heights[i5] += (baseH[i5] - heights[i5]) * 0.30 * w5;
+        cR[i5] += (cR0[i5] - cR[i5]) * 0.30 * w5;
+        cG[i5] += (cG0[i5] - cG[i5]) * 0.30 * w5;
+        cB[i5] += (cB0[i5] - cB[i5]) * 0.30 * w5;
+        relightCell(i5);
+        hit++;
+      }
+    }
+    anchorN++;
+    document.getElementById('v-anchor').textContent = anchorN;
+    toast('已锚定 ' + hit + ' 格 · 这块地形会留在照片里');
+    drawMap();
+    updateStory();
+  }
+  document.getElementById('anchorBtn').addEventListener('click', function () {
+    if (started) anchorHere();
+  });
+
+  /* ---------------- 飞行 / 干净模式 ---------------- */
+  function setFly(v) {
+    fly = !!v;
+    cam.vy = 0;
+    if (fly) {
+      cam.ground = false;
+      badgeTxt.textContent = 'PHOTO → WORLD · 飞行中';
+    } else {
+      badgeTxt.textContent = live ? 'PHOTO → WORLD · 实时变化中' : 'PHOTO → WORLD · 本地模型';
+    }
+    toast(fly ? '飞行 · 空格上升，Shift 加速' : '已恢复行走');
+  }
+  function toggleClean() {
+    var on = document.body.classList.toggle('clean');
+    if (on) storyEl.classList.remove('show');
+    toast(on ? '干净模式 · 按 H 恢复界面' : '界面已恢复');
+  }
+
+  /* ---------------- 对比图导出 ---------------- */
+  function saveShot() {
+    if (!started || !curUrl) return;
+    var w = view.width, h = view.height;
+    var gap = Math.max(6, Math.round(h * 0.022));
+    var capH = Math.round(h * 0.075);
+    var cv = document.createElement('canvas');
+    cv.width = w * 2 + gap * 3;
+    cv.height = h + gap * 2 + capH;
+    var g = cv.getContext('2d');
+    g.fillStyle = '#0a0e16';
+    g.fillRect(0, 0, cv.width, cv.height);
+    var im = document.getElementById('thumbimg');
+    var tw = im.naturalWidth || 1, th = im.naturalHeight || 1;
+    var sc = Math.max(w / tw, h / th);
+    g.drawImage(im, gap + (w - tw * sc) / 2, gap + (h - th * sc) / 2, tw * sc, th * sc);
+    g.imageSmoothingEnabled = false;
+    g.drawImage(view, w + gap * 2, gap, w, h);
+    g.strokeStyle = 'rgba(200,190,175,.22)';
+    g.lineWidth = 1;
+    g.strokeRect(gap + 0.5, gap + 0.5, w - 1, h - 1);
+    g.strokeRect(w + gap * 2 + 0.5, gap + 0.5, w - 1, h - 1);
+    g.fillStyle = 'rgba(228,221,209,.62)';
+    g.font = Math.max(10, Math.round(h * 0.032)) + 'px -apple-system,"Segoe UI","Microsoft YaHei",sans-serif';
+    g.textAlign = 'left';
+    g.fillText('输入照片', gap, h + gap + Math.round(capH * 0.62));
+    g.fillText('PHOTO → WORLD', w + gap * 2, h + gap + Math.round(capH * 0.62));
+    try {
+      var a = document.createElement('a');
+      a.download = 'photo-world.png';
+      a.href = cv.toDataURL('image/png');
+      a.click();
+      toast('对比图已保存');
+    } catch (err) {
+      toast('这张图受浏览器沙箱限制，导出失败');
+    }
+  }
+  document.getElementById('shot').addEventListener('click', saveShot);
 
   document.getElementById('again').addEventListener('click', function () {
     started = false;
@@ -1493,6 +1932,12 @@
     hud.style.display = 'none';
     panel.classList.remove('gone');
     panel.style.display = 'flex';
+    // 换一张等于重开一局：锚点、改写计数、飞行状态都要归零
+    fly = false; introT = 0; anchorN = 0; rewriteTotal = 0;
+    document.getElementById('v-anchor').textContent = '0';
+    document.body.classList.remove('clean');
+    markChips('');
+    storyEl.classList.remove('show');
     if (document.pointerLockElement) document.exitPointerLock();
   });
 
