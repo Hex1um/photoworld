@@ -345,17 +345,28 @@
         // 用世界坐标做投影（而不是模型格），地面纹理会细 5 倍
         var fz2 = PZ - z; if (fz2 < 1.2) fz2 = 1.2;
         var uu = 0.5 + ((x - PX) / fz2) / (2 * TANF);
-        // 纵向严格限制在照片地平线以下的“地面”区间内，避免采到天空色
-        var gTop = horizFrac + 0.02;
+        // 三角波包裹：视野外的地面也继续取到照片颜色，而不是全挤在左右边缘
+        if (uu < 0 || uu > 1) {
+          var tw = ((uu % 2) + 2) % 2;
+          uu = tw < 1 ? tw : 2 - tw;
+        }
+        // 纵向只取照片“地面带”，且远处取带的中部（地平线正下方是最亮最糊的过渡区）
+        var g0 = horizFrac + 0.06, g1v = 0.995;
+        if (g1v - g0 < 0.12) g0 = g1v - 0.12;
         var gk = (1.7 / fz2) / (2 * TANF) * 1.1;
         if (gk > 1) gk = 1;
-        var vv = gTop + (1 - gTop) * gk;
+        var vv = g0 + (g1v - g0) * (0.42 + 0.54 * gk);
         if (uu < 0 || uu > 1) uu = uu < 0 ? 0 : 1;
         samplePhoto(uu, vv, tmpc);
         var mr = Math.round(mirrorIdx(r, PATCH));
         var mc = Math.round(mirrorIdx(c, PATCH));
         var ps = (mr * PATCH + mc) * 3;
-        var jit = 0.9 + h2(x, z, seedMap + 5) * 0.2;
+        // 逐格扰动采样位置 + 高度染色，打散大片同色
+        uu += (h2(x, z, seedMap + 31) - 0.5) * 0.07;
+        vv += (h2(x, z, seedMap + 37) - 0.5) * 0.07;
+        if (uu < 0) uu = 0; else if (uu > 1) uu = 1;
+        if (vv < 0) vv = 0; else if (vv > 1) vv = 1;
+        var jit = 0.86 + h2(x, z, seedMap + 5) * 0.28;
         // 模型色先去饱和，避免冒出孤立的高饱和色块；主色仍来自照片
         var pr = PC[ps], pg = PC[ps + 1], pb = PC[ps + 2];
         var pl = pr * 0.3 + pg * 0.59 + pb * 0.11;
@@ -368,9 +379,10 @@
           cg2 = cg2 * (1 - wgt) + (avg[1] * 0.55 + PC[ps + 1] * 0.55) * wgt;
           cb2 = cb2 * (1 - wgt) + (avg[2] * 0.55 + PC[ps + 2] * 0.55) * wgt;
         }
-        var fR = Math.min(255, cr2 * jit * 255);
-        var fG = Math.min(255, cg2 * jit * 255);
-        var fB = Math.min(255, cb2 * jit * 255);
+        var hTint = 0.92 + (hh / HMAX) * 0.16;
+        var fR = Math.min(255, cr2 * jit * hTint * 255);
+        var fG = Math.min(255, cg2 * jit * hTint * 255);
+        var fB = Math.min(255, cb2 * jit * hTint * 255);
         // 最后统一压一次饱和度，杜绝孤立的高饱和色块
         var fL = fR * 0.3 + fG * 0.59 + fB * 0.11 + 4;
         var lo2 = fL * 0.62, hi2 = fL * 1.34;
@@ -579,6 +591,7 @@
           if (shade < 0.24) shade = 0.24;
           var sh = shade;
           var rr = cR[idx] * sh, gg = cG[idx] * sh, bb = cB[idx] * sh;
+
           if (rr > 255) rr = 255; if (gg > 255) gg = 255; if (bb > 255) bb = 255;
           var y0 = sy | 0; if (y0 < 0) y0 = 0;
           var y1 = yBuf | 0; if (y1 > H) y1 = H;
@@ -739,16 +752,17 @@
         var ms = performance.now() - t0;
         var PHl = new Float32Array(PATCH * PATCH);
         var PCl = new Float32Array(PATCH * PATCH * 3);
-        var hmn = 1e9, hmx = -1e9, k;
+        // 用 5%~95% 分位做拉伸：min/max 会被个别尖峰带偏，把主体地形压成平原
+        var sorted = Array.prototype.slice.call(r.h.d).sort(function (a, b) { return a - b; });
+        var nH = sorted.length;
+        var lo = sorted[Math.floor(nH * 0.05)];
+        var hi = sorted[Math.floor(nH * 0.95)];
+        var span = Math.max(0.02, hi - lo);
+        var k;
         for (k = 0; k < PATCH * PATCH; k++) {
-          var hv = r.h.d[k];
-          if (hv < hmn) hmn = hv;
-          if (hv > hmx) hmx = hv;
-        }
-        var span = Math.max(0.02, hmx - hmn);
-        for (k = 0; k < PATCH * PATCH; k++) {
-          var v = (r.h.d[k] - hmn) / span;
-          PHl[k] = 1 + v * (HMAX - 5);
+          var v = (r.h.d[k] - lo) / span;
+          if (v < 0) v = 0; else if (v > 1) v = 1;
+          PHl[k] = 1 + v * (HMAX - 4);
           for (var ch = 0; ch < 3; ch++) {
             var cv = (r.c.d[k * 3 + ch] - 0.11) * 1.45;
             PCl[k * 3 + ch] = cv < 0.03 ? 0.03 : (cv > 1 ? 1 : cv);
