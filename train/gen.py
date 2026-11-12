@@ -158,7 +158,7 @@ def align(h, col, camx, camz, yaw):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--n", type=int, default=3000)
+    ap.add_argument("--n", type=int, default=4000)
     ap.add_argument("--out", default="data.npz")
     ap.add_argument("--preview", type=int, default=6)
     ap.add_argument("--seed", type=int, default=7)
@@ -183,7 +183,8 @@ def main():
             ah = ah[:, ::-1].copy()
             ac = ac[:, ::-1].copy()
         X[i] = img
-        Yh[i] = ah / MAXH
+        var0 = float(ah.min()); var1 = float(ah.max())
+        Yh[i] = (ah - var0) / max(1e-6, (var1 - var0))
         Yc[i] = ac
         if i % 200 == 0:
             print(i, flush=True)
