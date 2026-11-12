@@ -660,6 +660,21 @@
       }
     }
 
+    // 高度范围收敛：任意照片都可能让模型输出极端高差（一堵墙），先按分位压到合理区间
+    var hs = [];
+    for (i = 0; i < baseH.length; i += 11) hs.push(baseH[i]);
+    hs.sort(function (a, b) { return a - b; });
+    var loH = hs[Math.floor(hs.length * 0.05)] || 2;
+    var hiH = hs[Math.floor(hs.length * 0.95)] || 12;
+    var spanH = hiH - loH;
+    if (spanH > 12) {
+      var kq = 12 / spanH;
+      for (i = 0; i < baseH.length; i++) {
+        baseH[i] = loH + (baseH[i] - loH) * kq;
+        heights[i] = baseH[i];
+      }
+    }
+
     // 去掉单格尖刺：与四邻差异过大就压回邻域中位数
     var tmpH = baseH.slice();
     for (z = 1; z < WORLD - 1; z++) {
@@ -854,34 +869,30 @@
     srcPos = new Float32Array(SRC * SRC * 3);
     srcCol = new Uint32Array(SRC * SRC);
     srcValid = new Uint8Array(SRC * SRC);
+
+    // 照片放在相机前方一块"立牌"上：起始视角 1:1 还原原图，走动时有真实视差。
+    // 不再假设照片是"地面俯视"，所以桌面、室内、人像都不会崩。
+    var D = 14;                                  // 立牌距离
+    var halfW = D * TANF;                        // 视野半宽
+    var halfH = halfW * (RH / Math.max(1, RW));  // 按画面比例
     var i = 0;
-    varies: for (var v = 0; v < SRC; v++) {
-      // 源行全部铺在"照片的地面部分"上（0..255 里只有约 45% 是地面），否则近景会被拉伸
-      var vy = horizFrac + (v + 0.5) / SRC * (1 - horizFrac);
-      var vrow = Math.min(255, Math.max(0, Math.round(vy * 255)));
+    for (var v = 0; v < SRC; v++) {
+      var vy = (v + 0.5) / SRC;
+      var vrow = Math.min(255, Math.round(vy * 255));
       for (var u = 0; u < SRC; u++, i++) {
-        var px = u / (SRC - 1);
+        var px = (u + 0.5) / SRC;
         var o = (vrow * SRC + u) * 3;
         var cr = photoHi[o] * 255, cg = photoHi[o + 1] * 255, cb = photoHi[o + 2] * 255;
         if (cr > 255) cr = 255; if (cg > 255) cg = 255; if (cb > 255) cb = 255;
         srcCol[i] = (255 << 24) | ((cb | 0) << 16) | ((cg | 0) << 8) | (cr | 0);
-        var dyPix = (vy - horizFrac) * RH;
-        if (dyPix < 1.5) dyPix = 1.5;
-        var ux = (px - 0.5) * 2 * TANF;
-        var dist = camYBuild * projScale / dyPix;       // 平地假设
-        var wx = PX + ux * dist, wz = PZ - dist;
-        var ix = Math.round(wx), iz = Math.round(wz);
-        var hg = 6;
-        if (ix >= 0 && ix < WORLD && iz >= 0 && iz < WORLD) hg = heights[iz * WORLD + ix];
-        dist = (camYBuild - hg) * projScale / dyPix;    // 用地形高度修正一次
-        if (dist < 0.8) continue;
-        if (dist > 260) dist = 260;
-        srcPos[i * 3] = PX + ux * dist;
-        srcPos[i * 3 + 1] = hg;
-        srcPos[i * 3 + 2] = PZ - dist;
+
+        srcPos[i * 3] = PX + (px - 0.5) * 2 * halfW;
+        srcPos[i * 3 + 1] = camYBuild + (0.5 - vy) * 2 * halfH;
+        srcPos[i * 3 + 2] = PZ - D;
         srcValid[i] = 1;
       }
     }
+    dibrReady = true;
     dibrReady = true;
   }
 
@@ -987,7 +998,8 @@
   var flickOn = /flick/.test(location.search), flickPrev = -1, flickMax = 0;
 
   function render() {
-    if (dibrReady && !/hf/.test(location.search)) { renderDIBR(); return; }
+    // 默认走稳定的体素渲染；图像重投影属于实验特性，用 ?dibr=1 打开
+    if (/dibr/.test(location.search) && dibrReady) { renderDIBR(); return; }
     var H = RH, Wd = RW, buf = buf32;
     var horizon = H * 0.5 + pitch * projScale;
     var camY = cam.y + 1.62;
@@ -1488,6 +1500,17 @@
   if (qc) { chaos = Math.max(0, Math.min(1, parseFloat(qc[1]))); rc.value = Math.round(chaos * 100); document.getElementById('v-chaos').textContent = chaos.toFixed(2); }
   var qm = location.search.match(/mem=([0-9.]+)/);
   if (qm) { mem = Math.max(0, Math.min(1, parseFloat(qm[1]))); rm.value = Math.round(mem * 100); document.getElementById('v-mem').textContent = mem.toFixed(2); }
+
+  // 调试：?img=<url> 直接加载任意图片（用来测非风景照）
+  var mi = location.search.match(/img=([^&]+)/);
+  if (mi) {
+    setTimeout(function () {
+      var im2 = new Image();
+      im2.crossOrigin = 'anonymous';
+      im2.onload = function () { run(im2, decodeURIComponent(mi[1])); };
+      im2.src = decodeURIComponent(mi[1]);
+    }, 240);
+  }
 
   var m = location.search.match(/ex=([0-9])/);
   if (m) setTimeout(function () { pickSample(EXAMPLES[+m[1] % EXAMPLES.length]); }, 260);
