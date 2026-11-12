@@ -16,6 +16,8 @@
   #view { position:absolute; inset:0; width:100%; height:100%; display:block;
           image-rendering:pixelated; image-rendering:crisp-edges; }
 
+  #fade { position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
+          z-index:5; pointer-events:none; opacity:0; }
   #fx { position:absolute; inset:0; pointer-events:none; }
   #scan { position:absolute; inset:0; opacity:.22;
     background:repeating-linear-gradient(180deg,rgba(0,0,0,.34) 0px,rgba(0,0,0,.34) 1px,transparent 1px,transparent 3px);
@@ -23,7 +25,7 @@
   #vig { position:absolute; inset:0;
     background:radial-gradient(ellipse 84% 80% at 50% 48%,transparent 46%,rgba(6,10,18,.5) 100%); }
 
-  #hud { position:absolute; inset:0; pointer-events:none; padding:12px 14px; }
+  #hud { position:absolute; inset:0; pointer-events:none; padding:12px 14px; z-index:8; }
   #badge { display:inline-flex; align-items:center; gap:7px;
     background:rgba(10,16,26,.6); border:1px solid rgba(200,190,175,.18);
     border-radius:6px; padding:5px 9px; font-size:10px; letter-spacing:.1em; font-weight:500; }
@@ -111,6 +113,7 @@
 <body>
 <div id="stage">
   <canvas id="view"></canvas>
+  <img id="fade" alt="">
   <div id="fx"><div id="scan"></div><div id="vig"></div></div>
 
   <div id="hud" style="display:none">
@@ -134,7 +137,7 @@
         <div class="row"><span class="lab">记忆力</span><span class="val" id="v-mem">0.35</span></div>
         <input type="range" id="r-mem" min="0" max="100" value="35">
       </div>
-      <div class="cap">混乱度越高，地形重排越剧烈<br>记忆力越低，越快忘掉这张照片</div>
+      <div class="cap">混乱度越高，地形重排越剧烈<br>记忆力为 0 时只根据上一帧生成<br>（马尔可夫链，不再参考照片）</div>
     </div>
 
     <div id="thumb"><img id="thumbimg" alt=""><div>输入</div></div>
@@ -169,12 +172,12 @@
 (function () {
   'use strict';
 
-  var HMAX = 24;
+  var HMAX = 28;
   var PATCH = 24;
-  var WORLD = 384;
-  var SCALE = 6;
+  var WORLD = 512;
+  var SCALE = 8;
   var PATCH_ROW = 18;
-  var PX = 192, PZ = 300;
+  var PX = 256, PZ = 400;
 
   var heights = new Float32Array(WORLD * WORLD);
   var baseH = new Float32Array(WORLD * WORLD);
@@ -185,6 +188,7 @@
   var view = document.getElementById('view');
   var vctx = view.getContext('2d');
   var RW = 0, RH = 0, imgData = null, buf32 = null, projScale = 0;
+  var quality = 1, qAvg = 16, qTimer = 0;
 
   /* ---------------- 模型 ---------------- */
   var W = {};
@@ -275,15 +279,65 @@
 
   /* ---------------- 世界 ---------------- */
   var photoPix = null, lastAvg = [0.4, 0.45, 0.4];
+  var photoHi = null;
+  var skyTop = [40, 52, 72], skyHor = [190, 186, 178], horizFrac = 0.55;
+
+  function analyzePhoto(px) {
+    var rows = [], y, x, o;
+    for (y = 0; y < 96; y++) {
+      var rr = 0, gg = 0, bb = 0;
+      for (x = 0; x < 96; x++) { o = (y * 96 + x) * 4; rr += px[o]; gg += px[o + 1]; bb += px[o + 2]; }
+      rows.push([rr / 96, gg / 96, bb / 96]);
+    }
+    var tr = 0, tg = 0, tb = 0;
+    for (y = 0; y < 6; y++) { tr += rows[y][0]; tg += rows[y][1]; tb += rows[y][2]; }
+    tr /= 6; tg /= 6; tb /= 6;
+
+    // 天空通常更亮、更平；地面更暗、纹理更多。用「亮度下降 + 纹理上升」联合判定地平线
+    var lum = [], vari = [];
+    for (y = 0; y < 96; y++) {
+      var lr = 0, lv = 0;
+      for (x = 0; x < 96; x++) {
+        o = (y * 96 + x) * 4;
+        lr += (px[o] * 0.299 + px[o + 1] * 0.587 + px[o + 2] * 0.114);
+      }
+      lr /= 96;
+      for (x = 0; x < 96; x++) {
+        o = (y * 96 + x) * 4;
+        var ll = px[o] * 0.299 + px[o + 1] * 0.587 + px[o + 2] * 0.114;
+        lv += (ll - lr) * (ll - lr);
+      }
+      lum.push(lr); vari.push(Math.sqrt(lv / 96));
+    }
+    var bestY = -1, bestScore = -1e9;
+    for (y = 14; y < 86; y++) {
+      var upL = (lum[y - 5] + lum[y - 4] + lum[y - 3]) / 3;
+      var dnL = (lum[y + 1] + lum[y + 2] + lum[y + 3]) / 3;
+      var upV = (vari[y - 5] + vari[y - 4] + vari[y - 3]) / 3;
+      var dnV = (vari[y + 1] + vari[y + 2] + vari[y + 3]) / 3;
+      var sc = (upL - dnL) * 0.9 + (dnV - upV) * 1.6;
+      // 略偏向画面中下部（大多数照片地平线在中间偏下）
+      sc += (y / 96) * 6;
+      if (sc > bestScore) { bestScore = sc; bestY = y; }
+    }
+    var hz = bestScore > 6 ? (bestY / 96) : 0.56;
+    horizFrac = Math.max(0.18, Math.min(0.86, hz));
+    skyTop = [tr | 0, tg | 0, tb | 0];
+    var hy = Math.max(1, Math.round(hz * 96) - 5);
+    var ar = 0, ag = 0, ab = 0, n = 0;
+    for (y = Math.max(0, hy - 4); y < hy; y++) { ar += rows[y][0]; ag += rows[y][1]; ab += rows[y][2]; n++; }
+    if (n) skyHor = [ar / n | 0, ag / n | 0, ab / n | 0];
+  }
   var TANF = Math.tan(1.15 / 2);
   var voxTotal = 0;
 
   function samplePhoto(u, v, out) {
-    var px = Math.round(u * 95), py = Math.round(v * 95);
-    if (px < 0) px = 0; if (px > 95) px = 95;
-    if (py < 0) py = 0; if (py > 95) py = 95;
-    var o = (py * 96 + px) * 3;
-    out[0] = photoPix[o]; out[1] = photoPix[o + 1]; out[2] = photoPix[o + 2];
+    var src = photoHi || photoPix, n = photoHi ? 255 : 95;
+    var px = Math.round(u * n), py = Math.round(v * n);
+    if (px < 0) px = 0; if (px > n) px = n;
+    if (py < 0) py = 0; if (py > n) py = n;
+    var o = (py * (n + 1) + px) * 3;
+    out[0] = src[o]; out[1] = src[o + 1]; out[2] = src[o + 2];
   }
 
   function bilinH(PH, r, c) {
@@ -320,11 +374,12 @@
         }
 
         var distP = Math.sqrt((x - PX) * (x - PX) + (z - PZ) * (z - PZ));
-        var det = (fbm(x * 0.09, z * 0.09, seedMap + 3) - 0.5) * 2.4 +
-                  (fbm(x * 0.31, z * 0.31, seedMap + 8) - 0.5) * 0.9;
-        var hh = hg + det * (0.55 + Math.min(1, distP / 120) * 0.9);
+        var det = (fbm(x * 0.085, z * 0.085, seedMap + 3) - 0.5) * 2.6 +
+                  (fbm(x * 0.26, z * 0.26, seedMap + 8) - 0.5) * 1.3 +
+                  (fbm(x * 0.62, z * 0.62, seedMap + 21) - 0.5) * 0.55;
+        var hh = hg + det * (0.85 + Math.min(1, distP / 110) * 1.1);
 
-        if (distP < 12) hh = hh * (distP / 12) + playerH * (1 - distP / 12);
+        if (distP < 22) hh = hh * (distP / 22) + playerH * (1 - distP / 22);
 
         hh = Math.max(1, Math.min(HMAX, Math.round(hh)));
         baseH[i] = hh;
@@ -383,15 +438,20 @@
     tick += dt;
     var rate = (1 - mem) * 3.0;
     if (rate <= 0.001) return;
-    var amp = chaos * 11;
-    var k = Math.min(0.5, dt * (0.6 + rate));
+    // anchor=1 完全记得照片；anchor=0 只依赖上一帧（马尔可夫链）
+    var anchor = mem;
+    var amp = chaos * 18 * (0.15 + (1 - anchor) * 0.85);
+    var k = Math.min(0.62, dt * (0.6 + rate * 1.2));
     var end = Math.min(WORLD * WORLD, cursor + CHUNK);
     for (var i = cursor; i < end; i++) {
       var x = i % WORLD, z = (i / WORLD) | 0;
-      var tgt = baseH[i] + amp * (fbm(x * 0.035 + tick * 0.55, z * 0.035 - tick * 0.41, seedMap + 77) - 0.5) * 2;
+      var cur = heights[i];
+      var nz2 = (fbm(x * 0.070 + tick * 0.45, z * 0.070 - tick * 0.37, seedMap + 77) - 0.5) * 2
+              + (fbm(x * 0.020 - tick * 0.2, z * 0.020 + tick * 0.24, seedMap + 133) - 0.5)
+              + (fbm(x * 0.34 + tick * 1.5, z * 0.34 + tick * 1.1, seedMap + 311) - 0.5) * 2 * (1 - anchor) * 1.7;
+      var tgt = baseH[i] * anchor + cur * (1 - anchor) + nz2 * amp;
       if (tgt < 1) tgt = 1;
       if (tgt > HMAX) tgt = HMAX;
-      var cur = heights[i];
       heights[i] = cur + (tgt - cur) * k;
     }
     cursor = end >= WORLD * WORLD ? 0 : end;
@@ -410,9 +470,9 @@
 
   function resize() {
     var cw = window.innerWidth, chh = window.innerHeight;
-    var targetW = cw < 700 ? 300 : 420;
+    var targetW = Math.round((cw < 700 ? 380 : 560) * quality);
     var targetH = Math.round(targetW * chh / cw);
-    var px = targetW * targetH, cap = 130000;
+    var px = targetW * targetH, cap = 300000 * quality * quality;
     if (px > cap) {
       var sc2 = Math.sqrt(cap / px);
       targetW = Math.max(120, Math.round(targetW * sc2));
@@ -434,22 +494,28 @@
     var horizon = H * 0.5 + pitch * projScale;
     var camY = cam.y + 1.62;
 
+    var hR = skyHor[0], hG = skyHor[1], hB = skyHor[2];
     for (var y = 0; y < H; y++) {
       var t = (y - horizon) / H, r2, g2, b2;
       if (t < 0) {
-        var kk = Math.min(1, -t * 1.7);
-        r2 = 34 + kk * 96; g2 = 44 + kk * 92; b2 = 64 + kk * 86;
+        var kk = Math.min(1, -t * 1.55);
+        r2 = hR + (skyTop[0] - hR) * kk;
+        g2 = hG + (skyTop[1] - hG) * kk;
+        b2 = hB + (skyTop[2] - hB) * kk;
       } else {
         var kk2 = Math.min(1, t * 2.6);
-        r2 = 148 + kk2 * 66; g2 = 154 + kk2 * 56; b2 = 160 + kk2 * 44;
+        r2 = hR + kk2 * 24; g2 = hG + kk2 * 20; b2 = hB + kk2 * 16;
       }
-      buf.fill((255 << 24) | (b2 << 16) | (g2 << 8) | r2, y * Wd, y * Wd + Wd);
+      r2 = r2 < 0 ? 0 : (r2 > 255 ? 255 : r2);
+      g2 = g2 < 0 ? 0 : (g2 > 255 ? 255 : g2);
+      b2 = b2 < 0 ? 0 : (b2 > 255 ? 255 : b2);
+      buf.fill((255 << 24) | ((b2 | 0) << 16) | ((g2 | 0) << 8) | (r2 | 0), y * Wd, y * Wd + Wd);
     }
 
     var fwdX = -Math.sin(yaw), fwdZ = -Math.cos(yaw);
     var rgtX = Math.cos(yaw), rgtZ = -Math.sin(yaw);
     var tanf = Math.tan(1.15 / 2);
-    var maxZ = 190;
+    var maxZ = 230;
 
     for (var sx = 0; sx < Wd; sx++) {
       var u = ((sx + 0.5) / Wd) * 2 - 1;
@@ -459,7 +525,7 @@
       dx *= inv; dz *= inv;
 
       var yBuf = H + 2;
-      var z = 0.7, step = 0.55;
+      var z = 0.6, step = 0.42;
       while (z < maxZ) {
         var wx = cam.x + dx * z, wz = cam.z + dz * z;
         var ix = wx | 0, iz = wz | 0;
@@ -476,9 +542,9 @@
           var shade = (1 - fog * 0.55) * (1.12 + slope * 0.075);
           if (shade < 0.24) shade = 0.24;
           var sh = shade;
-          var rr = cR[idx] * sh * (1 - fog) + 152 * fog;
-          var gg = cG[idx] * sh * (1 - fog) + 158 * fog;
-          var bb = cB[idx] * sh * (1 - fog) + 166 * fog;
+          var rr = cR[idx] * sh * (1 - fog) + hR * fog;
+          var gg = cG[idx] * sh * (1 - fog) + hG * fog;
+          var bb = cB[idx] * sh * (1 - fog) + hB * fog;
           if (rr > 255) rr = 255;
           if (gg > 255) gg = 255;
           if (bb > 255) bb = 255;
@@ -489,7 +555,7 @@
           yBuf = sy;
         }
         z += step;
-        step *= 1.016;
+        step *= 1.014;
       }
     }
     vctx.putImageData(imgData, 0, 0);
@@ -585,6 +651,7 @@
   }
 
   function run(img, url) {
+    curUrl = url;
     panel.style.display = 'none';
     busy.style.display = 'flex';
     bar.style.width = '6%';
@@ -603,6 +670,19 @@
       }
       avg[0] /= 9216; avg[1] /= 9216; avg[2] /= 9216;
       lastAvg = avg; photoPix = inp;
+      analyzePhoto(px);
+
+      var hi = document.createElement('canvas');
+      hi.width = 256; hi.height = 256;
+      var hg2 = hi.getContext('2d');
+      hg2.drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, 256, 256);
+      var hpx = hg2.getImageData(0, 0, 256, 256).data;
+      photoHi = new Float32Array(256 * 256 * 3);
+      for (var hi2 = 0, hj = 0; hi2 < hpx.length; hi2 += 4, hj += 3) {
+        photoHi[hj] = hpx[hi2] / 255;
+        photoHi[hj + 1] = hpx[hi2 + 1] / 255;
+        photoHi[hj + 2] = hpx[hi2 + 2] / 255;
+      }
       bar.style.width = '28%';
       barTxt.textContent = '模型推理';
 
@@ -640,24 +720,38 @@
             document.getElementById('thumbimg').src = url;
             document.getElementById('s-ms').textContent = Math.round(ms);
             land();
+            fadeIn(curUrl);
             started = true;
+            var ssm = location.search.match(/sim=([0-9.]+)/);
+            if (ssm && window.__simFrames) window.__simFrames(parseFloat(ssm[1]));
           }, 100);
         }, 50);
       }, 60);
     }, 50);
   }
 
+  var curUrl = null;
+  var fadeA = 0, fadeOn = false, fadeStart = 0;
+  var fadeEl = document.getElementById('fade');
+  function fadeIn(url) {
+    if (!url) { fadeEl.style.opacity = '0'; fadeOn = false; return; }
+    fadeEl.src = url;
+    fadeA = 1; fadeOn = true; fadeStart = performance.now();
+    fadeEl.style.opacity = '1';
+  }
+
   function land() {
     cam.x = PX + 0.5; cam.z = PZ + 0.5;
     cam.y = heights[PZ * WORLD + PX];
     cam.vy = 0; cam.ground = true;
-    yaw = 0; pitch = -0.05;
+    yaw = 0;
+    pitch = Math.max(-0.10, Math.min(0.20, (horizFrac - 0.5) * 2 * Math.tan(1.15 / 2)));
   }
 
   /* ---------------- 主循环 ---------------- */
   var lastT = performance.now(), fpsA = 0, fpsN = 0, hudT = 0, driftAcc = 0, dbgT = 0;
 
-  function frame(now) {
+  function frame(now, sim) {
     var dt = Math.min((now - lastT) / 1000, 0.05);
     lastT = now;
 
@@ -705,15 +799,36 @@
       }
     }
 
+    if (fadeOn) {
+      fadeA = 1 - (now - fadeStart) / 1400;
+      if (fadeA <= 0) { fadeA = 0; fadeOn = false; }
+      fadeEl.style.opacity = fadeA > 0 ? fadeA.toFixed(3) : '0';
+    }
+
+    qAvg = qAvg * 0.9 + dt * 1000 * 0.1;
+    qTimer += dt;
+    if (qTimer > 1.6) {
+      qTimer = 0;
+      if (qAvg > 33 && quality > 0.55) { quality = Math.max(0.55, quality - 0.15); resize(); }
+      else if (qAvg < 19 && quality < 1) { quality = Math.min(1, quality + 0.08); resize(); }
+    }
+
     fpsA += dt; fpsN++;
     if (now - hudT > 500) {
       hudT = now;
       if (started) document.getElementById('s-fps').textContent = fpsA > 0.05 ? Math.round(fpsN / fpsA) : 0;
       fpsA = 0; fpsN = 0;
     }
-    requestAnimationFrame(frame);
+    if (!sim) requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
+
+  window.__simFrames = function (seconds) {
+    var step = 1000 / 60, t = performance.now();
+    lastT = t;
+    var n = Math.min(900, Math.round(seconds * 60));
+    for (var i = 0; i < n; i++) { t += step; frame(t, true); }
+  };
 
   /* ---------------- UI ---------------- */
   var file = document.getElementById('file');
@@ -772,13 +887,21 @@
 
   document.getElementById('again').addEventListener('click', function () {
     started = false;
+    fadeOn = false; fadeA = 0;
+    fadeEl.style.opacity = '0';
     hud.style.display = 'none';
     panel.style.display = 'flex';
     if (document.pointerLockElement) document.exitPointerLock();
   });
 
+  var qc = location.search.match(/chaos=([0-9.]+)/);
+  if (qc) { chaos = Math.max(0, Math.min(1, parseFloat(qc[1]))); rc.value = Math.round(chaos * 100); document.getElementById('v-chaos').textContent = chaos.toFixed(2); }
+  var qm = location.search.match(/mem=([0-9.]+)/);
+  if (qm) { mem = Math.max(0, Math.min(1, parseFloat(qm[1]))); rm.value = Math.round(mem * 100); document.getElementById('v-mem').textContent = mem.toFixed(2); }
+
   var m = location.search.match(/ex=([0-9])/);
   if (m) setTimeout(function () { pickSample(EXAMPLES[+m[1] % EXAMPLES.length]); }, 260);
+
   if (/live/.test(location.search)) setTimeout(function () { if (!live) sw.click(); }, 900);
 })();
 </script>
