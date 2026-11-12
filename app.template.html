@@ -334,17 +334,23 @@
                   (fbm(x * 0.22, z * 0.22, seedMap + 8) - 0.5) * 1.5 +
                   (fbm(x * 0.55, z * 0.55, seedMap + 21) - 0.5) * 0.95 +
                   (fbm(x * 1.05, z * 1.05, seedMap + 44) - 0.5) * 0.45;
-        var hh = hg + det * (0.85 + Math.min(1, distP / 110) * 1.1);
+        var hh = hg + det * (0.42 + Math.min(1, distP / 110) * 1.35);
 
-        if (distP < 9) hh = hh * (distP / 9) + playerH * (1 - distP / 9);
+
 
         hh = Math.max(1, Math.min(HMAX, Math.round(hh)));
         baseH[i] = hh;
         heights[i] = hh;
 
-        var da = 18 - r; if (da < 0) da = -da; if (da < 1.6) da = 1.6;
-        var uu = 0.5 + ((c - 11.5) / da) / (2 * TANF);
-        var vv = 0.5 + (1.7 / da) / (2 * TANF);
+        // 用世界坐标做投影（而不是模型格），地面纹理会细 5 倍
+        var fz2 = PZ - z; if (fz2 < 1.2) fz2 = 1.2;
+        var uu = 0.5 + ((x - PX) / fz2) / (2 * TANF);
+        // 纵向严格限制在照片地平线以下的“地面”区间内，避免采到天空色
+        var gTop = horizFrac + 0.02;
+        var gk = (1.7 / fz2) / (2 * TANF) * 1.1;
+        if (gk > 1) gk = 1;
+        var vv = gTop + (1 - gTop) * gk;
+        if (uu < 0 || uu > 1) uu = uu < 0 ? 0 : 1;
         samplePhoto(uu, vv, tmpc);
         var mr = Math.round(mirrorIdx(r, PATCH));
         var mc = Math.round(mirrorIdx(c, PATCH));
@@ -501,7 +507,7 @@
     var hR = skyHor[0], hG = skyHor[1], hB = skyHor[2];
 
     // 背景板：直接把照片按当前视角贴在后面（转身时横向平移，纵向对齐地平线）
-    if (photoHi) {
+    if (photoHi && !/nobg/.test(location.search)) {
       var NB = 256;
       var nb2 = NB - 1;
       var shift = (yaw / 1.15) * nb2;
@@ -564,8 +570,8 @@
         var h = heights[idx];
         var sy = horizon + (camY - h) * projScale / z;
         if (sy < yBuf) {
-          var fog = (z - 26) / 165;
-          if (fog < 0) fog = 0; else if (fog > 1) fog = 1;
+          var fog = (z - 42) / 135;
+          if (fog < 0) fog = 0; else if (fog > 0.82) fog = 0.82;
           var hL = heights[idx - 1], hB = heights[idx + WORLD];
           var slope = ((h - hL) + (h - hB)) * 0.5;
           if (slope > 2.2) slope = 2.2; else if (slope < -2.2) slope = -2.2;
@@ -742,7 +748,6 @@
         var span = Math.max(0.02, hmx - hmn);
         for (k = 0; k < PATCH * PATCH; k++) {
           var v = (r.h.d[k] - hmn) / span;
-          v = v * v * (3 - 2 * v);
           PHl[k] = 1 + v * (HMAX - 5);
           for (var ch = 0; ch < 3; ch++) {
             var cv = (r.c.d[k * 3 + ch] - 0.11) * 1.45;
@@ -784,8 +789,18 @@
   }
 
   function land() {
-    cam.x = PX + 0.5; cam.z = PZ + 0.5;
-    cam.y = heights[PZ * WORLD + PX];
+    // 站到附近最高的地块上，保证第一眼是开阔的
+    var bx = PX, bz = PZ, bh = -1;
+    for (var dz2 = -6; dz2 <= 6; dz2++) {
+      for (var dx2 = -6; dx2 <= 6; dx2++) {
+        var xx = PX + dx2, zz = PZ + dz2;
+        if (xx < 2 || xx >= WORLD - 2 || zz < 2 || zz >= WORLD - 2) continue;
+        var hv = heights[zz * WORLD + xx];
+        if (hv > bh) { bh = hv; bx = xx; bz = zz; }
+      }
+    }
+    cam.x = bx + 0.5; cam.z = bz + 0.5;
+    cam.y = heights[bz * WORLD + bx];
     cam.vy = 0; cam.ground = true;
     yaw = 0;
     pitch = Math.max(-0.10, Math.min(0.20, (horizFrac - 0.5) * 2 * Math.tan(1.15 / 2)));
