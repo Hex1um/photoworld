@@ -332,6 +332,8 @@
   var cR = new Uint8ClampedArray(WORLD * WORLD);
   var cG = new Uint8ClampedArray(WORLD * WORLD);
   var cB = new Uint8ClampedArray(WORLD * WORLD);
+  var litMap = new Float32Array(WORLD * WORLD);   // 每格静态光照（含投影阴影）
+  var aoMap = new Float32Array(WORLD * WORLD);    // 环境光遮蔽（洼地更暗）
   var cR0 = new Uint8ClampedArray(WORLD * WORLD);
   var cG0 = new Uint8ClampedArray(WORLD * WORLD);
   var cB0 = new Uint8ClampedArray(WORLD * WORLD);
@@ -376,6 +378,127 @@
   var photoPix = null, lastAvg = [0.4, 0.45, 0.4];
   var photoHi = null;
   var skyTop = [40, 52, 72], skyHor = [190, 186, 178], horizFrac = 0.55;
+
+  /* ---------- 从照片里读出来的"真实状态" ---------- */
+  var photoLum = null;      // 256×256 亮度
+  var lumBlur = null;       // 64×64 平滑亮度
+  var lumCoarse = null;     // 16×16 更粗的亮度（细节 = 两者之差）
+  var sunX = -0.45, sunY = 0.62, sunZ = -0.64;  // 指向光源的单位向量（世界坐标）
+  var sunAzDeg = 0, sunElDeg = 0;
+  var lumLow = 0.25, lumHigh = 0.75;            // 地面带亮度分位
+  var groundLum = 0.4;                          // 地面带平均亮度（自动曝光基准）
+  var groundRGB = [0.35, 0.4, 0.3];
+  var sampleLum = function (u, v) { return -1; };
+
+  function analyzeShading() {
+    var N = 256, src = photoHi, x, y, o, i;
+    if (!src) return;
+    photoLum = new Float32Array(N * N);
+    for (y = 0; y < N; y++) {
+      for (x = 0; x < N; x++) {
+        o = (y * N + x) * 3;
+        photoLum[y * N + x] = src[o] * 0.299 + src[o + 1] * 0.587 + src[o + 2] * 0.114;
+      }
+    }
+    var hy = Math.max(2, Math.round(horizFrac * N));
+
+    /* --- 地面带内的亮度梯度 → 光从哪边来 --- */
+    var gx = 0, gy = 0, wsum = 0, y0 = Math.min(N - 3, hy + 6), y1 = Math.round(N * 0.98);
+    for (y = y0; y < y1; y += 2) {
+      for (x = 1; x < N - 1; x += 2) {
+        i = y * N + x;
+        var dxv = photoLum[i + 1] - photoLum[i - 1];
+        var dyv = photoLum[i + N] - photoLum[i - N];
+        var w = Math.sqrt(dxv * dxv + dyv * dyv) + 1e-4;
+        gx += dxv * w; gy += dyv * w; wsum += w;
+      }
+    }
+    if (wsum > 0) { gx /= wsum; gy /= wsum; }
+    // 图片 +x → 世界 +x；图片 +y（向下=更近）→ 世界 +z
+    var gl = Math.sqrt(gx * gx + gy * gy) + 1e-6;
+    var az = Math.atan2(gx / gl, gy / gl);
+    if (gl < 0.004) az = -0.7;                    // 几乎没有梯度时给个侧光，避免死平
+    sunAzDeg = az * 180 / Math.PI;
+    // 仰角：地面越亮（相对天空）说明太阳越高
+    var gl0 = 0, gs0 = 0, gn = 0;
+    for (y = hy; y < N; y += 2) for (x = 0; x < N; x += 2) { gl0 += photoLum[y * N + x]; gn++; }
+    for (y = 0; y < Math.max(2, hy - 6); y += 2) for (x = 0; x < N; x += 2) gs0 += photoLum[y * N + x];
+    gl0 /= Math.max(1, gn);
+    gs0 /= Math.max(1, (Math.max(2, hy - 6) / 2) * (N / 2));
+    var ratio = gl0 / Math.max(0.05, gs0);
+    var el = 0.34 + Math.min(0.42, Math.max(0, ratio - 0.55) * 0.85);
+    sunElDeg = el * 180 / Math.PI;
+
+    var ce = Math.cos(el);
+    sunX = Math.cos(az) * ce; sunZ = Math.sin(az) * ce; sunY = Math.sin(el);
+    var sl = Math.sqrt(sunX * sunX + sunY * sunY + sunZ * sunZ) || 1;
+    sunX /= sl; sunY /= sl; sunZ /= sl;
+
+    /* --- 亮度分位，用于判定"这里在阴影里" --- */
+    var vals = [];
+    for (y = hy; y < N; y += 3) for (x = 0; x < N; x += 3) vals.push(photoLum[y * N + x]);
+    vals.sort(function (a, b) { return a - b; });
+    lumLow = vals[Math.floor(vals.length * 0.12)] || 0.2;
+    lumHigh = vals[Math.floor(vals.length * 0.88)] || 0.8;
+
+    // 地面带的平均亮度与平均色 —— 世界最终要对齐这个曝光
+    var ar2 = 0, ag2 = 0, ab2 = 0, an = 0;
+    for (y = Math.min(N - 1, hy + Math.round(N * 0.10)); y < N; y += 2) {
+      for (x = 0; x < N; x += 2) {
+        o = (y * N + x) * 3;
+        ar2 += src[o]; ag2 += src[o + 1]; ab2 += src[o + 2]; an++;
+      }
+    }
+    if (an) {
+      groundRGB = [ar2 / an, ag2 / an, ab2 / an];
+      groundLum = groundRGB[0] * 0.299 + groundRGB[1] * 0.587 + groundRGB[2] * 0.114;
+    }
+    if (/suninfo/.test(location.search)) {
+      document.title = 'sun az=' + sunAzDeg.toFixed(0) + ' el=' + sunElDeg.toFixed(0) +
+        ' groundLum=' + groundLum.toFixed(3) + ' lumLow=' + lumLow.toFixed(2) + ' lumHigh=' + lumHigh.toFixed(2);
+    }
+
+    /* --- 低频亮度（细节 = 亮度 - 低频），让地形吃下照片里的明暗结构 --- */
+    var B = 64, bs = N / B;
+    lumBlur = new Float32Array(B * B);
+    for (var by = 0; by < B; by++) {
+      for (var bx = 0; bx < B; bx++) {
+        var acc = 0, cnt = 0;
+        for (var yy = 0; yy < bs; yy += 2) {
+          for (var xx = 0; xx < bs; xx += 2) {
+            acc += photoLum[(by * bs + yy) * N + bx * bs + xx]; cnt++;
+          }
+        }
+        lumBlur[by * B + bx] = acc / Math.max(1, cnt);
+      }
+    }
+    // 再降一档：16×16，作为"细节"的分界
+    lumCoarse = new Float32Array(16 * 16);
+    for (var cy = 0; cy < 16; cy++) {
+      for (var cx = 0; cx < 16; cx++) {
+        var acc2 = 0;
+        for (var q = 0; q < 4; q++) for (var q2 = 0; q2 < 4; q2++)
+          acc2 += lumBlur[(cy * 4 + q) * 64 + cx * 4 + q2];
+        lumCoarse[cy * 16 + cx] = acc2 / 16;
+      }
+    }
+    sampleLum = function (u, v) {
+      var px = Math.round(u * 255), py = Math.round(v * 255);
+      if (px < 0) px = 0; else if (px > 255) px = 255;
+      if (py < 0) py = 0; else if (py > 255) py = 255;
+      return photoLum[py * 256 + px];
+    };
+  }
+
+  // 中频结构：平滑亮度 - 更粗亮度。别用 256 的逐像素差，那会变成逐格噪点
+  function lumDetailAt(u, v) {
+    if (!lumBlur || !lumCoarse) return 0;
+    var bx = Math.min(63, Math.max(0, Math.round(u * 63)));
+    var by = Math.min(63, Math.max(0, Math.round(v * 63)));
+    var cx = Math.min(15, Math.max(0, Math.round(u * 15)));
+    var cy = Math.min(15, Math.max(0, Math.round(v * 15)));
+    return lumBlur[by * 64 + bx] - lumCoarse[cy * 16 + cx];
+  }
 
   function analyzePhoto(px) {
     var rows = [], y, x, o;
@@ -476,19 +599,6 @@
              + (3 + fbm(x * 0.012, z * 0.012, seedMap) * 15) * wgt;
         }
 
-        var distP = Math.sqrt((x - PX) * (x - PX) + (z - PZ) * (z - PZ));
-        var det = (fbm(x * 0.070, z * 0.070, seedMap + 3) - 0.5) * 2.4 +
-                  (fbm(x * 0.22, z * 0.22, seedMap + 8) - 0.5) * 1.5 +
-                  (fbm(x * 0.55, z * 0.55, seedMap + 21) - 0.5) * 0.95 +
-                  (fbm(x * 1.05, z * 1.05, seedMap + 44) - 0.5) * 0.45;
-        var hh = hg + det * (0.42 + Math.min(1, distP / 110) * 1.35);
-
-
-
-        hh = Math.max(1, Math.min(HMAX, Math.round(hh)));
-        baseH[i] = hh;
-        heights[i] = hh;
-
         // 用世界坐标做投影（而不是模型格），地面纹理会细 5 倍
         var fz2 = PZ - z; if (fz2 < 1.2) fz2 = 1.2;
         var uu = 0.5 + ((x - PX) / fz2) / (2 * TANF);
@@ -504,6 +614,30 @@
         if (gk > 1) gk = 1;
         var vv = g0 + (g1v - g0) * (0.42 + 0.54 * gk);
         if (uu < 0 || uu > 1) uu = uu < 0 ? 0 : 1;
+        var distP = Math.sqrt((x - PX) * (x - PX) + (z - PZ) * (z - PZ));
+        var det = (fbm(x * 0.070, z * 0.070, seedMap + 3) - 0.5) * 2.4 +
+                  (fbm(x * 0.22, z * 0.22, seedMap + 8) - 0.5) * 1.5 +
+                  (fbm(x * 0.55, z * 0.55, seedMap + 21) - 0.5) * 0.95 +
+                  (fbm(x * 1.05, z * 1.05, seedMap + 44) - 0.5) * 0.45;
+        // 照片里的明暗细节 → 地形起伏：亮处隆起、暗处塌陷，阴影关系跟着原图走
+        var ldet = lumDetailAt(uu, vv);
+        var lAbs = sampleLum(uu, vv);
+        var shadeBias = 0;
+        if (lAbs >= 0) {
+          var ln = (lAbs - lumLow) / Math.max(0.04, lumHigh - lumLow);
+          shadeBias = (ln - 0.5) * 1.9;                   // 整体明暗 → 缓慢的高低
+        }
+        var hh = hg + det * (0.42 + Math.min(1, distP / 110) * 1.35)
+                    + ldet * 3.8                            // 中频结构（明暗起伏）
+                    + shadeBias * Math.min(1, distP / 60);  // 近处弱、远处强
+
+
+
+        if (!isFinite(hh)) hh = 3;
+        hh = Math.max(1, Math.min(HMAX, Math.round(hh)));
+        baseH[i] = hh;
+        heights[i] = hh;
+
         samplePhoto(uu, vv, tmpc);
         var mr = Math.round(mirrorIdx(r, PATCH));
         var mc = Math.round(mirrorIdx(c, PATCH));
@@ -532,7 +666,7 @@
         var fB = Math.min(255, cb2 * jit * hTint * 255);
         // 最后统一压一次饱和度，杜绝孤立的高饱和色块
         var fL = fR * 0.3 + fG * 0.59 + fB * 0.11 + 4;
-        var lo2 = fL * 0.62, hi2 = fL * 1.34;
+        var lo2 = fL * 0.54, hi2 = fL * 1.5;
         cR0[i] = fR < lo2 ? lo2 : (fR > hi2 ? hi2 : fR);
         cG0[i] = fG < lo2 ? lo2 : (fG > hi2 ? hi2 : fG);
         cB0[i] = fB < lo2 ? lo2 : (fB > hi2 ? hi2 : fB);
@@ -553,7 +687,50 @@
           var med = (srt[1] + srt[2]) * 0.5;
           baseH[i] = med; heights[i] = med;
         }
+        // 3×3 均值再压一次，去掉"高塔/深井"这类看起来像 bug 的柱子
+        var a3 = 0;
+        for (var zz3 = -1; zz3 <= 1; zz3++) {
+          for (var xx3 = -1; xx3 <= 1; xx3++) a3 += tmpH[i + zz3 * WORLD + xx3];
+        }
+        a3 /= 9;
+        if (Math.abs(v0 - a3) > 5) {
+          baseH[i] = a3 > v0 ? v0 : a3;
+          heights[i] = baseH[i];
+        }
       }
+    }
+
+    // 环境光遮蔽：与邻域均值比较，谷地压暗、脊线提亮
+    for (z = 1; z < WORLD - 1; z++) {
+      for (x = 1; x < WORLD - 1; x++) {
+        i = z * WORLD + x;
+        var so = 0;
+        for (var dz3 = -2; dz3 <= 2; dz3 += 2) {
+          for (var dx3 = -2; dx3 <= 2; dx3 += 2) so += baseH[i + dz3 * WORLD + dx3];
+        }
+        so /= 9;
+        var aok = 1 + (baseH[i] - so) * 0.055;
+        aoMap[i] = aok < 0.72 ? 0.72 : (aok > 1.18 ? 1.18 : aok);
+      }
+    }
+
+    buildLighting();
+
+    // 自动曝光：算完光照后，把色彩整体缩放到"和照片地面一样亮"
+    var sumC = 0, sumL = 0;
+    for (i = 0; i < heights.length; i += 7) {
+      sumC += (cR0[i] * 0.299 + cG0[i] * 0.587 + cB0[i] * 0.114) * 0.7;
+      sumL += litMap[i] * aoMap[i];
+    }
+    var nS = Math.ceil(heights.length / 7);
+    var meanC = (sumC / nS) || 1, meanL = (sumL / nS) || 1;
+    var gain = (groundLum * 255) / Math.max(20, meanC * meanL * 0.95);
+    gain = Math.max(0.55, Math.min(2.1, gain));
+    for (i = 0; i < heights.length; i++) {
+      cR0[i] = Math.min(255, cR0[i] * gain);
+      cG0[i] = Math.min(255, cG0[i] * gain);
+      cB0[i] = Math.min(255, cB0[i] * gain);
+      cR[i] = cR0[i]; cG[i] = cG0[i]; cB[i] = cB0[i];
     }
 
     voxTotal = 0;
@@ -562,11 +739,60 @@
     document.getElementById('s-vox').textContent = (voxTotal / 1e6).toFixed(2) + 'M';
   }
 
+  /* ---------------- 光照：方向来自照片 + 高度场投影阴影 ---------------- */
+  var sunHX = 0, sunHZ = 0, sunSlope = 1;
+
+  function buildLighting() {
+    var x, z, i;
+    var hl = Math.sqrt(sunX * sunX + sunZ * sunZ) || 1e-6;
+    sunHX = sunX / hl; sunHZ = sunZ / hl;
+    sunSlope = sunY / hl;                     // 每前进 1 格抬升多少
+
+    for (z = 0; z < WORLD; z++) {
+      for (x = 0; x < WORLD; x++) {
+        i = z * WORLD + x;
+        var h = baseH[i];
+        var hL = x > 0 ? baseH[i - 1] : h;
+        var hR = x < WORLD - 1 ? baseH[i + 1] : h;
+        var hU = z > 0 ? baseH[i - WORLD] : h;
+        var hD = z < WORLD - 1 ? baseH[i + WORLD] : h;
+        var nx = (hL - hR) * 0.5, nz = (hU - hD) * 0.5;
+        var nl = Math.sqrt(nx * nx + 1 + nz * nz);
+        var diff = (nx / nl) * sunX + (1 / nl) * sunY + (nz / nl) * sunZ;
+        if (diff < 0) diff = 0;
+
+        // 朝太阳方向步进，被更高地形挡住就是阴影
+        var shadow = 1;
+        for (var t = 1.2; t < 15; t += 1.2) {
+          var sx2 = Math.round(x + sunHX * t), sz2 = Math.round(z + sunHZ * t);
+          if (sx2 < 0 || sx2 >= WORLD || sz2 < 0 || sz2 >= WORLD) break;
+          if (baseH[sz2 * WORLD + sx2] > h + sunSlope * t + 0.5) { shadow = 0.46; break; }
+        }
+        litMap[i] = Math.min(1.46, 0.40 + 0.86 * diff) * shadow;
+      }
+    }
+  }
+
+  function relightCell(i) {
+    var x = i % WORLD, z = (i / WORLD) | 0;
+    var h = heights[i];
+    var hL = x > 0 ? heights[i - 1] : h;
+    var hR = x < WORLD - 1 ? heights[i + 1] : h;
+    var hU = z > 0 ? heights[i - WORLD] : h;
+    var hD = z < WORLD - 1 ? heights[i + WORLD] : h;
+    var nx = (hL - hR) * 0.5, nz = (hU - hD) * 0.5;
+    var nl = Math.sqrt(nx * nx + 1 + nz * nz);
+    var diff = (nx / nl) * sunX + (1 / nl) * sunY + (nz / nl) * sunZ;
+    if (diff < 0) diff = 0;
+    var tgt = Math.min(1.46, 0.40 + 0.86 * diff);
+    litMap[i] += (tgt - litMap[i]) * 0.06;    // 缓慢跟随，杜绝亮度突跳
+  }
+
   /* ---------------- 实时变化 ---------------- */
   var live = false, chaos = 0.45, mem = 0.35;
   var tick = 0, cursor = 0, CHUNK = 9000;
 
-  var chgAcc = 0, colDrift = 0;
+  var chgAcc = 0;
 
   function driftStep(dt) {
     if (!live) return;
@@ -580,23 +806,20 @@
     var devLim = 9 + (1 - anchor) * 12;
     var freq = 0.015 + chaos * 0.095;
     var k = Math.min(0.6, dt * (0.32 + rate * (0.7 + chaos * 2.6)));
-    var perTick = Math.round(5000 + chaos * 26000);
-    var tintAmp = chaos * 0.42;
-    colDrift += dt * (1 - anchor) * 0.35;
+    var perTick = Math.round(5000 + chaos * 22000);
+    var forget = 1 - anchor;              // 遗忘程度：越接近 1，配色越淡出原图
 
     var end = Math.min(WORLD * WORLD, cursor + perTick);
     for (var i = cursor; i < end; i++) {
       var x = i % WORLD, z = (i / WORLD) | 0;
       var cur = heights[i];
-      var nz2 = (fbm(x * freq + tick * 0.55, z * freq - tick * 0.45, seedMap + 77) - 0.5) * 2
-              + (fbm(x * 0.022 - tick * 0.25, z * 0.022 + tick * 0.3, seedMap + 133) - 0.5)
-              + (fbm(x * 0.30 + tick * 1.7, z * 0.30 + tick * 1.3, seedMap + 311) - 0.5) * 2 * (1 - anchor) * 1.8;
-      // 离玩家越近越稳（脚下不该突然变成墙），远处随便乱
+      // 噪声只朝一个方向平移（不再沿对角/反向，避免看起来像在旋转）
+      var nz2 = (fbm(x * freq + tick * 0.30, z * freq + tick * 0.18, seedMap + 77) - 0.5) * 2
+              + (fbm(x * 0.022 + tick * 0.14, z * 0.022 + tick * 0.09, seedMap + 133) - 0.5);
       var ddx = x - cam.x, ddz = z - cam.z;
       var dd = Math.sqrt(ddx * ddx + ddz * ddz);
       var nf = dd < 30 ? (0.26 + 0.74 * (dd / 30)) : 1;
       var tgt = baseH[i] * anchor + cur * (1 - anchor) + nz2 * amp * nf;
-      // 钳制窗口：记得照片时围绕它；忘了照片（anchor=0）时改成围绕全高度中点，完全不参考原图
       var center = baseH[i] * anchor + (HMAX * 0.5) * (1 - anchor);
       var lo = center - devLim, hi = center + devLim;
       if (tgt < lo) tgt = lo;
@@ -610,17 +833,18 @@
       var nv = cur + (tgt - cur) * k * (0.55 + 0.45 * nf);
       if (Math.abs(nv - cur) > 0.4) chgAcc++;
       heights[i] = nv;
+      relightCell(i);
 
-      // 颜色也参与"重新想象"：混乱度给色偏，低记忆力让色相整体漂移（逐渐脱离原图配色）
-      if (tintAmp > 0.01 || colDrift > 0.01) {
-        var t2 = 1 + (fbm(x * 0.018 + tick * 0.22, z * 0.018 - tick * 0.19, seedMap + 555) - 0.5) * 2 * tintAmp;
-        var t3 = 1 + (fbm(x * 0.05 - tick * 0.4, z * 0.05 + tick * 0.35, seedMap + 606) - 0.5) * 1.4 * tintAmp;
-        var ang = colDrift + (fbm(x * 0.010, z * 0.010, seedMap + 909) - 0.5) * 2.4 * (1 - anchor);
-        var ca = Math.cos(ang), sa = Math.sin(ang);
-        var r0 = cR0[i], g0 = cG0[i], b0 = cB0[i];
-        cR[i] = Math.min(255, (r0 * ca + g0 * sa) * t2);
-        cG[i] = Math.min(255, (g0 * ca + b0 * sa) * t2 * t3);
-        cB[i] = Math.min(255, (b0 * ca + r0 * sa) * t3);
+      // 颜色不再逐帧抖动亮度：只随"遗忘程度"把配色缓缓推向一个更灰、更冷的版本
+      if (forget > 0.01) {
+        var l0 = cR0[i] * 0.3 + cG0[i] * 0.59 + cB0[i] * 0.11;
+        var cool = 0.86, warm = 1.02;
+        var tgR = (l0 * 0.96 + (cR0[i] - l0) * 0.34) * cool;
+        var tgG = (l0 * 1.00 + (cG0[i] - l0) * 0.34) * 1.0;
+        var tgB = (l0 * 1.06 + (cB0[i] - l0) * 0.34) * warm;
+        cR[i] += (tgR - cR[i]) * 0.02 * forget;
+        cG[i] += (tgG - cG[i]) * 0.02 * forget;
+        cB[i] += (tgB - cB[i]) * 0.02 * forget;
       }
     }
     cursor = end >= WORLD * WORLD ? 0 : end;
@@ -658,12 +882,18 @@
   window.addEventListener('resize', resize);
   resize();
 
+  var flickOn = /flick/.test(location.search), flickPrev = -1, flickMax = 0;
+
   function render() {
     var H = RH, Wd = RW, buf = buf32;
     var horizon = H * 0.5 + pitch * projScale;
     var camY = cam.y + 1.62;
 
     var hR = skyHor[0], hG = skyHor[1], hB = skyHor[2];
+    // 雾色：照片地平线色，掺一点天顶色，保证远近同一天光
+    var hazeR = skyHor[0] * 0.55 + groundRGB[0] * 0.45;
+    var hazeG = skyHor[1] * 0.55 + groundRGB[1] * 0.45;
+    var hazeB = skyHor[2] * 0.55 + groundRGB[2] * 0.45;
 
     // 背景板：直接把照片按当前视角贴在后面（转身时横向平移，纵向对齐地平线）
     if (photoHi && !/nobg/.test(location.search)) {
@@ -687,7 +917,10 @@
         var base = y * Wd;
         for (var x2 = 0; x2 < Wd; x2++) {
           var so = rowOff + xMap[x2] * 3;
-          var rr2 = photoHi[so] * 232, gg2 = photoHi[so + 1] * 232, bb2 = photoHi[so + 2] * 232;
+          var soft = 0.58;
+          var rr2 = photoHi[so] * 232 * soft + hazeR * (1 - soft);
+          var gg2 = photoHi[so + 1] * 232 * soft + hazeG * (1 - soft);
+          var bb2 = photoHi[so + 2] * 232 * soft + hazeB * (1 - soft);
           buf[base + x2] = (255 << 24) | ((bb2 | 0) << 16) | ((gg2 | 0) << 8) | (rr2 | 0);
         }
       }
@@ -706,6 +939,9 @@
         buf.fill((255 << 24) | ((b2 | 0) << 16) | ((g2 | 0) << 8) | (r2 | 0), y3 * Wd, y3 * Wd + Wd);
       }
     }
+
+    var g0 = horizFrac + 0.06, g1v = 0.995;
+    if (g1v - g0 < 0.12) g0 = g1v - 0.12;
 
     var fwdX = -Math.sin(yaw), fwdZ = -Math.cos(yaw);
     var rgtX = Math.cos(yaw), rgtZ = -Math.sin(yaw);
@@ -729,35 +965,77 @@
         var h = heights[idx];
         var sy = horizon + (camY - h) * projScale / z;
         if (sy < yBuf) {
-          var fog = (z - 42) / 135;
-          if (fog < 0) fog = 0; else if (fog > 0.82) fog = 0.82;
-          var hL = heights[idx - 1], hB = heights[idx + WORLD];
-          var slope = ((h - hL) + (h - hB)) * 0.5;
-          if (slope > 2.2) slope = 2.2; else if (slope < -2.2) slope = -2.2;
-          var shade = (1 - fog * 0.55) * (1.12 + slope * 0.075);
-          if (shade < 0.24) shade = 0.24;
-          var sh = shade;
-          var rr = cR[idx] * sh, gg = cG[idx] * sh, bb = cB[idx] * sh;
+          // 大气雾：只混向"照片地平线色"，不再采到天空/云，避免山脊被天空色切成浅色块
+          var haze = (z - 85) / 200;
+          if (haze < 0) haze = 0; else if (haze > 0.60) haze = 0.60;
 
-          if (rr > 255) rr = 255; if (gg > 255) gg = 255; if (bb > 255) bb = 255;
+          // 静态光照（方向来自照片）+ 环境光遮蔽，逐帧一致，不会闪
+          var sh = litMap[idx] * aoMap[idx];
+          if (sh < 0.20) sh = 0.20; else if (sh > 1.62) sh = 1.62;
+
           var y0 = sy | 0; if (y0 < 0) y0 = 0;
           var y1 = yBuf | 0; if (y1 > H) y1 = H;
-          if (photoHi && fog > 0.02) {
-            // 远处的地形溶解进背后的照片（雾 = 原图，而不是固定天空色）
-            var nf2 = 1 - fog;
-            for (var yy2 = y0; yy2 < y1; yy2++) {
-              var bi = yy2 * Wd + sx;
-              var bg = buf[bi];
-              var br = bg & 255, bgc = (bg >> 8) & 255, bbc = (bg >> 16) & 255;
-              var r3 = rr * nf2 + br * fog;
-              var g3 = gg * nf2 + bgc * fog;
-              var b3 = bb * nf2 + bbc * fog;
-              if (r3 > 255) r3 = 255; if (g3 > 255) g3 = 255; if (b3 > 255) b3 = 255;
-              buf[bi] = (255 << 24) | ((b3 | 0) << 16) | ((g3 | 0) << 8) | (r3 | 0);
+
+          // 光照只做轻微调制：照片自己已经带有真实的明暗与阴影
+          var lig = litMap[idx] * aoMap[idx];
+          if (lig < 0.30) lig = 0.30; else if (lig > 1.35) lig = 1.35;
+          var lMild = 0.66 + 0.34 * lig;
+          var hCell = h;
+          var baseD = camY - hCell;
+          // 地形高过眼睛时，平面反投影无解（会拉出竖条），这一列改用平面纹理
+          var flatCol = baseD <= 0.8;
+          if (baseD < 0.6) baseD = 0.6;
+
+          for (var yy = y0; yy < y1; yy++) {
+            var dyh = (yy + 0.5) - horizon;
+            if (dyh < 1.5) dyh = 1.5;
+            var zz = flatCol ? z : baseD * projScale / dyh;   // 该像素对应的地面深度
+            var wx2 = cam.x + dx * zz, wz2 = cam.z + dz * zz;
+            var fz3 = PZ - wz2;
+            var uu2, vv2;
+            if (fz3 > 6 && !flatCol) {
+              uu2 = 0.5 + ((wx2 - PX) / fz3) / (2 * TANF);
+              var gk2 = (1.7 / fz3) / (2 * TANF) * 1.1;
+              if (gk2 > 1) gk2 = 1;
+              vv2 = g0 + (g1v - g0) * (0.42 + 0.54 * gk2);
+            } else {
+              // 到了建造相机背后：换用平面世界坐标，纹理不会出现竖条
+              uu2 = 0.5 + (wx2 - PX) / 96;
+              var pv = 0.5 + (wz2 - PZ) / 96;
+              if (pv < 0) pv = 0; else if (pv > 1) pv = 1;
+              // 只在地面带里取样，否则会抽到照片的天空 → 地面冒出白斑
+              vv2 = g0 + (g1v - g0) * pv;
             }
-          } else {
-            var cc = (255 << 24) | ((Math.min(255, bb) | 0) << 16) | ((Math.min(255, gg) | 0) << 8) | (Math.min(255, rr) | 0);
-            for (var yy = y0; yy < y1; yy++) buf[yy * Wd + sx] = cc;
+            if (uu2 < 0 || uu2 > 1) {              // 三角波包裹，视野外继续有纹理
+              var twx = ((uu2 % 2) + 2) % 2;
+              uu2 = twx < 1 ? twx : 2 - twx;
+            }
+            if (vv2 < 0 || vv2 > 1) {
+              var twv = ((vv2 % 2) + 2) % 2;
+              vv2 = twv < 1 ? twv : 2 - twv;
+            }
+
+            var hzp = (zz - 110) / 210;
+            if (hzp < 0) hzp = 0; else if (hzp > 0.46) hzp = 0.46;
+            var lp = lMild * (1.05 - 0.16 * (yy - y0) / Math.max(1, y1 - y0));
+
+            var r4, g4, b4;
+            if (photoHi) {
+              var px2 = (uu2 * 255) | 0, py2 = (vv2 * 255) | 0;
+              var o2 = (py2 * 256 + px2) * 3;
+              r4 = photoHi[o2] * 255 * lp;
+              g4 = photoHi[o2 + 1] * 255 * lp;
+              b4 = photoHi[o2 + 2] * 255 * lp;
+            } else {
+              r4 = cR[idx] * lp; g4 = cG[idx] * lp; b4 = cB[idx] * lp;
+            }
+            var nh = 1 - hzp;
+            r4 = r4 * nh + hazeR * hzp;
+            g4 = g4 * nh + hazeG * hzp;
+            b4 = b4 * nh + hazeB * hzp;
+
+            buf[yy * Wd + sx] = (255 << 24) | (((b4 > 255 ? 255 : b4) | 0) << 16)
+                              | (((g4 > 255 ? 255 : g4) | 0) << 8) | ((r4 > 255 ? 255 : r4) | 0);
           }
           yBuf = sy;
         }
@@ -893,6 +1171,7 @@
         photoHi[hj + 1] = hpx[hi2 + 1] / 255;
         photoHi[hj + 2] = hpx[hi2 + 2] / 255;
       }
+      analyzeShading();
       bar.style.width = '28%';
       barTxt.textContent = '模型推理';
 
@@ -973,6 +1252,27 @@
   /* ---------------- 主循环 ---------------- */
   var lastT = performance.now(), fpsA = 0, fpsN = 0, hudT = 0, driftAcc = 0, dbgT = 0;
 
+  var flickN = 0, flickLog = [];
+  function measureFlicker() {
+    if (!flickOn || !buf32) return;
+    var sum = 0, n = 0;
+    for (var q = 0; q < buf32.length; q += 5) {
+      var c = buf32[q];
+      sum += (c & 255) * 0.299 + ((c >> 8) & 255) * 0.587 + ((c >> 16) & 255) * 0.114;
+      n++;
+    }
+    var mean = sum / Math.max(1, n);
+    flickN++;
+    if (flickN < 30) { flickPrev = mean; return; }   // 跳过启动阶段的稳定化
+    if (flickLog.length < 10) flickLog.push(Math.round(mean * 10) / 10);
+    if (flickPrev >= 0 && flickN > 30) {
+      var d = Math.abs(mean - flickPrev);
+      if (d > flickMax) flickMax = d;
+    }
+    flickPrev = mean;
+    document.title = 'flick max=' + flickMax.toFixed(3) + ' mean=' + mean.toFixed(1) + ' log=' + flickLog.join(',');
+  }
+
   function frame(now, sim) {
     var dt = Math.min((now - lastT) / 1000, 0.05);
     lastT = now;
@@ -1010,6 +1310,7 @@
     }
 
     render();
+    measureFlicker();
 
     if (/dbg/.test(location.search)) {
       dbgT += dt;
