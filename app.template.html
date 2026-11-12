@@ -727,6 +727,8 @@
 
     voxTotal = 0;
     for (i = 0; i < heights.length; i++) voxTotal += baseH[i];
+    camYBuild = playerH + 1.62;
+    buildDIBR();
     document.getElementById('s-cell').textContent = (WORLD * WORLD / 1000).toFixed(0) + 'k';
     document.getElementById('s-vox').textContent = (voxTotal / 1e6).toFixed(2) + 'M';
   }
@@ -842,6 +844,113 @@
     cursor = end >= WORLD * WORLD ? 0 : end;
   }
 
+  /* ---------------- 图像重投影（DIBR）：把照片本身当成世界 ---------------- */
+  var SRC = 256;
+  var srcPos = null, srcCol = null, srcValid = null, zbuf = null, dibrReady = false;
+  var camYBuild = 20;
+
+  function buildDIBR() {
+    if (!photoHi) return;
+    srcPos = new Float32Array(SRC * SRC * 3);
+    srcCol = new Uint32Array(SRC * SRC);
+    srcValid = new Uint8Array(SRC * SRC);
+    var i = 0;
+    varies: for (var v = 0; v < SRC; v++) {
+      // 源行全部铺在"照片的地面部分"上（0..255 里只有约 45% 是地面），否则近景会被拉伸
+      var vy = horizFrac + (v + 0.5) / SRC * (1 - horizFrac);
+      var vrow = Math.min(255, Math.max(0, Math.round(vy * 255)));
+      for (var u = 0; u < SRC; u++, i++) {
+        var px = u / (SRC - 1);
+        var o = (vrow * SRC + u) * 3;
+        var cr = photoHi[o] * 255, cg = photoHi[o + 1] * 255, cb = photoHi[o + 2] * 255;
+        if (cr > 255) cr = 255; if (cg > 255) cg = 255; if (cb > 255) cb = 255;
+        srcCol[i] = (255 << 24) | ((cb | 0) << 16) | ((cg | 0) << 8) | (cr | 0);
+        var dyPix = (vy - horizFrac) * RH;
+        if (dyPix < 1.5) dyPix = 1.5;
+        var ux = (px - 0.5) * 2 * TANF;
+        var dist = camYBuild * projScale / dyPix;       // 平地假设
+        var wx = PX + ux * dist, wz = PZ - dist;
+        var ix = Math.round(wx), iz = Math.round(wz);
+        var hg = 6;
+        if (ix >= 0 && ix < WORLD && iz >= 0 && iz < WORLD) hg = heights[iz * WORLD + ix];
+        dist = (camYBuild - hg) * projScale / dyPix;    // 用地形高度修正一次
+        if (dist < 0.8) continue;
+        if (dist > 260) dist = 260;
+        srcPos[i * 3] = PX + ux * dist;
+        srcPos[i * 3 + 1] = hg;
+        srcPos[i * 3 + 2] = PZ - dist;
+        srcValid[i] = 1;
+      }
+    }
+    dibrReady = true;
+  }
+
+  function renderDIBR() {
+    var H = RH, Wd = RW, buf = buf32;
+    var horizon = H * 0.5 + pitch * projScale;
+    // 蓝天
+    for (var y3 = 0; y3 < H; y3++) {
+      var kk = (y3 - horizon) / H, tr, tg, tb;
+      if (kk < 0) {
+        var t1 = Math.min(1, -kk * 1.45); t1 = t1 * t1 * (3 - 2 * t1);
+        tr = 190 + (58 - 190) * t1; tg = 219 + (124 - 219) * t1; tb = 246 + (206 - 246) * t1;
+      } else {
+        var t2 = Math.min(1, kk * 3.0);
+        tr = 190 + 18 * t2; tg = 219 + 8 * t2; tb = 246 - 14 * t2;
+      }
+      var pc = (255 << 24) | ((tb | 0) << 16) | ((tg | 0) << 8) | (tr | 0);
+      for (var x3 = 0; x3 < Wd; x3++) buf[y3 * Wd + x3] = pc;
+    }
+    if (!dibrReady) { vctx.putImageData(imgData, 0, 0); return; }
+
+    if (!zbuf || zbuf.length !== Wd * H) zbuf = new Float32Array(Wd * H);
+    zbuf.fill(0);
+
+    var cyw = Math.cos(yaw), syw = Math.sin(yaw);
+    var cp = Math.cos(pitch), sp = Math.sin(pitch);
+    var fx = -syw * cp, fy = sp, fz = -cyw * cp;       // 前
+    var rx = cyw, ry = 0, rz = -syw;                    // 右
+    var ux2 = syw * sp, uy2 = cp, uz2 = cyw * sp;       // 上
+    var camY = cam.y + 1.62;
+    var cx = cam.x, cz = cam.z;
+
+    for (var i = 0; i < SRC * SRC; i++) {
+      if (!srcValid[i]) continue;
+      var px = srcPos[i * 3] - cx, py = srcPos[i * 3 + 1] - camY, pz = srcPos[i * 3 + 2] - cz;
+      var zc = px * fx + py * fy + pz * fz;
+      if (zc < 0.4) continue;
+      var xc = px * rx + pz * rz;
+      var yc = px * ux2 + py * uy2 + pz * uz2;
+      var sx = (Wd * 0.5 + (xc / zc) * projScale) | 0;
+      var sy2 = (H * 0.5 - (yc / zc) * projScale) | 0;
+      if (sx < 0 || sx >= Wd || sy2 < 0 || sy2 >= H) continue;
+      // 2×2 splat：源像素比屏幕稀，铺开才不会出现横向拉丝
+      var col = srcCol[i];
+      for (var oy = 0; oy < 2; oy++) {
+        var yy2 = sy2 + oy;
+        if (yy2 < 0 || yy2 >= H) continue;
+        var row2 = yy2 * Wd;
+        for (var ox = 0; ox < 2; ox++) {
+          var xx2 = sx + ox;
+          if (xx2 < 0 || xx2 >= Wd) continue;
+          var di = row2 + xx2;
+          if (zbuf[di] === 0 || zc < zbuf[di]) { zbuf[di] = zc; buf[di] = col; }
+        }
+      }
+    }
+
+    // 空洞：横向抹平（Oasis 那种"模型补出来的地方有点糊"的感觉）
+    for (var y4 = 0; y4 < H; y4++) {
+      var row = y4 * Wd, last = 0;
+      for (var x4 = 0; x4 < Wd; x4++) {
+        var d4 = row + x4;
+        if (zbuf[d4] !== 0) last = buf[d4];
+        else if (last !== 0) buf[d4] = last;
+      }
+    }
+    vctx.putImageData(imgData, 0, 0);
+  }
+
   /* ---------------- 渲染 ---------------- */
   var cam = { x: PX + 0.5, y: 20, z: PZ + 0.5, vy: 0, ground: true };
   var yaw = 0, pitch = -0.05;
@@ -878,6 +987,7 @@
   var flickOn = /flick/.test(location.search), flickPrev = -1, flickMax = 0;
 
   function render() {
+    if (dibrReady && !/hf/.test(location.search)) { renderDIBR(); return; }
     var H = RH, Wd = RW, buf = buf32;
     var horizon = H * 0.5 + pitch * projScale;
     var camY = cam.y + 1.62;
