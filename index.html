@@ -93,10 +93,78 @@
     font-size:clamp(9.5px,1.25vw,11.5px); letter-spacing:.42em; color:#e2b34a;
     opacity:0; animation:rise 700ms cubic-bezier(.22,1,.36,1) 120ms forwards; }
   .t-kicker em { width:28px; height:1px; background:rgba(226,179,74,.6); font-style:normal; }
-  .t-name { font-size:clamp(34px,8vw,96px); font-weight:900; line-height:.94; letter-spacing:-.025em;
-    color:#f5f0e7; text-shadow:0 26px 84px rgba(3,6,12,.62);
-    opacity:0; animation:rise 800ms cubic-bezier(.22,1,.36,1) 220ms forwards; }
-  .t-name i { color:#e2b34a; font-weight:300; font-style:normal; padding:0 .04em; }
+  .t-name { position:relative; font-size:clamp(26px,8.6vw,96px); font-weight:900; line-height:.96;
+    letter-spacing:-.02em; color:#f8f3ea; padding-right:.06em;
+    filter:drop-shadow(0 22px 58px rgba(3,6,12,.55));
+    opacity:0; animation:fadeIn 520ms ease 180ms forwards; }
+  .t-name .L { display:inline-block; font-style:normal; transform-origin:50% 88%;
+    text-shadow:
+                0.0125em 0.0125em 0 rgb(214,160,72),
+                0.0250em 0.0250em 0 rgb(205,152,68),
+                0.0375em 0.0375em 0 rgb(195,144,63),
+                0.0500em 0.0500em 0 rgb(186,136,59),
+                0.0625em 0.0625em 0 rgb(176,129,54),
+                0.0750em 0.0750em 0 rgb(167,121,50),
+                0.0875em 0.0875em 0 rgb(158,113,45),
+                0.1000em 0.1000em 0 rgb(148,105,41),
+                0.1125em 0.1125em 0 rgb(139,97,36),
+                0.1250em 0.1250em 0 rgb(130,89,32),
+                0.1375em 0.1375em 0 rgb(120,82,27),
+                0.1500em 0.1500em 0 rgb(111,74,23),
+                0.1625em 0.1625em 0 rgb(101,66,18),
+                0.1750em 0.1750em 0 rgb(92,58,14);
+    animation:extrude 820ms cubic-bezier(.22,1,.36,1) both;
+    animation-delay:calc(220ms + var(--i) * 70ms); }
+  /* 平面 -> 立体：字母先"躺着"，再立起来并长出厚度 */
+  @keyframes extrude {
+    0% { opacity:0;
+         transform:perspective(680px) translateY(.2em) rotateX(-58deg) scale(.97);
+         text-shadow:
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0); }
+    22% { opacity:1;
+          transform:perspective(680px) translateY(.2em) rotateX(-58deg) scale(.97); }
+    100% { opacity:1;
+           transform:perspective(680px) translateY(0) rotateX(0deg) scale(1);
+           text-shadow:
+                0.0125em 0.0125em 0 rgb(214,160,72),
+                0.0250em 0.0250em 0 rgb(205,152,68),
+                0.0375em 0.0375em 0 rgb(195,144,63),
+                0.0500em 0.0500em 0 rgb(186,136,59),
+                0.0625em 0.0625em 0 rgb(176,129,54),
+                0.0750em 0.0750em 0 rgb(167,121,50),
+                0.0875em 0.0875em 0 rgb(158,113,45),
+                0.1000em 0.1000em 0 rgb(148,105,41),
+                0.1125em 0.1125em 0 rgb(139,97,36),
+                0.1250em 0.1250em 0 rgb(130,89,32),
+                0.1375em 0.1375em 0 rgb(120,82,27),
+                0.1500em 0.1500em 0 rgb(111,74,23),
+                0.1625em 0.1625em 0 rgb(101,66,18),
+                0.1750em 0.1750em 0 rgb(92,58,14); }
+  }
+  /* 从左到右扫过的一道光：被它扫到的字母才立起来 */
+  .t-name::after { content:''; position:absolute; top:-14%; bottom:-10%; width:2px; left:-2%;
+    background:linear-gradient(180deg,transparent,rgba(255,222,168,.95) 30%,rgba(226,179,74,.35) 70%,transparent);
+    opacity:0; animation:beam 1180ms cubic-bezier(.45,0,.3,1) 280ms both; }
+  @keyframes beam {
+    0% { left:-2%; opacity:0; }
+    14% { opacity:1; }
+    82% { opacity:1; }
+    100% { left:101%; opacity:0; }
+  }
+  @keyframes fadeIn { from{opacity:0} to{opacity:1} }
   .t-sub { margin-top:clamp(15px,3vw,28px); font-size:clamp(12.5px,1.65vw,16px); font-weight:300;
     line-height:1.9; color:rgba(228,221,209,.86); max-width:50ch;
     opacity:0; animation:rise 800ms cubic-bezier(.22,1,.36,1) 340ms forwards; }
@@ -127,6 +195,8 @@
     #panel * { animation-duration:.01ms !important; animation-delay:0ms !important; }
   }
   body.noanim #panel * { animation:none !important; opacity:1 !important; transform:none !important; }
+  /* 保底显示：只保证可见，不改动 transform（否则立体姿态会被抹平） */
+  body.reveal #panel * { animation:none !important; opacity:1 !important; }
   .t-foot { position:absolute; left:clamp(24px,7vw,92px); bottom:max(18px,env(safe-area-inset-bottom));
     font-size:10px; letter-spacing:.3em; color:rgba(228,221,209,.42);
     opacity:0; animation:rise 800ms cubic-bezier(.22,1,.36,1) 780ms forwards; }
@@ -142,7 +212,7 @@
 
   @media (max-width:720px) {
     #panel { padding:26px 20px 30px; justify-content:center; }
-    .t-name { font-size:clamp(36px,12.6vw,66px); }
+    .t-name { font-size:clamp(24px,8.8vw,60px); }
     .t-foot { left:20px; bottom:14px; letter-spacing:.22em; }
     .start-btn { padding:14px 26px; font-size:13.5px; }
     #examples img { width:46px; height:46px; }
@@ -195,7 +265,7 @@
     <div class="t-scan"></div>
     <div class="t-inner">
       <div class="t-kicker"><em></em>LOCAL WORLD MODEL · 本地推理</div>
-      <h1 class="t-name">PHOTO <i>&rarr;</i>WORLD</h1>
+      <h1 class="t-name" aria-label="PHOTOWORLD"><span class="L" aria-hidden="true" style="--i:0">P</span><span class="L" aria-hidden="true" style="--i:1">H</span><span class="L" aria-hidden="true" style="--i:2">O</span><span class="L" aria-hidden="true" style="--i:3">T</span><span class="L" aria-hidden="true" style="--i:4">O</span><span class="L" aria-hidden="true" style="--i:5">W</span><span class="L" aria-hidden="true" style="--i:6">O</span><span class="L" aria-hidden="true" style="--i:7">R</span><span class="L" aria-hidden="true" style="--i:8">L</span><span class="L" aria-hidden="true" style="--i:9">D</span></h1>
       <p class="t-sub">一张照片就是一个世界。本地训练的小网络把画面摊成 <b>260 万个方块</b>，<br>
         走进去，转个身，它会慢慢忘掉这张照片——<b>记忆漂移</b>。</p>
       <div class="t-actions">
@@ -228,10 +298,26 @@ var EXAMPLES = ["data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBAUE
 (function () {
   'use strict';
   if (/noanim/.test(location.search)) document.body.classList.add('noanim');
+  // 调试：?wflat=1 → 强制显示"平面态"字母，用于对比截图
+  if (/wflat/.test(location.search)) {
+    var wf = document.createElement('style');
+    wf.textContent = '.t-name .L{animation:none!important;opacity:1!important;' +
+      'transform:perspective(680px) translateY(.2em) rotateX(-58deg) scale(.97)!important;text-shadow:none!important}';
+    document.head.appendChild(wf);
+  }
+  // 调试：?wstate=秒 → 把字母的立体化动画冻结在某一时刻，便于截图检查
+  var wm = location.search.match(/wstate=([0-9.]+)/);
+  if (wm) {
+    var wst = document.createElement('style');
+    wst.textContent =
+      '.t-name .L{animation-play-state:paused!important;animation-delay:calc(200ms + var(--i) * 66ms - ' + wm[1] + 's)!important}' +
+      '.t-name::after{animation-play-state:paused!important;animation-delay:calc(240ms - ' + wm[1] + 's)!important}';
+    document.head.appendChild(wst);
+  }
   // 兜底：万一 CSS 动画没跑（被禁用 / 环境异常），1.8s 后强制把开屏显示出来
   setTimeout(function () {
     var n = document.querySelector('.t-name');
-    if (n && parseFloat(getComputedStyle(n).opacity) < 0.9) document.body.classList.add('noanim');
+    if (n && parseFloat(getComputedStyle(n).opacity) < 0.9) document.body.classList.add('reveal');
   }, 1800);
 
   var HMAX = 28;

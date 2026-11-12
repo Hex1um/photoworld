@@ -1,0 +1,71 @@
+  .t-name { position:relative; font-size:clamp(28px,9.2vw,96px); font-weight:900; line-height:.96;
+    letter-spacing:-.02em; color:#f8f3ea; padding-right:.06em;
+    filter:drop-shadow(0 22px 58px rgba(3,6,12,.55));
+    opacity:0; animation:fadeIn 520ms ease 180ms forwards; }
+  .t-name .L { display:inline-block; font-style:normal; transform-origin:50% 88%;
+    text-shadow:
+                0.0125em 0.0125em 0 rgb(214,160,72),
+                0.0250em 0.0250em 0 rgb(205,152,68),
+                0.0375em 0.0375em 0 rgb(195,144,63),
+                0.0500em 0.0500em 0 rgb(186,136,59),
+                0.0625em 0.0625em 0 rgb(176,129,54),
+                0.0750em 0.0750em 0 rgb(167,121,50),
+                0.0875em 0.0875em 0 rgb(158,113,45),
+                0.1000em 0.1000em 0 rgb(148,105,41),
+                0.1125em 0.1125em 0 rgb(139,97,36),
+                0.1250em 0.1250em 0 rgb(130,89,32),
+                0.1375em 0.1375em 0 rgb(120,82,27),
+                0.1500em 0.1500em 0 rgb(111,74,23),
+                0.1625em 0.1625em 0 rgb(101,66,18),
+                0.1750em 0.1750em 0 rgb(92,58,14);
+    animation:extrude 820ms cubic-bezier(.22,1,.36,1) both;
+    animation-delay:calc(200ms + var(--i) * 66ms); }
+  /* 平面 -> 立体：字母先"躺着"，再立起来并长出厚度 */
+  @keyframes extrude {
+    0% { opacity:0;
+         transform:perspective(760px) translateY(.18em) rotateX(-46deg) scale(.97);
+         text-shadow:
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0),
+                0 0 0 rgba(0,0,0,0); }
+    38% { opacity:1; }
+    100% { opacity:1;
+           transform:perspective(760px) translateY(0) rotateX(0deg) scale(1);
+           text-shadow:
+                0.0125em 0.0125em 0 rgb(214,160,72),
+                0.0250em 0.0250em 0 rgb(205,152,68),
+                0.0375em 0.0375em 0 rgb(195,144,63),
+                0.0500em 0.0500em 0 rgb(186,136,59),
+                0.0625em 0.0625em 0 rgb(176,129,54),
+                0.0750em 0.0750em 0 rgb(167,121,50),
+                0.0875em 0.0875em 0 rgb(158,113,45),
+                0.1000em 0.1000em 0 rgb(148,105,41),
+                0.1125em 0.1125em 0 rgb(139,97,36),
+                0.1250em 0.1250em 0 rgb(130,89,32),
+                0.1375em 0.1375em 0 rgb(120,82,27),
+                0.1500em 0.1500em 0 rgb(111,74,23),
+                0.1625em 0.1625em 0 rgb(101,66,18),
+                0.1750em 0.1750em 0 rgb(92,58,14); }
+  }
+  /* 从左到右扫过的一道光：被它扫到的字母才立起来 */
+  .t-name::after { content:''; position:absolute; top:-14%; bottom:-10%; width:2px; left:-2%;
+    background:linear-gradient(180deg,transparent,rgba(255,222,168,.95) 30%,rgba(226,179,74,.35) 70%,transparent);
+    opacity:0; animation:beam 760ms cubic-bezier(.45,0,.3,1) 240ms both; }
+  @keyframes beam {
+    0% { left:-2%; opacity:0; }
+    14% { opacity:1; }
+    82% { opacity:1; }
+    100% { left:101%; opacity:0; }
+  }
+  @keyframes fadeIn { from{opacity:0} to{opacity:1} }
