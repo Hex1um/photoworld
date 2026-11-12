@@ -828,7 +828,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
           var ln = (lAbs - lumLow) / Math.max(0.04, lumHigh - lumLow);
           shadeBias = (ln - 0.5) * 2.8;                   // 整体明暗 → 缓慢的高低
         }
-        var hh = hg + det * (0.26 + Math.min(1, distP / 110) * 0.70)
+        var hh = hg + det * (0.46 + Math.min(1, distP / 110) * 0.62)
                     + ldet * 6.5                            // 照片里的明暗结构（主导起伏）
                     + shadeBias * Math.min(1, distP / 60);  // 近处弱、远处强
 
