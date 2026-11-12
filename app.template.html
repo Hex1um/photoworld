@@ -406,7 +406,7 @@
   var TONE = new Uint8Array(512);
   (function () {
     for (var ti = 0; ti < 512; ti++) {
-      var x = ti / 255, y;
+      var x = ti / 255 * 1.07, y;                      // 1.07 = 曝光补偿，抵消曲线带来的整体压暗
       if (x <= 0.72) y = x * (0.96 + 0.055 * x);       // 暗部略压，黑更实
       else {
         var t = (x - 0.72) / 0.62; if (t > 1) t = 1;
