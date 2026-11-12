@@ -273,15 +273,14 @@
   <div id="fx"><div id="scan"></div><div id="vig"></div></div>
 
   <div id="hud" style="display:none">
-    <div id="badge"><span id="dot"></span><span id="badgeTxt">PHOTO → WORLD · 本地模型</span></div>
+    <div id="badge"><span id="dot"></span><span id="badgeTxt">看到的地方不会变</span></div>
     <div id="stats">
-      推理 <b id="s-ms">--</b> ms<br>
-      体素 <b id="s-vox">0</b><br>
-      地块 <b id="s-cell">0</b><br>
-      改写 <b id="s-chg">0</b> 格<br>
+      模型 <b id="s-ms">--</b> ms<br>
+      方块 <b id="s-vox">0</b><br>
+      变了 <b id="s-chg">0</b> 格<br>
       FPS <b id="s-fps">--</b>
     </div>
-    <div id="hint"><b>H</b> 隐藏界面<br><b>E</b> 锚定记忆<br><b>双击空格</b> 飞行</div>
+    <div id="hint"><b>H</b> 收起界面<br><b>E</b> 钉住这块地<br><b>双击空格</b> 飞</div>
     <div id="cross"></div>
 
     <div id="panelUI">
@@ -300,9 +299,9 @@
         <div class="row"><span class="lab">记忆力</span><span class="val" id="v-mem">0.35</span></div>
         <input type="range" id="r-mem" min="0" max="100" value="35">
       </div>
-      <div class="cap">混乱度越高，地形重排越剧烈<br>记忆力为 0 时只根据上一帧生成<br>（马尔可夫链，不再参考照片）</div>
+      <div class="cap">只改你看不见的地方<br>混乱度：变得多厉害<br>记忆力：还记得多少，0 就是全忘</div>
       <div id="anchorRow">
-        <span class="lab">记忆锚点 <b id="v-anchor" style="color:#cfe0ee">0</b></span>
+        <span class="lab">钉住的记忆 <b id="v-anchor" style="color:#cfe0ee">0</b></span>
         <button id="anchorBtn">锚定这里</button>
       </div>
     </div>
@@ -322,24 +321,24 @@
     <div class="t-grain"></div>
     <div class="t-scan"></div>
     <div class="t-inner">
-      <div class="t-kicker"><em></em>LOCAL WORLD MODEL · 本地推理</div>
+      <div class="t-kicker"><em></em>把照片变成能走的地方</div>
       <h1 class="t-name" aria-label="PHOTOWORLD"><span class="L" aria-hidden="true" style="--i:0">P</span><span class="L" aria-hidden="true" style="--i:1">H</span><span class="L" aria-hidden="true" style="--i:2">O</span><span class="L" aria-hidden="true" style="--i:3">T</span><span class="L" aria-hidden="true" style="--i:4">O</span><span class="L" aria-hidden="true" style="--i:5">W</span><span class="L" aria-hidden="true" style="--i:6">O</span><span class="L" aria-hidden="true" style="--i:7">R</span><span class="L" aria-hidden="true" style="--i:8">L</span><span class="L" aria-hidden="true" style="--i:9">D</span></h1>
-      <p class="t-sub">一张照片就是一个世界。本地训练的小网络把画面摊成 <b>260 万个方块</b>，<br>
-        走进去，转个身，它会慢慢忘掉这张照片——<b>记忆漂移</b>。</p>
+      <p class="t-sub">选一张照片，人就走进去了，四周都是 <b>方块</b>。<br>
+        开「实时变化」，<b>没看见的地方</b>会自己变；转回头，山可能已经平了。</p>
       <div class="t-actions">
         <button id="pick" class="start-btn">选择照片</button>
       </div>
       <div id="drop">也可以直接把照片拖进这个窗口</div>
       <div id="examples"><span id="examples-note">示例</span></div>
       <div class="t-controls">
-        <span>WASD 移动</span><i></i><span>空格 跳 · 双击 飞</span><i></i><span>E 锚定记忆</span><i></i><span>H 隐藏界面</span>
+        <span>WASD 移动</span><i></i><span>空格 跳 · 双击 飞</span><i></i><span>E 钉住这块地</span><i></i><span>H 收起界面</span>
       </div>
     </div>
-    <div class="t-foot">零依赖 · 浏览器内推理 · 混乱度 / 记忆力</div>
+    <div class="t-foot">模型在浏览器里跑，不用联网</div>
   </div>
 
   <div id="busy">
-    <div class="t">正在重建这个空间</div>
+    <div class="t">正在搭起来</div>
     <div id="bar"><i></i></div>
     <div class="s"></div>
   </div>
@@ -930,6 +929,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     /* ---------- 水面与积雾高度 ---------- */
     // 锚点每张照片重建时都要清空，否则上一张的记忆会串到这张
     for (i = 0; i < anchorMap.length; i++) anchorMap[i] = 0;
+    resetSeen();
     detectWater();
     // 积雾高度：只用最低的那一小撮洼地起雾。取 15/85 分位的相对位置，
     // 否则"整片世界都很低"的照片会被雾整片糊掉
@@ -969,7 +969,6 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     for (i = 0; i < heights.length; i++) voxTotal += baseH[i];
     camYBuild = playerH + 1.62;
     buildDIBR();
-    document.getElementById('s-cell').textContent = (WORLD * WORLD / 1000).toFixed(0) + 'k';
     document.getElementById('s-vox').textContent = (voxTotal / 1e6).toFixed(2) + 'M';
   }
 
@@ -1047,8 +1046,29 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
   var chgAcc = 0;
   var rewriteTotal = 0;      // 累计改写次数（叙事用，不随时间清零）
 
+  var seenT = null;          // 每个地块最后一次出现在视野里的时刻
+  var simT = 0;              // 世界时间（秒）
+  var VIEW_D2 = 240 * 240;   // 和渲染最远距离对齐，远山也算"看得见"
+  var COS_VIEW = Math.cos(1.15 * 0.5 + 0.10);   // 视野半角再放一点，避免屏幕边缘突变
+
+  function resetSeen() {
+    seenT = new Float32Array(WORLD * WORLD);
+    simT = 0;
+  }
+
+  // 这块地在不在你眼前：视野外、或远到看不见，才算"没看见"
+  function cellHidden(x, z, fx, fz) {
+    var dx = x - cam.x, dz = z - cam.z;
+    var d2 = dx * dx + dz * dz;
+    if (d2 < 20) return false;                 // 脚下一圈永远算看得到
+    if (d2 > VIEW_D2) return true;
+    return (dx * fx + dz * fz) / Math.sqrt(d2) < COS_VIEW;
+  }
+
   function driftStep(dt) {
     if (!live) return;
+    simT += dt;
+    if (!seenT) resetSeen();
     // 混乱度越高：梦境场演化更快、空间频率更高、每次改写的地块更多、幅度更大
     tick += dt * (0.5 + chaos * 3.0);
     var rate = (1 - mem) * 2.2;
@@ -1062,9 +1082,18 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     var perTick = Math.round(5000 + chaos * 22000);
     var forget = 1 - anchor;              // 遗忘程度：越接近 1，配色越淡出原图
 
+    var fwdX = -Math.sin(yaw), fwdZ = -Math.cos(yaw);
     var end = Math.min(WORLD * WORLD, cursor + perTick);
     for (var i = cursor; i < end; i++) {
       var x = i % WORLD, z = (i / WORLD) | 0;
+
+      // 眼前的格一格都不许动，只记下"刚看过"
+      if (!cellHidden(x, z, fwdX, fwdZ)) { seenT[i] = simT; continue; }
+      var age = simT - seenT[i];
+      if (age < 0.5) continue;                 // 刚转过去半秒内，还当它没变
+      var ramp = (age - 0.5) / 2.2;            // 离开视线越久，忘得越彻底
+      if (ramp > 1) ramp = 1;
+
       var cur = heights[i];
       // 记忆锚点：这一格被钉在照片上，周围照旧崩坏 —— 全局 mem 只是下限
       var aMap = anchorMap[i];
@@ -1077,7 +1106,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
       var ddx = x - cam.x, ddz = z - cam.z;
       var dd = Math.sqrt(ddx * ddx + ddz * ddz);
       var nf = dd < 30 ? (0.26 + 0.74 * (dd / 30)) : 1;
-      var tgt = baseH[i] * anchorI + cur * (1 - anchorI) + nz2 * ampI * nf;
+      var tgt = baseH[i] * anchorI + cur * (1 - anchorI) + nz2 * ampI * nf * ramp;
       var center = baseH[i] * anchorI + (HMAX * 0.5) * (1 - anchorI);
       var devLim = 9 + (1 - anchorI) * 12;
       var lo = center - devLim, hi = center + devLim;
@@ -1085,11 +1114,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
       if (tgt > hi) tgt = hi;
       if (tgt < 1) tgt = 1;
       if (tgt > HMAX) tgt = HMAX;
-      if (dd < 11) {
-        var w2 = (1 - dd / 11) * 0.85;
-        tgt = tgt * (1 - w2) + cam.y * w2;
-      }
-      var nv = cur + (tgt - cur) * k * (0.55 + 0.45 * nf);
+      var nv = cur + (tgt - cur) * k * ramp;
       if (Math.abs(nv - cur) > 0.4) chgAcc++;
       heights[i] = nv;
       relightCell(i);
@@ -1102,9 +1127,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
         var tgR = (l0 * 0.96 + (cR0[i] - l0) * 0.34) * cool;
         var tgG = (l0 * 1.00 + (cG0[i] - l0) * 0.34) * 1.0;
         var tgB = (l0 * 1.06 + (cB0[i] - l0) * 0.34) * warm;
-        cR[i] += (tgR - cR[i]) * 0.02 * forget;
-        cG[i] += (tgG - cG[i]) * 0.02 * forget;
-        cB[i] += (tgB - cB[i]) * 0.02 * forget;
+        var wf = 0.02 * forget * ramp;
+        cR[i] += (tgR - cR[i]) * wf;
+        cG[i] += (tgG - cG[i]) * wf;
+        cB[i] += (tgB - cB[i]) * wf;
       }
     }
     cursor = end >= WORLD * WORLD ? 0 : end;
@@ -1482,17 +1508,17 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
   var prev = document.getElementById('prev');
 
   /* 加载时滚动的碎语：成本≈0，性格 +100 */
-  var loadPh = ['正在想象山的另一边…', '给水面留一点光…', '把地平线往后推一点…', '核对阴影的方向…', '正在忘掉照片的边框…'];
-  var loadPhI = 0, loadTimer = 0, stageTxt = '正在重建这个空间';
+  var loadPh = ['读照片', '算高度', '铺地面', '配颜色'];
+  var loadPhI = 0, loadTimer = 0, stageTxt = '正在搭起来';
   function setStage(t) {
     stageTxt = t;
-    barTxt.textContent = t + ' · ' + loadPh[loadPhI % loadPh.length];
+    barTxt.textContent = t;
   }
   function startLoadPhrases() {
     if (loadTimer) clearInterval(loadTimer);
     loadTimer = setInterval(function () {
       loadPhI++;
-      barTxt.textContent = stageTxt + ' · ' + loadPh[loadPhI % loadPh.length];
+      barTxt.textContent = stageTxt;
     }, 950);
   }
   function stopLoadPhrases() {
@@ -1526,7 +1552,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     busy.style.display = 'flex';
     bar.style.width = '6%';
     loadPhI = 0;
-    setStage('读取像素');
+    setStage('读照片');
     startLoadPhrases();
     setTimeout(function () {
       prev.width = 96; prev.height = 96;
@@ -1557,7 +1583,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
       }
       analyzeShading();
       bar.style.width = '28%';
-      setStage('模型推理');
+      setStage('算地形');
 
       setTimeout(function () {
         var t0 = performance.now();
@@ -1582,7 +1608,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
           }
         }
         bar.style.width = '64%';
-        setStage('构建世界');
+        setStage('铺地面');
         setTimeout(function () {
           var sd = location.search.match(/seed=([0-9]+)/);
           seedMap = sd ? (parseInt(sd[1], 10) || 7) : (1 + Math.floor(Math.random() * 99999));
@@ -1727,9 +1753,16 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
       dbgT += dt;
       if (dbgT > 0.6) {
         dbgT = 0;
-        var diff = 0;
-        for (var di = 0; di < heights.length; di += 37) diff += Math.abs(heights[di] - baseH[di]);
-        document.title = 'drift=' + (diff / (heights.length / 37)).toFixed(3) + ' live=' + live + ' C=' + chaos.toFixed(2) + ' M=' + mem.toFixed(2);
+        var dHide = 0, nHide = 0, dVis = 0, nVis = 0;
+        var fx0 = -Math.sin(yaw), fz0 = -Math.cos(yaw);
+        for (var di = 0; di < heights.length; di += 37) {
+          var dv = Math.abs(heights[di] - baseH[di]);
+          if (cellHidden(di % WORLD, (di / WORLD) | 0, fx0, fz0)) { dHide += dv; nHide++; }
+          else { dVis += dv; nVis++; }
+        }
+        document.title = 'hidden=' + (dHide / Math.max(1, nHide)).toFixed(3) +
+          ' visible=' + (dVis / Math.max(1, nVis)).toFixed(3) +
+          ' live=' + live + ' C=' + chaos.toFixed(2) + ' M=' + mem.toFixed(2);
       }
     }
 
@@ -1771,6 +1804,11 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     lastT = t;
     var n = Math.min(900, Math.round(seconds * 60));
     for (var i = 0; i < n; i++) { t += step; frame(t, true); }
+    var tm = location.search.match(/turn=([-0-9.]+)/);
+    if (tm) {
+      yaw += parseFloat(tm[1]);
+      for (var q = 0; q < 3; q++) { t += step; frame(t, true); }
+    }
   };
 
   /* ---------------- UI ---------------- */
@@ -1813,7 +1851,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     sw.className = 'sw' + (live ? ' on' : '');
     sliders.className = live ? '' : 'off';
     dot.className = live ? 'live' : '';
-    if (!fly) badgeTxt.textContent = live ? 'PHOTO → WORLD · 实时变化中' : 'PHOTO → WORLD · 本地模型';
+    if (!fly) badgeTxt.textContent = live ? '看不到的地方在变' : '看到的地方不会变';
     updateStory();
   }
   sw.addEventListener('click', function () { setLive(!live); });
@@ -1904,11 +1942,11 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
   function updateStory() {
     if (!started) return;
     if (!live) {
-      storyEl.innerHTML = '世界停在原地 · 打开「实时变化」，它会开始忘记这张照片';
+      storyEl.innerHTML = '实时变化关着，画面不会动';
       storyHide = performance.now() + 6500;
     } else {
-      storyEl.innerHTML = '它已经忘记这张照片 <b>' + Math.round(forgetRatio() * 100) + '%</b>' +
-        (anchorN ? ' · 锚点 <b>' + anchorN + '</b> 处记忆被钉住' : ' · 按 E 可以把某块地形钉在照片里');
+      storyEl.innerHTML = '你已经走过的地方变了 <b>' + Math.round(forgetRatio() * 100) + '%</b>' +
+        (anchorN ? ' · 钉住了 <b>' + anchorN + '</b> 格' : ' · 按 E 能钉住脚下的地');
       storyHide = performance.now() + 9000;
     }
     storyEl.classList.add('show');
@@ -1948,7 +1986,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     }
     anchorN++;
     document.getElementById('v-anchor').textContent = anchorN;
-    toast('已锚定 ' + hit + ' 格 · 这块地形会留在照片里');
+    toast('钉住了 ' + hit + ' 格，这块地不会变');
     drawMap();
     updateStory();
   }
@@ -1962,16 +2000,16 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     cam.vy = 0;
     if (fly) {
       cam.ground = false;
-      badgeTxt.textContent = 'PHOTO → WORLD · 飞行中';
+      badgeTxt.textContent = '飞着看';
     } else {
-      badgeTxt.textContent = live ? 'PHOTO → WORLD · 实时变化中' : 'PHOTO → WORLD · 本地模型';
+      badgeTxt.textContent = live ? '看不到的地方在变' : '看到的地方不会变';
     }
-    toast(fly ? '飞行 · 空格上升，Shift 加速' : '已恢复行走');
+    toast(fly ? '飞起来了：空格上升，Shift 加速' : '落地走路');
   }
   function toggleClean() {
     var on = document.body.classList.toggle('clean');
     if (on) storyEl.classList.remove('show');
-    toast(on ? '干净模式 · 按 H 恢复界面' : '界面已恢复');
+    toast(on ? '界面收起来了，按 H 叫回来' : '界面回来了');
   }
 
   /* ---------------- 对比图导出 ---------------- */
