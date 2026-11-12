@@ -122,6 +122,7 @@
       推理 <b id="s-ms">--</b> ms<br>
       体素 <b id="s-vox">0</b><br>
       地块 <b id="s-cell">0</b><br>
+      改写 <b id="s-chg">0</b>/s<br>
       FPS <b id="s-fps">--</b>
     </div>
     <div id="cross"></div>
@@ -184,6 +185,9 @@ var EXAMPLES = ["data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBAUE
   var cR = new Uint8ClampedArray(WORLD * WORLD);
   var cG = new Uint8ClampedArray(WORLD * WORLD);
   var cB = new Uint8ClampedArray(WORLD * WORLD);
+  var cR0 = new Uint8ClampedArray(WORLD * WORLD);
+  var cG0 = new Uint8ClampedArray(WORLD * WORLD);
+  var cB0 = new Uint8ClampedArray(WORLD * WORLD);
 
   var view = document.getElementById('view');
   var vctx = view.getContext('2d');
@@ -401,9 +405,10 @@ var EXAMPLES = ["data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBAUE
           cg2 = cg2 * (1 - wgt) + (avg[1] * 1.1 + 0.05) * wgt;
           cb2 = cb2 * (1 - wgt) + (avg[2] * 1.1 + 0.05) * wgt;
         }
-        cR[i] = Math.min(255, cr2 * jit * 255);
-        cG[i] = Math.min(255, cg2 * jit * 255);
-        cB[i] = Math.min(255, cb2 * jit * 255);
+        cR0[i] = Math.min(255, cr2 * jit * 255);
+        cG0[i] = Math.min(255, cg2 * jit * 255);
+        cB0[i] = Math.min(255, cb2 * jit * 255);
+        cR[i] = cR0[i]; cG[i] = cG0[i]; cB[i] = cB0[i];
       }
     }
 
@@ -433,26 +438,53 @@ var EXAMPLES = ["data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBAUE
   var live = false, chaos = 0.45, mem = 0.35;
   var tick = 0, cursor = 0, CHUNK = 9000;
 
+  var chgAcc = 0;
+
   function driftStep(dt) {
     if (!live) return;
-    tick += dt;
-    var rate = (1 - mem) * 3.0;
-    if (rate <= 0.001) return;
-    // anchor=1 完全记得照片；anchor=0 只依赖上一帧（马尔可夫链）
+    // 混乱度越高：梦境场演化更快、空间频率更高、每次改写的地块更多、幅度更大
+    tick += dt * (0.5 + chaos * 3.0);
+    var rate = (1 - mem) * 2.2;
+    if (rate <= 0.001 && chaos <= 0.002) return;
+
     var anchor = mem;
-    var amp = chaos * 18 * (0.15 + (1 - anchor) * 0.85);
-    var k = Math.min(0.62, dt * (0.6 + rate * 1.2));
-    var end = Math.min(WORLD * WORLD, cursor + CHUNK);
+    var amp = Math.pow(chaos, 0.85) * 21 * (0.24 + (1 - anchor) * 0.76);
+    var devLim = 9 + (1 - anchor) * 12;
+    var freq = 0.015 + chaos * 0.095;
+    var k = Math.min(0.6, dt * (0.32 + rate * (0.7 + chaos * 2.6)));
+    var perTick = Math.round(5000 + chaos * 26000);
+    var tintAmp = chaos * 0.42;
+
+    var end = Math.min(WORLD * WORLD, cursor + perTick);
     for (var i = cursor; i < end; i++) {
       var x = i % WORLD, z = (i / WORLD) | 0;
       var cur = heights[i];
-      var nz2 = (fbm(x * 0.070 + tick * 0.45, z * 0.070 - tick * 0.37, seedMap + 77) - 0.5) * 2
-              + (fbm(x * 0.020 - tick * 0.2, z * 0.020 + tick * 0.24, seedMap + 133) - 0.5)
-              + (fbm(x * 0.34 + tick * 1.5, z * 0.34 + tick * 1.1, seedMap + 311) - 0.5) * 2 * (1 - anchor) * 1.7;
-      var tgt = baseH[i] * anchor + cur * (1 - anchor) + nz2 * amp;
+      var nz2 = (fbm(x * freq + tick * 0.55, z * freq - tick * 0.45, seedMap + 77) - 0.5) * 2
+              + (fbm(x * 0.022 - tick * 0.25, z * 0.022 + tick * 0.3, seedMap + 133) - 0.5)
+              + (fbm(x * 0.30 + tick * 1.7, z * 0.30 + tick * 1.3, seedMap + 311) - 0.5) * 2 * (1 - anchor) * 1.8;
+      // 离玩家越近越稳（脚下不该突然变成墙），远处随便乱
+      var ddx = x - cam.x, ddz = z - cam.z;
+      var dd = Math.sqrt(ddx * ddx + ddz * ddz);
+      var nf = dd < 30 ? (0.26 + 0.74 * (dd / 30)) : 1;
+      var tgt = baseH[i] * anchor + cur * (1 - anchor) + nz2 * amp * nf;
+      // 相对"照片记忆"的偏移设上限，混乱拉满也不会塌成墙阵
+      var lo = baseH[i] - devLim, hi = baseH[i] + devLim;
+      if (tgt < lo) tgt = lo;
+      if (tgt > hi) tgt = hi;
       if (tgt < 1) tgt = 1;
       if (tgt > HMAX) tgt = HMAX;
-      heights[i] = cur + (tgt - cur) * k;
+      var nv = cur + (tgt - cur) * k * (0.55 + 0.45 * nf);
+      if (Math.abs(nv - cur) > 0.4) chgAcc++;
+      heights[i] = nv;
+
+      // 混乱度高时，颜色也跟着重新想象（大尺度色偏，不是噪点）
+      if (tintAmp > 0.01) {
+        var t2 = 1 + (fbm(x * 0.018 + tick * 0.22, z * 0.018 - tick * 0.19, seedMap + 555) - 0.5) * 2 * tintAmp;
+        var t3 = 1 + (fbm(x * 0.05 - tick * 0.4, z * 0.05 + tick * 0.35, seedMap + 606) - 0.5) * 1.4 * tintAmp;
+        cR[i] = Math.min(255, cR0[i] * t2);
+        cG[i] = Math.min(255, cG0[i] * t2 * t3);
+        cB[i] = Math.min(255, cB0[i] * t3);
+      }
     }
     cursor = end >= WORLD * WORLD ? 0 : end;
   }
@@ -711,7 +743,8 @@ var EXAMPLES = ["data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBAUE
         bar.style.width = '64%';
         barTxt.textContent = '构建世界';
         setTimeout(function () {
-          seedMap = 1 + Math.floor(Math.random() * 99999);
+          var sd = location.search.match(/seed=([0-9]+)/);
+          seedMap = sd ? (parseInt(sd[1], 10) || 7) : (1 + Math.floor(Math.random() * 99999));
           buildWorld(PHl, PCl, avg);
           bar.style.width = '100%';
           setTimeout(function () {
@@ -722,6 +755,7 @@ var EXAMPLES = ["data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBAUE
             land();
             fadeIn(curUrl);
             started = true;
+            if (/live/.test(location.search)) setLive(true);
             var ssm = location.search.match(/sim=([0-9.]+)/);
             if (ssm && window.__simFrames) window.__simFrames(parseFloat(ssm[1]));
           }, 100);
@@ -816,7 +850,11 @@ var EXAMPLES = ["data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBAUE
     fpsA += dt; fpsN++;
     if (now - hudT > 500) {
       hudT = now;
-      if (started) document.getElementById('s-fps').textContent = fpsA > 0.05 ? Math.round(fpsN / fpsA) : 0;
+      if (started) {
+        document.getElementById('s-fps').textContent = fpsA > 0.05 ? Math.round(fpsN / fpsA) : 0;
+        document.getElementById('s-chg').textContent = Math.round(chgAcc * 2);
+        chgAcc = 0;
+      }
       fpsA = 0; fpsN = 0;
     }
     if (!sim) requestAnimationFrame(frame);
@@ -865,13 +903,14 @@ var EXAMPLES = ["data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBAUE
   var sliders = document.getElementById('sliders');
   var dot = document.getElementById('dot');
   var badgeTxt = document.getElementById('badgeTxt');
-  sw.addEventListener('click', function () {
-    live = !live;
+  function setLive(v) {
+    live = !!v;
     sw.className = 'sw' + (live ? ' on' : '');
     sliders.className = live ? '' : 'off';
     dot.className = live ? 'live' : '';
     badgeTxt.textContent = live ? 'PHOTO → WORLD · 实时变化中' : 'PHOTO → WORLD · 本地模型';
-  });
+  }
+  sw.addEventListener('click', function () { setLive(!live); });
 
   var rc = document.getElementById('r-chaos'), rm = document.getElementById('r-mem');
   rc.addEventListener('input', function () {
@@ -902,7 +941,7 @@ var EXAMPLES = ["data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBAUE
   var m = location.search.match(/ex=([0-9])/);
   if (m) setTimeout(function () { pickSample(EXAMPLES[+m[1] % EXAMPLES.length]); }, 260);
 
-  if (/live/.test(location.search)) setTimeout(function () { if (!live) sw.click(); }, 900);
+
 })();
 </script>
 </body>
