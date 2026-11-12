@@ -520,7 +520,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
 
     // 地面带的平均亮度与平均色 —— 世界最终要对齐这个曝光
     var ar2 = 0, ag2 = 0, ab2 = 0, an = 0;
-    for (y = Math.min(N - 1, hy + Math.round(N * 0.10)); y < N; y += 2) {
+    for (y = Math.round(N * 0.80); y < N; y += 2) {
       for (x = 0; x < N; x += 2) {
         o = (y * N + x) * 3;
         ar2 += src[o]; ag2 += src[o + 1]; ab2 += src[o + 2]; an++;
@@ -725,13 +725,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
         if (uu < 0) uu = 0; else if (uu > 1) uu = 1;
         if (vv < 0) vv = 0; else if (vv > 1) vv = 1;
         var jit = 0.86 + h2(x, z, seedMap + 5) * 0.28;
-        // 模型色先去饱和，避免冒出孤立的高饱和色块；主色仍来自照片
-        var pr = PC[ps], pg = PC[ps + 1], pb = PC[ps + 2];
-        var pl = pr * 0.3 + pg * 0.59 + pb * 0.11;
-        pr = pr * 0.4 + pl * 0.6; pg = pg * 0.4 + pl * 0.6; pb = pb * 0.4 + pl * 0.6;
-        var cr2 = (pr * 0.28 + tmpc[0] * 0.72) * 1.12 + 0.05;
-        var cg2 = (pg * 0.28 + tmpc[1] * 0.72) * 1.12 + 0.05;
-        var cb2 = (pb * 0.28 + tmpc[2] * 0.72) * 1.12 + 0.05;
+        // 颜色直接取自照片（几何由模型推理，颜色用原始观测）
+        var cr2 = tmpc[0] * 1.06 + 0.01;
+        var cg2 = tmpc[1] * 1.06 + 0.01;
+        var cb2 = tmpc[2] * 1.06 + 0.01;
         if (wgt > 0) {
           cr2 = cr2 * (1 - wgt) + (avg[0] * 0.55 + PC[ps] * 0.55) * wgt;
           cg2 = cg2 * (1 - wgt) + (avg[1] * 0.55 + PC[ps + 1] * 0.55) * wgt;
@@ -793,22 +790,28 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
 
     buildLighting();
 
-    // 自动曝光：算完光照后，把色彩整体缩放到"和照片地面一样亮"
-    var sumC = 0, sumL = 0;
-    for (i = 0; i < heights.length; i += 7) {
-      sumC += (cR0[i] * 0.299 + cG0[i] * 0.587 + cB0[i] * 0.114) * 0.7;
-      sumL += litMap[i] * aoMap[i];
+    // 自动曝光 + 白平衡：让世界的整体亮度和色相都对齐照片的地面色
+    var sumR = 0, sumG = 0, sumB = 0, sumL = 0, nS = 0, i2;
+    for (i2 = 0; i2 < heights.length; i2 += 7) {
+      var lw = litMap[i2] * aoMap[i2];
+      sumR += cR0[i2] * lw; sumG += cG0[i2] * lw; sumB += cB0[i2] * lw;
+      sumL += lw; nS++;
     }
-    var nS = Math.ceil(heights.length / 7);
-    var meanC = (sumC / nS) || 1, meanL = (sumL / nS) || 1;
-    var gain = (groundLum * 255 * 1.28) / Math.max(20, meanC * meanL * 0.95);
-    gain = Math.max(0.55, Math.min(2.1, gain));
-    for (i = 0; i < heights.length; i++) {
-      cR0[i] = Math.min(255, cR0[i] * gain);
-      cG0[i] = Math.min(255, cG0[i] * gain);
-      cB0[i] = Math.min(255, cB0[i] * gain);
-      cR[i] = cR0[i]; cG[i] = cG0[i]; cB[i] = cB0[i];
+    var mR = (sumR / nS) || 1, mG = (sumG / nS) || 1, mB = (sumB / nS) || 1, mL = (sumL / nS) || 1;
+    var tR = groundRGB[0] * 255, tG = groundRGB[1] * 255, tB = groundRGB[2] * 255;
+    // 只用"亮度"做一次温和校正，色相完全交给照片，避免把颜色拉偏
+    var tL = (tR * 0.299 + tG * 0.587 + tB * 0.114);
+    var mLum = (mR * 0.299 + mG * 0.587 + mB * 0.114) || 1;
+    var bal = Math.max(0.55, Math.min(1.35, tL / mLum));
+    var balR = bal, balG = bal, balB = bal;
+    void mL;
+    for (i2 = 0; i2 < heights.length; i2++) {
+      cR0[i2] = Math.min(255, cR0[i2] * balR);
+      cG0[i2] = Math.min(255, cG0[i2] * balG);
+      cB0[i2] = Math.min(255, cB0[i2] * balB);
+      cR[i2] = cR0[i2]; cG[i2] = cG0[i2]; cB[i2] = cB0[i2];
     }
+
 
     voxTotal = 0;
     for (i = 0; i < heights.length; i++) voxTotal += baseH[i];
@@ -973,50 +976,23 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
     var hazeG = skyHor[1] * 0.55 + groundRGB[1] * 0.45;
     var hazeB = skyHor[2] * 0.55 + groundRGB[2] * 0.45;
 
-    // 背景板：直接把照片按当前视角贴在后面（转身时横向平移，纵向对齐地平线）
-    if (photoHi && !/nobg/.test(location.search)) {
-      var NB = 256;
-      var nb2 = NB - 1;
-      var shift = 0;              // 天空固定，不随转头平移/旋转
-      var vScale = NB / H;
-      var v0 = horizFrac * NB;
-      if (!xMap) xMap = new Uint16Array(Wd);
-      var uScale = NB / Wd;
-      var uBase = NB * 0.5 + shift - Wd * 0.5 * uScale;
-      for (var xm = 0; xm < Wd; xm++) {
-        var ux = uBase + xm * uScale;
-        var ix = ((ux % NB) + NB) % NB;
-        xMap[xm] = ix | 0;
+    // 天空：纯蓝天（照片只作为"眼前看到的东西"参与推算，不当背景板）
+    for (var y3 = 0; y3 < H; y3++) {
+      var kk = (y3 - horizon) / H, tr, tg, tb;
+      if (kk < 0) {
+        var t1 = Math.min(1, -kk * 1.45);
+        t1 = t1 * t1 * (3 - 2 * t1);
+        tr = 190 + (58 - 190) * t1;
+        tg = 219 + (124 - 219) * t1;
+        tb = 246 + (206 - 246) * t1;
+      } else {
+        var t2 = Math.min(1, kk * 3.0);
+        tr = 190 + 18 * t2; tg = 219 + 8 * t2; tb = 246 - 14 * t2;
       }
-      for (var y = 0; y < H; y++) {
-        var vy = v0 + (y - horizon) * vScale;
-        var iy = vy < 0 ? 0 : (vy > nb2 ? nb2 : vy | 0);
-        var rowOff = (iy * NB) * 3;
-        var base = y * Wd;
-        for (var x2 = 0; x2 < Wd; x2++) {
-          var so = rowOff + xMap[x2] * 3;
-          var soft = 0.58;
-          var rr2 = photoHi[so] * 232 * soft + hazeR * (1 - soft);
-          var gg2 = photoHi[so + 1] * 232 * soft + hazeG * (1 - soft);
-          var bb2 = photoHi[so + 2] * 232 * soft + hazeB * (1 - soft);
-          buf[base + x2] = (255 << 24) | ((bb2 | 0) << 16) | ((gg2 | 0) << 8) | (rr2 | 0);
-        }
-      }
-    } else {
-      for (var y3 = 0; y3 < H; y3++) {
-        var t = (y3 - horizon) / H, r2, g2, b2;
-        if (t < 0) {
-          var kk = Math.min(1, -t * 1.55);
-          r2 = hR + (skyTop[0] - hR) * kk;
-          g2 = hG + (skyTop[1] - hG) * kk;
-          b2 = hB + (skyTop[2] - hB) * kk;
-        } else {
-          var kk2 = Math.min(1, t * 2.6);
-          r2 = hR + kk2 * 24; g2 = hG + kk2 * 20; b2 = hB + kk2 * 16;
-        }
-        buf.fill((255 << 24) | ((b2 | 0) << 16) | ((g2 | 0) << 8) | (r2 | 0), y3 * Wd, y3 * Wd + Wd);
-      }
+      buf.fill((255 << 24) | ((tb | 0) << 16) | ((tg | 0) << 8) | (tr | 0), y3 * Wd, y3 * Wd + Wd);
     }
+    // 远处的雾也混向这层蓝天
+    hazeR = 170; hazeG = 200; hazeB = 228;
 
     var g0 = horizFrac + 0.06, g1v = 0.995;
     if (g1v - g0 < 0.12) g0 = g1v - 0.12;
@@ -1058,7 +1034,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
 
           // 光照只做轻微调制：照片自己已经带有真实的明暗与阴影
           // 与更近一格的落差错开 ≥1 时，这一段是人眼看到的"侧面"
-          var wall = (hPrev >= 0 && h - hPrev >= 2);
+          var wall = (hPrev >= 0 && h - hPrev >= 1);
           var lig = litMap[idx] * aoMap[idx];
           if (lig < 0.30) lig = 0.30; else if (lig > 1.35) lig = 1.35;
           var lMild = 0.66 + 0.34 * lig;
@@ -1068,7 +1044,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
           var flatCol = baseD <= 0.8;
           if (baseD < 0.6) baseD = 0.6;
 
-          if (wall && y1 - y0 > 5) {
+          if (wall && y1 - y0 > 3) {
             // 立方体侧面：一整个面用同一种暗色，边界干脆
             var wR = cR[idx] * 0.82, wG = cG[idx] * 0.82, wB = cB[idx] * 0.82;
             var wsp = (y1 - y0) || 1;
@@ -1088,53 +1064,15 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PHOTO_INFE
             if (dyh < 1.5) dyh = 1.5;
             var zz = flatCol ? z : baseD * projScale / dyh;   // 该像素对应的地面深度
             var wx2 = cam.x + dx * zz, wz2 = cam.z + dz * zz;
-            // 地面用固定世界尺度的平铺纹理，避免透视把照片纵向拉成条纹
-            var TILE = 72;
-            var tu = (wx2 + 4096) / TILE, tv = (wz2 + 4096) / TILE;
-            var uu2 = tu - Math.floor(tu);
-            var vv2 = g0 + (g1v - g0) * (tv - Math.floor(tv));
-            var fz3 = PZ - wz2;
-            if (false) {
-              uu2 = 0.5 + ((wx2 - PX) / fz3) / (2 * TANF);
-              var gk2 = (1.7 / fz3) / (2 * TANF) * 1.1;
-              if (gk2 > 1) gk2 = 1;
-              vv2 = g0 + (g1v - g0) * (0.42 + 0.54 * gk2);
-            } else {
-              // 到了建造相机背后：换用平面世界坐标，纹理不会出现竖条
-              uu2 = 0.5 + (wx2 - PX) / 96;
-              var pv = 0.5 + (wz2 - PZ) / 96;
-              if (pv < 0) pv = 0; else if (pv > 1) pv = 1;
-              // 只在地面带里取样，否则会抽到照片的天空 → 地面冒出白斑
-              vv2 = g0 + (g1v - g0) * pv;
-            }
-            if (uu2 < 0 || uu2 > 1) {              // 三角波包裹，视野外继续有纹理
-              var twx = ((uu2 % 2) + 2) % 2;
-              uu2 = twx < 1 ? twx : 2 - twx;
-            }
-            if (vv2 < 0 || vv2 > 1) {
-              var twv = ((vv2 % 2) + 2) % 2;
-              vv2 = twv < 1 ? twv : 2 - twv;
-            }
-
-            var hzp = (zz - 110) / 210;
-            if (hzp < 0) hzp = 0; else if (hzp > 0.46) hzp = 0.46;
-            var lp = lMild * (1.05 - 0.16 * (yy - y0) / Math.max(1, y1 - y0));
-
-            var r4, g4, b4;
-            if (photoHi) {
-              var px2 = (uu2 * 255) | 0, py2 = (vv2 * 255) | 0;
-              var o2 = (py2 * 256 + px2) * 3;
-              r4 = photoHi[o2] * 255 * lp;
-              g4 = photoHi[o2 + 1] * 255 * lp;
-              b4 = photoHi[o2 + 2] * 255 * lp;
-            } else {
-              r4 = cR[idx] * lp; g4 = cG[idx] * lp; b4 = cB[idx] * lp;
-            }
+            // 地表颜色来自模型推理的颜色头（而不是把照片贴在平面上）
+            var hzp = (zz - 150) / 240;
+            if (hzp < 0) hzp = 0; else if (hzp > 0.34) hzp = 0.34;
+            var lp = lMild * (1.04 - 0.14 * (yy - y0) / Math.max(1, y1 - y0));
+            var r4 = cR[idx] * lp, g4 = cG[idx] * lp, b4 = cB[idx] * lp;
             var nh = 1 - hzp;
             r4 = r4 * nh + hazeR * hzp;
             g4 = g4 * nh + hazeG * hzp;
             b4 = b4 * nh + hazeB * hzp;
-
             buf[yy * Wd + sx] = (255 << 24) | (((b4 > 255 ? 255 : b4) | 0) << 16)
                               | (((g4 > 255 ? 255 : g4) | 0) << 8) | ((r4 > 255 ? 255 : r4) | 0);
           }
