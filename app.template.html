@@ -94,31 +94,30 @@
     opacity:0; animation:rise 700ms cubic-bezier(.22,1,.36,1) 120ms forwards; }
   .t-kicker em { width:28px; height:1px; background:rgba(226,179,74,.6); font-style:normal; }
   .t-name { position:relative; font-size:clamp(26px,8.6vw,96px); font-weight:900; line-height:.96;
-    letter-spacing:-.02em; color:#f8f3ea; padding-right:.06em;
+    letter-spacing:-.02em; padding-right:.09em;
     filter:drop-shadow(0 22px 58px rgba(3,6,12,.55));
     opacity:0; animation:fadeIn 520ms ease 180ms forwards; }
-  .t-name .L { display:inline-block; font-style:normal; transform-origin:50% 88%;
+  /* 每个字母：正面是像素棋盘，后面是分层台阶的厚度 */
+  .t-name .L { display:inline-block; font-style:normal; transform-origin:50% 92%;
+    color:#fdf6e7;
+    -webkit-text-stroke:.7px rgba(255,248,228,.6);
+    /* 像素化：棋盘抖动遮罩，一半像素露出后面的厚度色，形成像素明暗 */
+    -webkit-mask-image: repeating-conic-gradient(
+      rgba(0,0,0,1) 0 25%, rgba(0,0,0,.9) 0 50%,
+      rgba(0,0,0,1) 0 75%, rgba(0,0,0,.9) 0 100%);
+    -webkit-mask-size:.062em .062em;
     text-shadow:
-                0.0125em 0.0125em 0 rgb(214,160,72),
-                0.0250em 0.0250em 0 rgb(205,152,68),
-                0.0375em 0.0375em 0 rgb(195,144,63),
-                0.0500em 0.0500em 0 rgb(186,136,59),
-                0.0625em 0.0625em 0 rgb(176,129,54),
-                0.0750em 0.0750em 0 rgb(167,121,50),
-                0.0875em 0.0875em 0 rgb(158,113,45),
-                0.1000em 0.1000em 0 rgb(148,105,41),
-                0.1125em 0.1125em 0 rgb(139,97,36),
-                0.1250em 0.1250em 0 rgb(130,89,32),
-                0.1375em 0.1375em 0 rgb(120,82,27),
-                0.1500em 0.1500em 0 rgb(111,74,23),
-                0.1625em 0.1625em 0 rgb(101,66,18),
-                0.1750em 0.1750em 0 rgb(92,58,14);
-    animation:extrude 820ms cubic-bezier(.22,1,.36,1) both;
+                0.0380em 0.0380em 0 rgb(224,172,88),
+                0.0760em 0.0760em 0 rgb(188,138,62),
+                0.1140em 0.1140em 0 rgb(152,106,44),
+                0.1520em 0.1520em 0 rgb(116,78,30),
+                0.1900em 0.1900em 0 rgb(86,56,16);
+    animation:extrude 780ms steps(5, end) both;
     animation-delay:calc(220ms + var(--i) * 70ms); }
-  /* 平面 -> 立体：字母先"躺着"，再立起来并长出厚度 */
+  /* 扁平 → 像素化立体：先压扁成一条，再逐格跳成立方 */
   @keyframes extrude {
     0% { opacity:0;
-         transform:perspective(680px) translateY(.2em) rotateX(-58deg) scale(.97);
+         transform:perspective(640px) translateY(.22em) rotateX(-62deg) scale(.98, .34);
          text-shadow:
                 0 0 0 rgba(0,0,0,0),
                 0 0 0 rgba(0,0,0,0),
@@ -131,33 +130,22 @@
                 0 0 0 rgba(0,0,0,0),
                 0 0 0 rgba(0,0,0,0),
                 0 0 0 rgba(0,0,0,0),
-                0 0 0 rgba(0,0,0,0),
-                0 0 0 rgba(0,0,0,0),
                 0 0 0 rgba(0,0,0,0); }
-    22% { opacity:1;
-          transform:perspective(680px) translateY(.2em) rotateX(-58deg) scale(.97); }
+    18% { opacity:1; }
     100% { opacity:1;
-           transform:perspective(680px) translateY(0) rotateX(0deg) scale(1);
+           transform:perspective(640px) translateY(0) rotateX(0deg) scale(1, 1);
            text-shadow:
-                0.0125em 0.0125em 0 rgb(214,160,72),
-                0.0250em 0.0250em 0 rgb(205,152,68),
-                0.0375em 0.0375em 0 rgb(195,144,63),
-                0.0500em 0.0500em 0 rgb(186,136,59),
-                0.0625em 0.0625em 0 rgb(176,129,54),
-                0.0750em 0.0750em 0 rgb(167,121,50),
-                0.0875em 0.0875em 0 rgb(158,113,45),
-                0.1000em 0.1000em 0 rgb(148,105,41),
-                0.1125em 0.1125em 0 rgb(139,97,36),
-                0.1250em 0.1250em 0 rgb(130,89,32),
-                0.1375em 0.1375em 0 rgb(120,82,27),
-                0.1500em 0.1500em 0 rgb(111,74,23),
-                0.1625em 0.1625em 0 rgb(101,66,18),
-                0.1750em 0.1750em 0 rgb(92,58,14); }
+                0.1140em 0.1140em 0 rgb(152,106,44),
+                0.1520em 0.1520em 0 rgb(116,78,30),
+                0.1900em 0.1900em 0 rgb(86,56,16);
+                0.0380em 0.0380em 0 rgb(224,172,88),
+                0.0760em 0.0760em 0 rgb(188,138,62),
   }
-  /* 从左到右扫过的一道光：被它扫到的字母才立起来 */
-  .t-name::after { content:''; position:absolute; top:-14%; bottom:-10%; width:2px; left:-2%;
+  }
+  /* 从左扫到右的一道光 */
+  .t-name::after { content:''; position:absolute; top:-14%; bottom:-10%; width:3px; left:-2%;
     background:linear-gradient(180deg,transparent,rgba(255,222,168,.95) 30%,rgba(226,179,74,.35) 70%,transparent);
-    opacity:0; animation:beam 1180ms cubic-bezier(.45,0,.3,1) 280ms both; }
+    opacity:0; animation:beam 1180ms steps(24, end) 280ms both; }
   @keyframes beam {
     0% { left:-2%; opacity:0; }
     14% { opacity:1; }
@@ -302,7 +290,7 @@
   if (/wflat/.test(location.search)) {
     var wf = document.createElement('style');
     wf.textContent = '.t-name .L{animation:none!important;opacity:1!important;' +
-      'transform:perspective(680px) translateY(.2em) rotateX(-58deg) scale(.97)!important;text-shadow:none!important}';
+      'transform:perspective(640px) translateY(.22em) rotateX(-62deg) scale(.98,.34)!important;text-shadow:none!important}';
     document.head.appendChild(wf);
   }
   // 调试：?wstate=秒 → 把字母的立体化动画冻结在某一时刻，便于截图检查
