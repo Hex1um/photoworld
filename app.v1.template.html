@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>PHOTO → WORLD · 一张照片，走进去</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#080c14; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; color:#e8e4dc; }
+  #stage { position:relative; width:100%; height:100%; overflow:hidden; }
+  #c {
+    position:absolute; inset:0; width:100%; height:100%; display:block;
+    image-rendering:pixelated;
+    background:#101828;
+    background-image:linear-gradient(180deg,#0b1120 0%,#141e33 18%,#22304a 34%,#3a4a63 48%,#6d7889 60%,#9d9c9c 68%,#c2b3a3 75%,#ddcdbb 81%,#cabbab 88%,#b9aa9c 100%);
+    background-size:100% 320%;
+    background-position:50% 85%;
+  }
+  #fx { position:absolute; inset:0; pointer-events:none; }
+  #scan { position:absolute; inset:0; opacity:.26;
+    background:repeating-linear-gradient(180deg,rgba(0,0,0,.32) 0px,rgba(0,0,0,.32) 1px,transparent 1px,transparent 3px);
+    mix-blend-mode:multiply; }
+  #vig { position:absolute; inset:0;
+    background:radial-gradient(ellipse 80% 80% at 50% 48%,transparent 44%,rgba(6,10,18,.5) 100%); }
+
+  #hud { position:absolute; inset:0; pointer-events:none; padding:14px 16px; }
+  #badge { display:inline-flex; align-items:center; gap:7px;
+    background:rgba(10,16,26,.62); border:1px solid rgba(200,190,175,.2);
+    border-radius:6px; padding:6px 10px; font-size:11px; letter-spacing:.08em; font-weight:500; }
+  #dot { width:6px; height:6px; border-radius:50%; background:#7ad0a8; box-shadow:0 0 8px #7ad0a8; }
+  #stats { position:absolute; right:16px; top:14px; text-align:right; font-size:11px; line-height:1.8;
+    background:rgba(10,16,26,.55); border:1px solid rgba(200,190,175,.16); border-radius:6px;
+    padding:8px 10px; color:#b9b3a8; font-variant-numeric:tabular-nums; }
+  #stats b { color:#e8e4dc; font-weight:500; }
+  #cross { position:absolute; left:50%; top:50%; width:5px; height:5px; margin:-2.5px 0 0 -2.5px;
+    border-radius:50%; background:rgba(255,255,255,.7); box-shadow:0 0 4px rgba(0,0,0,.9); }
+  #hint { position:absolute; left:16px; bottom:16px; font-size:11px; color:#9a948a; line-height:1.9;
+    background:rgba(10,16,26,.5); padding:8px 11px; border-radius:6px; border:1px solid rgba(200,190,175,.12); }
+  #hint kbd { display:inline-block; min-width:17px; text-align:center; padding:1px 4px; margin:0 1px;
+    border:1px solid rgba(200,190,175,.28); border-radius:3px; font-size:10px; color:#cfc8bb; }
+  #thumb { position:absolute; right:16px; bottom:16px; width:92px; padding:5px;
+    background:rgba(10,16,26,.6); border:1px solid rgba(200,190,175,.18); border-radius:6px; }
+  #thumb img { width:100%; display:block; border-radius:3px; image-rendering:auto; }
+  #thumb div { font-size:9px; letter-spacing:.14em; color:#7b8595; text-align:center; margin-top:4px; }
+  #again { position:absolute; right:16px; bottom:148px; pointer-events:auto; cursor:pointer;
+    background:rgba(10,16,26,.62); border:1px solid rgba(220,210,195,.3); color:#e8e4dc;
+    border-radius:5px; padding:6px 10px; font-size:11px; letter-spacing:.06em; font-family:inherit; }
+
+  #panel { position:absolute; inset:0; z-index:30; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; padding:28px; text-align:center;
+    background:radial-gradient(ellipse at 50% 40%,rgba(18,26,42,.9),rgba(6,9,15,.97) 72%); }
+  #panel h1 { font-size:clamp(24px,5.4vw,40px); font-weight:500; letter-spacing:.2em; margin-bottom:10px; }
+  #panel .sub { font-size:11px; letter-spacing:.3em; color:#8f9aab; margin-bottom:26px; }
+  #drop { width:min(340px,84vw); padding:26px 18px; border:1px dashed rgba(200,190,175,.34);
+    border-radius:10px; cursor:pointer; transition:.2s; background:rgba(255,255,255,.02); }
+  #drop:hover, #drop.over { border-color:rgba(226,179,74,.8); background:rgba(226,179,74,.06); }
+  #drop .big { font-size:13px; color:#e8e4dc; margin-bottom:6px; }
+  #drop .small { font-size:11px; color:#8f9aab; line-height:1.8; }
+  #examples { display:flex; gap:10px; margin-top:22px; }
+  #examples img { width:64px; height:64px; object-fit:cover; border-radius:5px; cursor:pointer;
+    border:1px solid rgba(200,190,175,.24); opacity:.82; transition:.18s; }
+  #examples img:hover { opacity:1; border-color:rgba(226,179,74,.7); transform:translateY(-2px); }
+  #examples-note { font-size:10px; color:#6f7787; letter-spacing:.18em; margin-top:9px; }
+  #panel .foot { position:absolute; bottom:22px; font-size:10px; color:#5d6675; letter-spacing:.16em; }
+
+  #busy { position:absolute; inset:0; z-index:25; display:none; flex-direction:column;
+    align-items:center; justify-content:center; background:rgba(6,9,15,.92); }
+  #busy .t { font-size:12px; letter-spacing:.28em; color:#cfc8bb; margin-bottom:14px; }
+  #bar { width:min(260px,70vw); height:2px; background:rgba(200,190,175,.18); overflow:hidden; }
+  #bar i { display:block; height:100%; width:0%; background:#e2b34a; transition:width .2s; }
+  #busy .s { font-size:10px; color:#6f7787; margin-top:12px; letter-spacing:.12em; height:14px; }
+  canvas#prev { display:none; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="c"></canvas>
+  <div id="fx"><div id="scan"></div><div id="vig"></div></div>
+
+  <div id="hud" style="display:none">
+    <div id="badge"><span id="dot"></span>PHOTO → WORLD · 本地模型</div>
+    <div id="stats">
+      推理 <b id="s-ms">--</b> ms<br>
+      体素 <b id="s-vox">0</b><br>
+      FPS <b id="s-fps">--</b>
+    </div>
+    <div id="cross"></div>
+    <div id="hint">
+      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移动 · 鼠标转头 · <kbd>空格</kbd> 跳<br>
+      <kbd>R</kbd> 让远处重新想象 · <kbd>Esc</kbd> 松开鼠标
+    </div>
+    <div id="thumb"><img id="thumbimg" alt=""><div>输入</div></div>
+    <button id="again">换一张</button>
+  </div>
+
+  <div id="panel">
+    <h1>PHOTO → WORLD</h1>
+    <div class="sub">一 张 照 片 ， 走 进 去</div>
+    <div id="drop">
+      <div class="big">拖一张照片到这里</div>
+      <div class="small">或点击选择 · 模型会把它重建成立体世界<br>你已经能站在里面走动</div>
+    </div>
+    <div id="examples"></div>
+    <div id="examples-note">示 例</div>
+    <div class="foot">本机运行 · 无需联网</div>
+  </div>
+
+  <div id="busy">
+    <div class="t">正在重建这个空间</div>
+    <div id="bar"><i></i></div>
+    <div class="s"></div>
+  </div>
+
+  <input type="file" id="file" accept="image/*" style="display:none">
+  <canvas id="prev"></canvas>
+</div>
+
+<script>
+/*__MODEL__*/
+/*__EXAMPLES__*/
+</script>
+<script>
+(function () {
+  'use strict';
+
+  var HMAX = 16;          // 模型输出的高度分辨率
+  var PATCH = 24;         // 模型输出网格
+  var WS = 72;            // 世界网格
+  var PATCH_ROW = 18;     // 玩家在 patch 里的行（18 格在前方）
+  var PX = 32, PZ = 36;   // 玩家世界坐标（格）
+
+  /* ---------------- 基础 ---------------- */
+  var cvs = document.getElementById('c');
+  var gl = cvs.getContext('webgl', { antialias: false, alpha: true, premultipliedAlpha: false });
+  if (!gl) { document.querySelector('#panel .sub').textContent = '此设备不支持 WebGL'; return; }
+
+  function m4mul(a, b) {
+    var o = new Float32Array(16);
+    for (var i = 0; i < 4; i++) for (var j = 0; j < 4; j++) {
+      var s = 0;
+      for (var k = 0; k < 4; k++) s += a[k * 4 + j] * b[i * 4 + k];
+      o[i * 4 + j] = s;
+    }
+    return o;
+  }
+  function persp(fovy, aspect, near, far) {
+    var f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+    var m = new Float32Array(16);
+    m[0] = f / aspect; m[5] = f; m[10] = (far + near) * nf; m[11] = -1; m[14] = 2 * far * near * nf;
+    return m;
+  }
+  function rotX(a) { var c = Math.cos(a), s = Math.sin(a); return new Float32Array([1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]); }
+  function rotY(a) { var c = Math.cos(a), s = Math.sin(a); return new Float32Array([c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]); }
+  function trans(x, y, z) { return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z,1]); }
+
+  /* ---------------- 着色器 ---------------- */
+  var VS = 'attribute vec3 aPos; attribute vec3 aCol; uniform mat4 uMVP; uniform vec3 uCam;' +
+    'uniform float uFade; varying vec3 vCol; varying float vFog;' +
+    'void main(){ vec4 p = uMVP*vec4(aPos,1.0); gl_Position=p;' +
+    ' float d = distance(aPos,uCam);' +
+    ' vFog = clamp((d-20.0)/40.0,0.0,1.0)*0.86*(1.0-uFade); vCol=aCol; }';
+  var FS = 'precision mediump float; varying vec3 vCol; varying float vFog; uniform vec3 uFog;' +
+    'void main(){ gl_FragColor = vec4(mix(vCol,uFog,clamp(vFog,0.0,1.0)),1.0); }';
+
+  function sh(t, s) {
+    var o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o);
+    if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o));
+    return o;
+  }
+  var prog = gl.createProgram();
+  gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+  var aPos = gl.getAttribLocation(prog, 'aPos');
+  var aCol = gl.getAttribLocation(prog, 'aCol');
+  var uMVP = gl.getUniformLocation(prog, 'uMVP');
+  var uCam = gl.getUniformLocation(prog, 'uCam');
+  var uFog = gl.getUniformLocation(prog, 'uFog');
+  var uFade = gl.getUniformLocation(prog, 'uFade');
+  gl.enableVertexAttribArray(aPos);
+  gl.enableVertexAttribArray(aCol);
+  gl.enable(gl.DEPTH_TEST);
+  gl.disable(gl.CULL_FACE);
+  gl.clearColor(0, 0, 0, 0);
+  var FOG = [0.80, 0.78, 0.74];
+
+  /* ---------------- 模型 ---------------- */
+  var W = {};
+  function b64f32(s) {
+    var bin = atob(s), n = bin.length, u = new Uint8Array(n);
+    for (var i = 0; i < n; i++) u[i] = bin.charCodeAt(i);
+    return new Float32Array(u.buffer);
+  }
+  (function loadWeights() {
+    for (var k in MODEL.w) W[k] = b64f32(MODEL.w[k]);
+  })();
+
+  function conv(inp, IH, IW, IC, wk, bias, OC, stride) {
+    var OH = ((IH + 2 - 3) / stride | 0) + 1;
+    var OW = ((IW + 2 - 3) / stride | 0) + 1;
+    var out = new Float32Array(OH * OW * OC);
+    var K = IC * 9;
+    for (var oy = 0; oy < OH; oy++) {
+      for (var ox = 0; ox < OW; ox++) {
+        var o = (oy * OW + ox) * OC;
+        for (var ky = 0; ky < 3; ky++) {
+          var iy = oy * stride + ky - 1;
+          if (iy < 0 || iy >= IH) continue;
+          for (var kx = 0; kx < 3; kx++) {
+            var ix = ox * stride + kx - 1;
+            if (ix < 0 || ix >= IW) continue;
+            var ib = (iy * IW + ix) * IC;
+            var wb = (ky * 3 + kx) * IC;
+            for (var ci = 0; ci < IC; ci++) {
+              var v = inp[ib + ci];
+              if (v === 0) continue;
+              var wrow = wb + ci;
+              for (var co = 0; co < OC; co++) out[o + co] += v * wk[co * K + wrow];
+            }
+          }
+        }
+        for (var c2 = 0; c2 < OC; c2++) out[o + c2] += bias[c2];
+      }
+    }
+    return { d: out, h: OH, w: OW, c: OC };
+  }
+
+  function relu(t) {
+    var d = t.d;
+    for (var i = 0; i < d.length; i++) if (d[i] < 0) d[i] = 0;
+    return t;
+  }
+  function up2(t) {
+    var out = new Float32Array(t.h * 2 * t.w * 2 * t.c);
+    for (var y = 0; y < t.h; y++) {
+      for (var x = 0; x < t.w; x++) {
+        var s = (y * t.w + x) * t.c;
+        for (var dy = 0; dy < 2; dy++) {
+          for (var dx = 0; dx < 2; dx++) {
+            var o = ((y * 2 + dy) * t.w * 2 + (x * 2 + dx)) * t.c;
+            for (var c = 0; c < t.c; c++) out[o + c] = t.d[s + c];
+          }
+        }
+      }
+    }
+    return { d: out, h: t.h * 2, w: t.w * 2, c: t.c };
+  }
+  function sigmoid(t) {
+    for (var i = 0; i < t.d.length; i++) t.d[i] = 1 / (1 + Math.exp(-t.d[i]));
+    return t;
+  }
+
+  function infer(pix) {                 // pix: Float32Array 96*96*3 (0..1)
+    var x = { d: pix, h: 96, w: 96, c: 3 };
+    x = relu(conv(x.d, x.h, x.w, x.c, W.c1w, W.c1b, 16, 2));
+    x = relu(conv(x.d, x.h, x.w, x.c, W.c2w, W.c2b, 32, 2));
+    x = relu(conv(x.d, x.h, x.w, x.c, W.c3w, W.c3b, 48, 2));
+    x = relu(conv(x.d, x.h, x.w, x.c, W.c4w, W.c4b, 64, 2));
+    x = relu(conv(up2(x).d, x.h * 2, x.w * 2, x.c, W.d1w, W.d1b, 48, 1));
+    x = relu(conv(up2(x).d, x.h * 2, x.w * 2, x.c, W.d2w, W.d2b, 32, 1));
+    var hh = sigmoid(conv(x.d, x.h, x.w, x.c, W.hw, W.hb, 1, 1));
+    var cc = sigmoid(conv(x.d, x.h, x.w, x.c, W.cw, W.cb, 3, 1));
+    return { h: hh, c: cc };
+  }
+
+  /* ---------------- 世界 ---------------- */
+  var heights = new Float32Array(WS * WS);
+  var colors = new Float32Array(WS * WS * 3);
+  var meshBuf = null, meshCount = 0, voxCount = 0;
+  var noiseSeed = 1;
+  var worldEpoch = 0;
+
+  function h2(x, y, s) {
+    var n = Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(s | 0, 362437);
+    n = Math.imul(n ^ (n >>> 13), 1274126177);
+    return ((n ^ (n >>> 16)) >>> 0) / 4294967295;
+  }
+  function smooth(t) { return t * t * (3 - 2 * t); }
+  function noise2(x, y, s) {
+    var xi = Math.floor(x), yi = Math.floor(y);
+    var xf = smooth(x - xi), yf = smooth(y - yi);
+    var a = h2(xi, yi, s), b = h2(xi + 1, yi, s), c = h2(xi, yi + 1, s), d = h2(xi + 1, yi + 1, s);
+    return (a + (b - a) * xf) * (1 - yf) + (c + (d - c) * xf) * yf;
+  }
+
+  var photoPix = null;
+  var TANF = Math.tan(1.15 / 2);
+
+  function samplePhoto(u, v, out) {
+    var px = Math.round(u * 95), py = Math.round(v * 95);
+    if (px < 0) px = 0; if (px > 95) px = 95;
+    if (py < 0) py = 0; if (py > 95) py = 95;
+    var o = (py * 96 + px) * 3;
+    out[0] = photoPix[o]; out[1] = photoPix[o + 1]; out[2] = photoPix[o + 2];
+  }
+
+  function buildWorld(PH, PC, avgCol) {
+    var camY = PH[PATCH_ROW * PATCH + 12] + 1.7;
+    var tmpc = [0, 0, 0];
+    var i, x, z;
+    for (z = 0; z < WS; z++) {
+      for (x = 0; x < WS; x++) {
+        var r = PATCH_ROW - (PZ - z) * 0.5; // patch 行（1 格模型 = 2 格世界）
+        var c = (x - PX) * 0.5 + 11.5;      // patch 列
+        var out;
+        if (r >= 0 && r < PATCH && c >= 0 && c < PATCH) {
+          var ri = Math.round(r), ci = Math.round(c);
+          heights[z * WS + x] = PH[ri * PATCH + ci];
+          var s = (ri * PATCH + ci) * 3;
+          var da = 18 - ri; if (da < 0) da = -da; if (da < 1.6) da = 1.6;
+          var dx = ci - 11.5;
+          var dy = 1.7;   // 固定按脚下平面投影，取到的总是照片里的“地面色”
+          var uu2 = 0.5 + (dx / da) / (2 * TANF);
+          var vv2 = 0.5 + (dy / da) / (2 * TANF);
+          samplePhoto(uu2, vv2, tmpc);
+          var mixK = photoPix ? 0.78 : 0;
+          colors[(z * WS + x) * 3] = PC[s] * (1 - mixK) + tmpc[0] * mixK;
+          colors[(z * WS + x) * 3 + 1] = PC[s + 1] * (1 - mixK) + tmpc[1] * mixK;
+          colors[(z * WS + x) * 3 + 2] = PC[s + 2] * (1 - mixK) + tmpc[2] * mixK;
+        } else {
+          var ri2 = Math.min(PATCH - 1, Math.max(0, Math.round(r)));
+          var ci2 = Math.min(PATCH - 1, Math.max(0, Math.round(c)));
+          var edgeH = PH[ri2 * PATCH + ci2];
+          var dr = r < 0 ? -r : (r > PATCH - 1 ? r - (PATCH - 1) : 0);
+          var dc = c < 0 ? -c : (c > PATCH - 1 ? c - (PATCH - 1) : 0);
+          out = Math.sqrt(dr * dr + dc * dc);
+          var wgt = Math.min(1, Math.max(0, (out - 1.5) / 14));
+          wgt = wgt * wgt * (3 - 2 * wgt);
+          var nzH = 2 + noise2(x * 0.09 + worldEpoch * 7.3, z * 0.09 - worldEpoch * 4.1, noiseSeed) * 10
+            + noise2(x * 0.21, z * 0.21, noiseSeed + 9) * 3;
+          heights[z * WS + x] = edgeH * (1 - wgt) + nzH * wgt;
+          var es = (ri2 * PATCH + ci2) * 3;
+          var mixF = photoPix ? 0.45 : 0;
+          var nzc = 0.10 + noise2(x * 0.06, z * 0.06, noiseSeed + 3) * 0.55;
+          var baseR = PC[es] * (1 - mixF) + avgCol[0] * mixF;
+          var baseG = PC[es + 1] * (1 - mixF) + avgCol[1] * mixF;
+          var baseB = PC[es + 2] * (1 - mixF) + avgCol[2] * mixF;
+          colors[(z * WS + x) * 3] = baseR * (1 - wgt) + (avgCol[0] * 0.75 + nzc * 0.35) * wgt;
+          colors[(z * WS + x) * 3 + 1] = baseG * (1 - wgt) + (avgCol[1] * 0.75 + nzc * 0.5) * wgt;
+          colors[(z * WS + x) * 3 + 2] = baseB * (1 - wgt) + (avgCol[2] * 0.75 + nzc * 0.35) * wgt;
+        }
+      }
+    }
+    // 轻微平滑，消除台阶噪点
+    for (var pass = 0; pass < 1; pass++) {
+      var tmp = heights.slice();
+      for (z = 1; z < WS - 1; z++) {
+        for (x = 1; x < WS - 1; x++) {
+          var s2 = 0;
+          for (var dz = -1; dz <= 1; dz++) for (var dx = -1; dx <= 1; dx++) s2 += tmp[(z + dz) * WS + (x + dx)];
+          heights[z * WS + x] = s2 / 9;
+        }
+      }
+    }
+    for (i = 0; i < heights.length; i++) heights[i] = Math.max(1, Math.round(heights[i]));
+
+    // 出生点压一块平地，保证第一眼是开阔的
+    var base = heights[PZ * WS + PX];
+    for (z = PZ - 3; z <= PZ + 3; z++) {
+      for (x = PX - 3; x <= PX + 3; x++) {
+        if (x < 1 || x >= WS - 1 || z < 1 || z >= WS - 1) continue;
+        var d2 = Math.sqrt((x - PX) * (x - PX) + (z - PZ) * (z - PZ));
+        if (d2 > 3.2) continue;
+        heights[z * WS + x] = base;
+      }
+    }
+    // 逐格轻微抖动，打散整片同色
+    for (z = 0; z < WS; z++) {
+      for (x = 0; x < WS; x++) {
+        var jj = 0.92 + h2(x, z, noiseSeed + 5) * 0.16;
+        for (var q = 0; q < 3; q++) {
+          var vv3 = colors[(z * WS + x) * 3 + q] * jj * 1.1 + 0.055;
+          colors[(z * WS + x) * 3 + q] = vv3 > 1 ? 1 : vv3;
+        }
+      }
+    }
+    buildMesh();
+  }
+
+  var WALLS = [
+    { d: [1, 0],  v: [[1,0,0],[1,1,0],[1,1,1],[1,0,0],[1,1,1],[1,0,1]], k: 0.72 },
+    { d: [-1, 0], v: [[0,0,1],[0,1,1],[0,1,0],[0,0,1],[0,1,0],[0,0,0]], k: 0.58 },
+    { d: [0, 1],  v: [[0,0,1],[0,1,1],[1,1,1],[0,0,1],[1,1,1],[1,0,1]], k: 0.66 },
+    { d: [0, -1], v: [[1,0,0],[1,1,0],[0,1,0],[1,0,0],[0,1,0],[0,0,0]], k: 0.80 }
+  ];
+
+  function buildMesh() {
+    var arr = [];
+    voxCount = 0;
+    var nan = 0;
+    for (var z = 0; z < WS; z++) {
+      for (var x = 0; x < WS; x++) {
+        var h = heights[z * WS + x];
+        if (!isFinite(h)) { nan++; h = 1; }
+        voxCount += h;
+        var col = (z * WS + x) * 3;
+        var cr = colors[col], cg = colors[col + 1], cb = colors[col + 2];
+        if (!isFinite(cr)) cr = 0.3;
+        if (!isFinite(cg)) cg = 0.4;
+        if (!isFinite(cb)) cb = 0.3;
+        var top = h;
+        arr.push(x, top, z, cr, cg, cb,
+                 x, top, z + 1, cr, cg, cb,
+                 x + 1, top, z + 1, cr, cg, cb,
+                 x, top, z, cr, cg, cb,
+                 x + 1, top, z + 1, cr, cg, cb,
+                 x + 1, top, z, cr, cg, cb);
+        for (var f = 0; f < 4; f++) {
+          var nx = x + WALLS[f].d[0], nz = z + WALLS[f].d[1];
+          var nh = -1;
+          if (nx >= 0 && nx < WS && nz >= 0 && nz < WS) { nh = heights[nz * WS + nx]; if (!isFinite(nh)) nh = 1; }
+          if (nh < 0) nh = 0;
+          if (nh >= top) continue;
+          var k = WALLS[f].k;
+          var rr = cr * k, gg = cg * k, bb = cb * k;
+          for (var v = 0; v < 6; v++) {
+            var o = WALLS[f].v[v];
+            var vy = o[1] ? top : nh;
+            arr.push(x + o[0], vy, z + o[2], rr, gg, bb);
+          }
+        }
+      }
+    }
+    if (nan) document.title = 'NaN heights: ' + nan;
+    var data = new Float32Array(arr);
+    if (!meshBuf) meshBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, meshBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    meshCount = data.length / 6;
+  }
+
+  /* ---------------- 玩家 ---------------- */
+  var player = { x: PX + 0.5, y: 20, z: PZ + 0.5, vy: 0, ground: true };
+  var yaw = 0, pitch = -0.06;
+  var keys = {}, vel = { x: 0, z: 0 };
+  var started = false, fading = 0;
+
+  function groundAt(x, z) {
+    var ix = Math.floor(x), iz = Math.floor(z);
+    if (ix < 0 || ix >= WS || iz < 0 || iz >= WS) return 99;
+    return heights[iz * WS + ix];
+  }
+
+  /* ---------------- 输入 ---------------- */
+  var dragging = false;
+  function lock() {
+    if (document.pointerLockElement !== cvs) {
+      var p = cvs.requestPointerLock();
+      if (p && p.catch) p.catch(function () {});
+    }
+  }
+  cvs.addEventListener('mousedown', function () {
+    if (!started) return;
+    if (document.pointerLockElement !== cvs) { lock(); dragging = true; return; }
+    dragging = true;
+  });
+  window.addEventListener('mouseup', function () { dragging = false; });
+  window.addEventListener('mousemove', function (e) {
+    if (!started) return;
+    if (document.pointerLockElement === cvs || dragging) {
+      yaw -= e.movementX * 0.0024;
+      pitch -= e.movementY * 0.0024;
+      pitch = Math.max(-1.45, Math.min(1.45, pitch));
+    }
+  });
+  window.addEventListener('keydown', function (e) {
+    var k = e.key.toLowerCase();
+    keys[k] = true;
+    if (k === ' ') {
+      if (player.ground) { player.vy = 7.2; player.ground = false; }
+      e.preventDefault();
+    }
+    if (k === 'r' && started) redream();
+  });
+  window.addEventListener('keyup', function (e) { keys[e.key.toLowerCase()] = false; });
+
+  /* 触屏 */
+  var touchMove = { x: 0, y: 0 }, stickId = null, lookId = null, lookPrev = { x: 0, y: 0 };
+  cvs.addEventListener('touchstart', function (e) {
+    if (!started) return;
+    for (var i = 0; i < e.changedTouches.length; i++) {
+      var t = e.changedTouches[i];
+      if (t.clientX < window.innerWidth * 0.42 && t.clientY > window.innerHeight * 0.5) {
+        stickId = t.identifier; updateStick(t);
+      } else if (lookId === null) {
+        lookId = t.identifier; lookPrev.x = t.clientX; lookPrev.y = t.clientY;
+      }
+    }
+    e.preventDefault();
+  }, { passive: false });
+  cvs.addEventListener('touchmove', function (e) {
+    for (var i = 0; i < e.changedTouches.length; i++) {
+      var t = e.changedTouches[i];
+      if (t.identifier === stickId) updateStick(t);
+      else if (t.identifier === lookId) {
+        yaw -= (t.clientX - lookPrev.x) * 0.005;
+        pitch -= (t.clientY - lookPrev.y) * 0.005;
+        pitch = Math.max(-1.45, Math.min(1.45, pitch));
+        lookPrev.x = t.clientX; lookPrev.y = t.clientY;
+      }
+    }
+    e.preventDefault();
+  }, { passive: false });
+  cvs.addEventListener('touchend', function (e) {
+    for (var i = 0; i < e.changedTouches.length; i++) {
+      var t = e.changedTouches[i];
+      if (t.identifier === stickId) { stickId = null; touchMove.x = 0; touchMove.y = 0; }
+      if (t.identifier === lookId) lookId = null;
+    }
+  });
+  function updateStick(t) {
+    var cx = window.innerWidth * 0.16, cy = window.innerHeight * 0.78;
+    var dx = (t.clientX - cx) / 52, dy = (t.clientY - cy) / 52;
+    var len = Math.sqrt(dx * dx + dy * dy);
+    if (len > 1) { dx /= len; dy /= len; }
+    touchMove.x = dx; touchMove.y = dy;
+  }
+
+  /* ---------------- 推理流程 ---------------- */
+  var panel = document.getElementById('panel');
+  var busy = document.getElementById('busy');
+  var bar = document.querySelector('#bar i');
+  var barTxt = document.querySelector('#busy .s');
+  var hud = document.getElementById('hud');
+  var prev = document.getElementById('prev');
+  var lastPatchH = null, lastPatchC = null, lastAvg = [0.4, 0.45, 0.4];
+
+  function readImage(file) {
+    var url = URL.createObjectURL(file);
+    var img = new Image();
+    img.onload = function () { start(img, url, true); };
+    img.onerror = function () { URL.revokeObjectURL(url); alert('这个文件读不出来'); };
+    img.src = url;
+  }
+
+  function pickSample(dataUrl) {
+    var img = new Image();
+    img.onload = function () { start(img, dataUrl, false); };
+    img.src = dataUrl;
+  }
+
+  function start(img, url, revoke) {
+    panel.style.display = 'none';
+    busy.style.display = 'flex';
+    bar.style.width = '6%';
+    barTxt.textContent = '读取像素';
+    setTimeout(function () {
+      prev.width = 96; prev.height = 96;
+      var g = prev.getContext('2d');
+      // 居中裁切，保持比例
+      var s = Math.min(img.width, img.height);
+      g.drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, 96, 96);
+      var px = g.getImageData(0, 0, 96, 96).data;
+      var inp = new Float32Array(96 * 96 * 3);
+      var avg = [0, 0, 0];
+      for (var i = 0, j = 0; i < px.length; i += 4, j += 3) {
+        inp[j] = px[i] / 255; inp[j + 1] = px[i + 1] / 255; inp[j + 2] = px[i + 2] / 255;
+        avg[0] += inp[j]; avg[1] += inp[j + 1]; avg[2] += inp[j + 2];
+      }
+      avg[0] /= 9216; avg[1] /= 9216; avg[2] /= 9216;
+      lastAvg = avg;
+      photoPix = inp;
+      bar.style.width = '30%';
+      barTxt.textContent = '模型推理';
+
+      setTimeout(function () {
+        var t0 = performance.now();
+        var r = infer(inp);
+        var ms = performance.now() - t0;
+        if (/debug/.test(location.search)) {
+          var dbg = { ms: Math.round(ms), inNan: 0, hNan: 0, hMin: 1e9, hMax: -1e9, cMin: 1e9, cMax: -1e9 };
+          for (var q = 0; q < inp.length; q++) if (!isFinite(inp[q])) dbg.inNan++;
+          for (var q2 = 0; q2 < r.h.d.length; q2++) {
+            var v = r.h.d[q2];
+            if (!isFinite(v)) dbg.hNan++;
+            else { if (v < dbg.hMin) dbg.hMin = v; if (v > dbg.hMax) dbg.hMax = v; }
+          }
+          for (var q3 = 0; q3 < r.c.d.length; q3++) {
+            var v3 = r.c.d[q3];
+            if (v3 < dbg.cMin) dbg.cMin = v3;
+            if (v3 > dbg.cMax) dbg.cMax = v3;
+          }
+          document.title = JSON.stringify(dbg);
+        }
+        var PH = new Float32Array(PATCH * PATCH);
+        var PC = new Float32Array(PATCH * PATCH * 3);
+        var hmn = 1e9, hmx = -1e9, k;
+        for (k = 0; k < PATCH * PATCH; k++) {
+          var hv = r.h.d[k];
+          if (hv < hmn) hmn = hv;
+          if (hv > hmx) hmx = hv;
+        }
+        var span = Math.max(0.02, hmx - hmn);
+        for (k = 0; k < PATCH * PATCH; k++) {
+          var v = (r.h.d[k] - hmn) / span;
+          v = v * v * (3 - 2 * v);
+          PH[k] = 1 + v * (HMAX - 3);
+          for (var ch = 0; ch < 3; ch++) {
+            var cv = (r.c.d[k * 3 + ch] - 0.11) * 1.45;
+            PC[k * 3 + ch] = cv < 0.03 ? 0.03 : (cv > 1 ? 1 : cv);
+          }
+        }
+        lastPatchH = PH; lastPatchC = PC;
+        bar.style.width = '68%';
+        barTxt.textContent = '构建体素世界';
+        setTimeout(function () {
+          noiseSeed = 1 + Math.floor(Math.random() * 9999);
+          worldEpoch = 0;
+          buildWorld(PH, PC, avg);
+          bar.style.width = '100%';
+          setTimeout(function () {
+            busy.style.display = 'none';
+            hud.style.display = 'block';
+            document.getElementById('thumbimg').src = url;
+            document.getElementById('s-ms').textContent = Math.round(ms);
+            document.getElementById('s-vox').textContent = voxCount.toLocaleString();
+            land();
+            started = true;
+            lock();
+          }, 120);
+        }, 60);
+      }, 90);
+    }, 60);
+  }
+
+  function land() {
+    var ix = PX, iz = PZ;
+    player.x = ix + 0.5; player.z = iz + 0.5;
+    player.y = heights[iz * WS + ix] + 0.05;
+    player.vy = 0;
+    yaw = 0; pitch = -0.06;
+    fading = 1;
+  }
+
+  function redream() {
+    if (!lastPatchH) return;
+    worldEpoch = (worldEpoch + 1) % 97;
+    var savedH = heights.slice(), savedC = colors.slice();
+    var PH2 = lastPatchH, PC2 = lastPatchC;
+    // 只重想远处：近处 patch 保持不变
+    noiseSeed = 1 + Math.floor(Math.random() * 9999);
+    buildWorld(PH2, PC2, lastAvg);
+    // 近处（patch 覆盖区）恢复原值
+    for (var z = 0; z < WS; z++) {
+      for (var x = 0; x < WS; x++) {
+        var r = PATCH_ROW - (PZ - z), c = (x - PX) + 11.5;
+        if (r >= 0 && r < PATCH && c >= 0 && c < PATCH) {
+          heights[z * WS + x] = savedH[z * WS + x];
+          colors[z * WS + x] = savedC[z * WS + x];
+          colors[z * WS + x + 1] = savedC[z * WS + x + 1];
+        }
+      }
+    }
+    buildMesh();
+    fading = 1;
+  }
+
+  /* ---------------- 主循环 ---------------- */
+  var lastT = performance.now(), fpsA = 0, fpsN = 0, hudT = 0;
+
+  function resize() {
+    var w = Math.max(1, Math.floor(window.innerWidth * 0.8));
+    var h = Math.max(1, Math.floor(window.innerHeight * 0.8));
+    if (cvs.width !== w || cvs.height !== h) { cvs.width = w; cvs.height = h; gl.viewport(0, 0, w, h); }
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  function frame(now) {
+    var dt = Math.min((now - lastT) / 1000, 0.05);
+    lastT = now;
+    resize();
+
+    if (started) {
+      var speed = keys['shift'] ? 8.4 : 4.6;
+      var mz = (keys['w'] ? 1 : 0) - (keys['s'] ? 1 : 0);
+      var mx = (keys['d'] ? 1 : 0) - (keys['a'] ? 1 : 0);
+      if (touchMove.x || touchMove.y) { mx = touchMove.x; mz = -touchMove.y; }
+      var len = Math.sqrt(mx * mx + mz * mz);
+      if (len > 1) { mx /= len; mz /= len; }
+      var fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+      var rx = Math.cos(yaw), rz = -Math.sin(yaw);
+      var tx = (fx * mz + rx * mx) * speed, tz = (fz * mz + rz * mx) * speed;
+      vel.x += (tx - vel.x) * Math.min(1, dt * 14);
+      vel.z += (tz - vel.z) * Math.min(1, dt * 14);
+
+      var nx = player.x + vel.x * dt, nz = player.z + vel.z * dt;
+      var gh = groundAt(nx, nz);
+      if (gh < 90 && gh <= player.y + 1.02) {
+        player.x = nx; player.z = nz;
+      } else {
+        var ghx = groundAt(player.x + vel.x * dt, player.z);
+        if (ghx < 90 && ghx <= player.y + 1.02) player.x += vel.x * dt; else vel.x = 0;
+        var ghz = groundAt(player.x, player.z + vel.z * dt);
+        if (ghz < 90 && ghz <= player.y + 1.02) player.z += vel.z * dt; else vel.z = 0;
+      }
+
+      player.vy -= 22 * dt;
+      player.y += player.vy * dt;
+      var g2 = groundAt(player.x, player.z);
+      if (g2 > 90) g2 = 1;
+      if (player.y <= g2) {
+        player.y = g2; player.vy = 0; player.ground = true;
+      } else {
+        player.ground = false;
+      }
+    }
+
+    if (fading > 0) fading = Math.max(0, fading - dt * 1.4);
+
+    /* 天空随俯仰 */
+    cvs.style.backgroundPosition = '50% ' + (85 - pitch * 34).toFixed(1) + '%';
+
+    gl.viewport(0, 0, cvs.width, cvs.height);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    if (meshCount) {
+      var aspect = cvs.width / cvs.height;
+      var proj = persp(1.32, aspect, 0.08, 200);
+      var view = m4mul(m4mul(rotX(-pitch), rotY(-yaw)), trans(-player.x, -(player.y + 1.62), -player.z));
+      var mvp = m4mul(proj, view);
+      gl.useProgram(prog);
+      gl.uniformMatrix4fv(uMVP, false, mvp);
+      gl.uniform3f(uCam, player.x, player.y + 1.62, player.z);
+      gl.uniform3f(uFog, FOG[0], FOG[1], FOG[2]);
+      gl.uniform1f(uFade, fading);
+      gl.bindBuffer(gl.ARRAY_BUFFER, meshBuf);
+      gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 24, 0);
+      gl.vertexAttribPointer(aCol, 3, gl.FLOAT, false, 24, 12);
+      gl.drawArrays(gl.TRIANGLES, 0, meshCount);
+    }
+
+    fpsA += dt; fpsN++;
+    if (now - hudT > 450) {
+      hudT = now;
+      if (started) document.getElementById('s-fps').textContent = fpsA > 0.05 ? Math.round(fpsN / fpsA) : 0;
+      fpsA = 0; fpsN = 0;
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  /* ---------------- UI 绑定 ---------------- */
+  var drop = document.getElementById('drop');
+  var file = document.getElementById('file');
+  drop.addEventListener('click', function () { file.click(); });
+  file.addEventListener('change', function () { if (file.files[0]) readImage(file.files[0]); });
+  ['dragenter', 'dragover'].forEach(function (n) {
+    drop.addEventListener(n, function (e) { e.preventDefault(); drop.classList.add('over'); });
+  });
+  ['dragleave', 'drop'].forEach(function (n) {
+    drop.addEventListener(n, function (e) { e.preventDefault(); drop.classList.remove('over'); });
+  });
+  window.addEventListener('drop', function (e) {
+    e.preventDefault();
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) readImage(e.dataTransfer.files[0]);
+  });
+  window.addEventListener('paste', function (e) {
+    var it = e.clipboardData && e.clipboardData.items;
+    if (!it) return;
+    for (var i = 0; i < it.length; i++) {
+      if (it[i].type.indexOf('image') === 0) readImage(it[i].getAsFile());
+    }
+  });
+
+  var exWrap = document.getElementById('examples');
+  EXAMPLES.forEach(function (src) {
+    var im = new Image();
+    im.src = src;
+    im.addEventListener('click', function () { pickSample(src); });
+    exWrap.appendChild(im);
+  });
+
+  var m = location.search.match(/ex=(\d)/);
+  if (m) setTimeout(function () { pickSample(EXAMPLES[+m[1] % EXAMPLES.length]); }, 250);
+
+  document.getElementById('again').addEventListener('click', function () {
+    started = false;
+    hud.style.display = 'none';
+    panel.style.display = 'flex';
+    if (document.pointerLockElement) document.exitPointerLock();
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+train/data.npz
+train/*.npz
+*.psd
+thumbs.db
