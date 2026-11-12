@@ -2,3 +2,7 @@ train/data.npz
 train/*.npz
 *.psd
 thumbs.db
+
+_d*.html
+_w*.png
+w_*.png
