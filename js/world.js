@@ -737,6 +737,37 @@
     };
   }
 
+  /* 程序化地平环：视锥外的延续（不是照片内容，是"推测"出的远景雾带） */
+  function buildHorizonRing(analysis, opt) {
+    opt = opt || {};
+    const SEG = 160, R = opt.radius || 280;
+    const fog = analysis.fog, hor = analysis.skyHorizon;
+    const pos = [], col = [], uv = [], nrm = [], idx = [];
+    const rows = [-2.0, 6.0, 22.0, 48.0];
+    const tints = [0.72, 0.86, 1.0, 1.08];
+    for (let r = 0; r < rows.length; r++) {
+      for (let i = 0; i <= SEG; i++) {
+        const a = (i / SEG) * Math.PI * 2;
+        pos.push(Math.sin(a) * R, rows[r], Math.cos(a) * R);
+        nrm.push(-Math.sin(a), 0.25, -Math.cos(a));
+        uv.push(i / SEG, r / (rows.length - 1));
+        const t = tints[r];
+        const mix = r / (rows.length - 1);
+        col.push(lerp(fog[0], hor[0], mix) * t, lerp(fog[1], hor[1], mix) * t,
+                 lerp(fog[2], hor[2], mix) * t, 1);
+      }
+    }
+    for (let r = 0; r < rows.length - 1; r++) {
+      for (let i = 0; i < SEG; i++) {
+        const a0 = r * (SEG + 1) + i, a1 = a0 + 1;
+        const b0 = (r + 1) * (SEG + 1) + i, b1 = b0 + 1;
+        idx.push(a0, b0, a1, a1, b0, b1);
+      }
+    }
+    return { pos: new Float32Array(pos), normal: new Float32Array(nrm),
+             uv: new Float32Array(uv), color: new Float32Array(col), index: idx };
+  }
+
   /* 程序化地面：只在重建表面没有覆盖到的地方兜底（脚下、视锥外），不用照片平铺 */
   function buildFallbackGround(analysis, rng) {
     const RINGS = 40, SEGS = 96, R = 90;
@@ -799,6 +830,7 @@
     });
 
     const ground = relief ? buildFallbackGround(analysis, rng) : buildGround(analysis, heightAt);
+    const horizonRing = (relief && opt.ring) ? buildHorizonRing(analysis) : null;
     // 深度重建模式下，照片表面本身已经是有纵深的细节，不再叠加程序化植被
     const rocks = relief ? null : buildRocks(analysis, heightAt, rng, analysis.isSnow ? 70 : 120);
     const grass = (!relief && analysis.isGreen)
@@ -820,6 +852,7 @@
       nearRidge: nearRidge ? PWGL.createMesh(gl, nearRidge) : null,
       sky: skyCurtain ? PWGL.createMesh(gl, skyCurtain) : null,
       ground: ground ? PWGL.createMesh(gl, ground) : null,
+      horizon: horizonRing ? PWGL.createMesh(gl, horizonRing) : null,
       rocks: rocks ? PWGL.createMesh(gl, rocks) : null,
       grass: grass ? PWGL.createMesh(gl, grass) : null,
       shrub: shrub ? PWGL.createMesh(gl, shrub) : null

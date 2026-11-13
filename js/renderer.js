@@ -204,6 +204,19 @@
         gl.enable(gl.CULL_FACE);
       }
 
+      // 视锥外的程序化延续：地平雾带（跟随相机，纯粹是"推测"的远景）
+      if (world.meshes.horizon && !skip('ring')) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.disable(gl.CULL_FACE);
+        drawMesh(world, world.meshes.horizon, {
+          tex: null, mode: 1, fog: 0.5, mipBias: 0,
+          backdrop: [cam.eye[0], cam.eye[2]]
+        });
+        gl.disable(gl.BLEND);
+        gl.enable(gl.CULL_FACE);
+      }
+
       // 远景层：无视差背景（跟随相机平移），避免"沙雕沙盘"感
       if (world.meshes.backdrop) {
         gl.enable(gl.BLEND);
