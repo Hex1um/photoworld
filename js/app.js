@@ -376,6 +376,80 @@
     return { pos, nrm, uv, color, index, vertices: nv };
   }
 
+  /* 从网格顶点烘一张 2D 高度图，供资产模式贴地（离线管线产出的世界没有 world.json 也要能走）
+   * 每格取「中位数」而不是最低/平均：最低会被埋在地下的孤立尖刺带跑，平均会被树冠抬高，
+   * 中位数对两者都稳。 */
+  function buildHeightGrid(layers, radius, cell) {
+    const N = Math.max(8, Math.round((radius * 2) / cell) + 1);
+    const half = radius;
+    const buckets = new Array(N * N);
+    for (const l of layers) {
+      const p = l.pos;
+      for (let i = 0; i < p.length; i += 3) {
+        const x = p[i], y = p[i + 1], z = p[i + 2];
+        if (x < -half || x > half || z < -half || z > half) continue;
+        const k = Math.round((z + half) / cell) * N + Math.round((x + half) / cell);
+        if (k < 0 || k >= buckets.length) continue;
+        (buckets[k] || (buckets[k] = [])).push(y);
+      }
+    }
+    const best = new Float32Array(N * N);
+    best.fill(NaN);
+    for (let k = 0; k < buckets.length; k++) {
+      const b = buckets[k];
+      if (!b) continue;
+      b.sort((a, c) => a - c);
+      best[k] = b[b.length >> 1];
+    }
+    // 空洞用 3×3 邻居补两轮，再整体平滑一轮，避免格子边界出现台阶
+    const tmp = new Float32Array(N * N);
+    for (let pass = 0; pass < 2; pass++) {
+      tmp.set(best);
+      for (let gz = 0; gz < N; gz++) {
+        for (let gx = 0; gx < N; gx++) {
+          const k = gz * N + gx;
+          if (best[k] === best[k]) continue;
+          let s = 0, n = 0;
+          for (let dz = -1; dz <= 1; dz++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const z2 = gz + dz, x2 = gx + dx;
+              if (z2 < 0 || z2 >= N || x2 < 0 || x2 >= N) continue;
+              const v = tmp[z2 * N + x2];
+              if (v === v) { s += v; n++; }
+            }
+          }
+          if (n) best[k] = s / n;
+        }
+      }
+    }
+    for (let i = 0; i < best.length; i++) if (best[i] !== best[i]) best[i] = 0;
+    const sm = new Float32Array(N * N);
+    for (let gz = 0; gz < N; gz++) {
+      for (let gx = 0; gx < N; gx++) {
+        let s = 0, n = 0;
+        for (let dz = -1; dz <= 1; dz++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const z2 = gz + dz, x2 = gx + dx;
+            if (z2 < 0 || z2 >= N || x2 < 0 || x2 >= N) continue;
+            s += best[z2 * N + x2]; n++;
+          }
+        }
+        sm[gz * N + gx] = s / n;
+      }
+    }
+    function at(x, z) {
+      if (x < -half || x > half || z < -half || z > half) return 0;
+      const fx = (x + half) / cell, fz = (z + half) / cell;
+      const x0 = Math.min(N - 2, Math.max(0, Math.floor(fx)));
+      const z0 = Math.min(N - 2, Math.max(0, Math.floor(fz)));
+      const tx = fx - x0, tz = fz - z0;
+      const v00 = sm[z0 * N + x0], v10 = sm[z0 * N + x0 + 1];
+      const v01 = sm[(z0 + 1) * N + x0], v11 = sm[(z0 + 1) * N + x0 + 1];
+      return (v00 * (1 - tx) + v10 * tx) * (1 - tz) + (v01 * (1 - tx) + v11 * tx) * tz;
+    }
+    return { at, size: N, cell };
+  }
+
   async function enterAsset(url) {
     loader.classList.remove('hidden', 'done', 'burst');
     el('loaderImg').style.opacity = '0';
@@ -410,11 +484,16 @@
         ? PW.GL.createTexture(gl, asset.img, { wrap: 'clamp', clampV: true, aniso: 8, flipY: false })
         : whiteTex(gl);
 
+      // 贴地：从网格顶点里烘一张高度图（每格取最低点再平滑），行走时才不会漂在半空。
+      // 取"最低"而不是"平均"，是因为分层世界里树/石/山都在地面之上，地面才是能站的那层。
+      const grid = buildHeightGrid(asset.layers, 90, 2.0);
+      const groundY = grid.at(0, 0);
+
       const w = {
         name: '离线重建',
         mode: 'asset',
         vertexColor,
-        heightAt: () => 0,
+        heightAt: (x, z) => grid.at(x, z),
         eyeHeight: 1.7,
         walkRadius: 55,
         fogColor: col.bot,
@@ -475,6 +554,7 @@
       startLoop();
       if (document.body) document.body.dataset.ready = '1';
       if (document.body) document.body.dataset.mode = 'asset';
+      if (document.body) document.body.dataset.ground = groundY.toFixed(2);
     } catch (e) {
       console.error(e);
       el('loaderTitle').textContent = '资产加载失败';
