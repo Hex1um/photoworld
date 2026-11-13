@@ -13,6 +13,7 @@ python -m http.server 8099 --bind 127.0.0.1
 - `?w=alpine|desert|coast|winter` 直接进入某个内置世界
 - `?instant=1` 关闭所有过渡（截图/自动化用）
 - `?skip=sky,far,near` 关闭某一层调试
+- `?ring=1` 打开"视锥外程序化地平雾带"实验（**观感仍不达标，默认关闭，不建议实际开启**）
 
 操作：`WASD` 行走 · 鼠标环视（点击画面锁定指针，或按住左键拖动）· `Shift` 奔跑 · 滚轮调视野 · `Esc` 暂停 · `H` 隐藏 HUD。触屏为左半屏摇杆 + 右半屏拖动视角。
 
@@ -65,6 +66,25 @@ https://…/?glb=assets/world-alpine.glb      # 直接加载 glb，跳过在线�
 
 远景层（`backdrop`）在渲染时跟随相机平移 —— 远景本就不该有视差，
 这样走动时山不会"滑过来"，是消掉沙盘感的关键；近景 70m 内是真几何，视差正确。
+
+### 多层 + 顶点色资产
+
+`glbworld.js` 除了 `TEXCOORD_0` 也读 `COLOR_0`（VEC3/VEC4 都吃），因此**无贴图的纯顶点色 GLB 也能直接加载**：
+> ?glb=xxx.glb → 没有内嵌 JPEG 时自动走顶点色材质（`mode 1`），天光取默认值。
+
+层名约定：叫 `backdrop` 的层做无视差远景，其余层（`near` / `prop` / 任意名）按顺序合并成一条近景通道，
+所以 1 层、2 层、3 层以上的产物都能走同一条渲染路径，不需要改渲染器。
+
+## 冒烟测试
+
+```bash
+python -m http.server 8137 --bind 127.0.0.1
+node tools/smoke.mjs --base http://127.0.0.1:8137            # 5 例：4 个内置世界 + 资产模式
+node tools/smoke.mjs --base … --shots /tmp/smoke --only alpine
+```
+
+判据是硬的：`body[data-ready] === '1'` 且 `window.__errs` 为空、无 `data-err`，任何一例失败退出码 1。
+一行改名（例如 `opts`→`opt`）就能让主路径 100% 进不去世界，这个脚本 20 秒能抓到。
 
 ## 数据驱动调参
 

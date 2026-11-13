@@ -197,7 +197,7 @@
         gl.depthMask(true);
         gl.disable(gl.CULL_FACE);
         drawMesh(world, world.meshes.relief, {
-          tex: world.tex.photo, mode: 4, fog: 0.26, mipBias: 0,
+          tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.26, mipBias: 0,
           backdrop: [0, 0]
         });
         gl.disable(gl.BLEND);
@@ -223,7 +223,7 @@
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.disable(gl.CULL_FACE);
         drawMesh(world, world.meshes.backdrop, {
-          tex: world.tex.photo, mode: 4, fog: 0.30, mipBias: 0,
+          tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.30, mipBias: 0,
           backdrop: [cam.eye[0], cam.eye[2]]
         });
         gl.disable(gl.BLEND);

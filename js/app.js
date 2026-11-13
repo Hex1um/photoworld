@@ -188,7 +188,9 @@
       await sleep(30);
       const w = window.PW.world.build(renderer.gl, analysis, {
         seed: hashString(def.id + '|' + def.name),
-        depth: depthMap
+        depth: depthMap,
+        // 视锥外的程序化地平雾带是实验特性，默认关闭，用 ?ring=1 打开
+        ring: new URLSearchParams(location.search).get('ring') === '1'
       });
       setProgress(88, '铺设地表与植被…');
       await sleep(50);
@@ -328,10 +330,57 @@
     return { top, bot, lum: all || 0.45 };
   }
 
+  /* 1×1 白纹理：顶点色资产（无贴图 GLB）用它占位，材质分支走 vC.rgb */
+  function whiteTex(gl) {
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+      new Uint8Array([255, 255, 255, 255]));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return t;
+  }
+
+  /* 多层合并：HunyuanWorld 会吐出 backdrop + 若干前景层，渲染器只认「近景 / 远景」两条通道，
+   * 所以这里把同名属性逐层拼接（索引加偏移），让任意层数都能进同一条渲染路径。
+   * 一律返回 TypedArray —— WebGL 的 bufferData 不接受普通 Array。 */
+  function mergeLayers(list) {
+    const anyN = list.some((l) => l.nrm && l.nrm.length);
+    const anyU = list.some((l) => l.uv && l.uv.length);
+    const anyC = list.some((l) => l.color && l.color.length);
+    let nv = 0, ni = 0;
+    for (const l of list) { nv += l.pos.length / 3; ni += l.index.length; }
+    const pos = new Float32Array(nv * 3);
+    const nrm = anyN ? new Float32Array(nv * 3) : null;
+    const uv = anyU ? new Float32Array(nv * 2) : null;
+    const color = anyC ? new Float32Array(nv * 4) : null;
+    const index = new Uint32Array(ni);
+    let vo = 0, io = 0;
+    for (const l of list) {
+      const n = l.pos.length / 3;
+      pos.set(l.pos, vo * 3);
+      if (nrm) {
+        if (l.nrm && l.nrm.length) nrm.set(l.nrm, vo * 3);
+        else for (let i = 0; i < n; i++) nrm[(vo + i) * 3 + 1] = 1;
+      }
+      if (uv && l.uv && l.uv.length) uv.set(l.uv, vo * 2);
+      if (color) {
+        if (l.color && l.color.length) color.set(l.color, vo * 4);
+        else for (let i = 0; i < n; i++) color.fill(1, (vo + i) * 4, (vo + i) * 4 + 4);
+      }
+      for (let i = 0; i < l.index.length; i++) index[io + i] = l.index[i] + vo;
+      io += l.index.length;
+      vo += n;
+    }
+    return { pos, nrm, uv, color, index, vertices: nv };
+  }
+
   async function enterAsset(url) {
     loader.classList.remove('hidden', 'done', 'burst');
     el('loaderImg').style.opacity = '0';
     el('loaderTitle').textContent = '加载三维世界';
+    lastProgress = 0;
     setProgress(4, '下载资产…');
     try {
       ensureRenderer();
@@ -339,29 +388,32 @@
       setProgress(90, '上传显卡…');
       await sleep(40);
 
-      const col = colorsFromImage(asset.img);
+      const col = asset.img ? colorsFromImage(asset.img)
+        : { top: [0.34, 0.44, 0.62], bot: [0.55, 0.56, 0.52], lum: 0.45 };
+      const vertexColor = !asset.img;
       const gl = renderer.gl;
       const toMesh = (l) => ({
         aPos: buf(gl, l.pos, 3),
         aNormal: l.nrm ? buf(gl, l.nrm, 3) : null,
         aUV: l.uv ? buf(gl, l.uv, 2) : null,
-        aColor: null,
+        aColor: l.color ? buf(gl, l.color, 4) : null,
         index: { buf: idxBuf(gl, l.index), count: l.index.length },
         count: l.index.length,
         mode: gl.TRIANGLES
       });
-      let nearMesh = null, farMesh = null;
-      for (const l of asset.layers) {
-        const mo = toMesh(l);
-        if (l.name === 'backdrop') farMesh = mo;
-        else if (!nearMesh) nearMesh = mo;
-        else farMesh = mo;
-      }
-      const tex = PW.GL.createTexture(gl, asset.img, { wrap: 'clamp', clampV: true, aniso: 8, flipY: false });
+      // 分层规则：名为 backdrop 的层做无视差远景；其余层合并成近景（真视差）
+      const farLayers = asset.layers.filter((l) => l.name === 'backdrop');
+      const nearLayers = asset.layers.filter((l) => l.name !== 'backdrop');
+      const farMesh = farLayers.length ? toMesh(mergeLayers(farLayers)) : null;
+      const nearMesh = nearLayers.length ? toMesh(mergeLayers(nearLayers)) : null;
+      const tex = asset.img
+        ? PW.GL.createTexture(gl, asset.img, { wrap: 'clamp', clampV: true, aniso: 8, flipY: false })
+        : whiteTex(gl);
 
       const w = {
         name: '离线重建',
         mode: 'asset',
+        vertexColor,
         heightAt: () => 0,
         eyeHeight: 1.7,
         walkRadius: 55,
@@ -386,7 +438,8 @@
       world = w;
       current = { name: '离线重建', sub: 'asset · world.glb' };
       player = PW.createPlayer(canvas, world);
-      player.reset(0, 0, 0);
+      if (window.__spawn) player.reset(window.__spawn.x, window.__spawn.z, window.__spawn.yaw);
+      else player.reset(0, 0, 0);
 
       el('hudName').textContent = '离线重建世界';
       el('hudSub').textContent = asset.triangles.toLocaleString() + ' 三角 · ' + (asset.bytes / 1048576).toFixed(1) + 'MB · ' + asset.layers.length + ' 层';
