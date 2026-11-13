@@ -224,8 +224,8 @@ def extend_fov(img: np.ndarray, depth_m: np.ndarray, cam: Camera,
     return img2, d2, cam2
 
 
-def build_mesh(depth_m: np.ndarray, cam: Camera, edge_ratio: float = 1.6,
-               max_tris: int = 480_000) -> dict:
+def build_mesh(depth_m: np.ndarray, cam: Camera, edge_ratio: float = 2.4,
+               edge_tau: float = 0.055, max_tris: int = 480_000) -> dict:
     """深度图 → 顶点/法线/UV/索引。跨深度断崖的四边形直接跳过，保持轮廓锐利。"""
     h, w = depth_m.shape
     step = 1
@@ -255,15 +255,36 @@ def build_mesh(depth_m: np.ndarray, cam: Camera, edge_ratio: float = 1.6,
     flip = np.sum(n * P, axis=-1) > 0
     n[flip] *= -1.0
 
-    idx = []
+    # --- 断崖判定：结构张量（见《传统视觉与深度学习视觉的数学基础》ch.07）---
+    # 相对深度梯度比"绝对比值"更稳：|∇log z| 与尺度无关，细密纹理不会被误杀。
+    lz = np.log(np.maximum(z, 1e-3))
+    gx = np.zeros_like(lz); gy = np.zeros_like(lz)
+    gx[:, 1:-1] = (lz[:, 2:] - lz[:, :-2]) * 0.5
+    gy[1:-1] = (lz[2:] - lz[:-2]) * 0.5
+    # 结构张量 J = [[gx², gxgy],[gxgy, gy²]]，3×3 均值平滑
+    def box(a):
+        k = np.pad(a, 1, mode="edge")
+        return (k[:-2, :-2] + k[:-2, 1:-1] + k[:-2, 2:] +
+                k[1:-1, :-2] + k[1:-1, 1:-1] + k[1:-1, 2:] +
+                k[2:, :-2] + k[2:, 1:-1] + k[2:, 2:]) / 9.0
+    Jxx, Jyy, Jxy = box(gx * gx), box(gy * gy), box(gx * gy)
+    lam1 = 0.5 * (Jxx + Jyy) + np.sqrt(np.maximum(0.0, 0.25 * (Jxx - Jyy) ** 2 + Jxy ** 2))
+    edge_str = np.sqrt(lam1)                       # 主方向的梯度强度（相对量）
+
     ii, jj = np.meshgrid(np.arange(ww - 1), np.arange(hh - 1), indexing="xy")
     z00 = z[:-1, :-1]; z10 = z[:-1, 1:]; z01 = z[1:, :-1]; z11 = z[1:, 1:]
     zmax = np.maximum(np.maximum(z00, z10), np.maximum(z01, z11))
     zmin = np.minimum(np.minimum(z00, z10), np.minimum(z01, z11))
-    okq = (zmax / np.maximum(zmin, 1e-6)) < edge_ratio        # 断崖处跳过
+    ratio = zmax / np.maximum(zmin, 1e-6)
+    # 四边形内的最大边缘强度
+    e = np.maximum(np.maximum(edge_str[:-1, :-1], edge_str[:-1, 1:]),
+                   np.maximum(edge_str[1:, :-1], edge_str[1:, 1:]))
+    # 两个条件都要满足才跳过：几何上有断崖 + 张量确认是"一条边"而不是噪声
+    okq = ~((ratio > edge_ratio) & (e > edge_tau))
     a = (jj * ww + ii)[okq]
     b = a + ww
     quad = np.stack([a, b, a + 1, a + 1, b, b + 1], axis=1).astype(np.uint32)
+    idx = []
 
     return {
         "pos": P.reshape(-1, 3).astype(np.float32),
@@ -272,4 +293,5 @@ def build_mesh(depth_m: np.ndarray, cam: Camera, edge_ratio: float = 1.6,
         "index": quad.reshape(-1),
         "grid": (hh, ww, step),
         "skipped": float(1.0 - okq.mean()),
+        "edge_tau": edge_tau,
     }
