@@ -94,12 +94,30 @@
       const pos = readAccessor(json, bin, prim.attributes.POSITION);
       const nrm = prim.attributes.NORMAL !== undefined ? readAccessor(json, bin, prim.attributes.NORMAL) : null;
       const uv = prim.attributes.TEXCOORD_0 !== undefined ? readAccessor(json, bin, prim.attributes.TEXCOORD_0) : null;
+      // 顶点色（HunyuanWorld / ply2glb 产出的无贴图资产走这条）；VEC3 补齐成 VEC4
+      const vcol = prim.attributes.COLOR_0 !== undefined ? readAccessor(json, bin, prim.attributes.COLOR_0) : null;
+      let colData = null;
+      if (vcol) {
+        if (vcol.size === 3) {
+          const n = vcol.count;
+          colData = new Float32Array(n * 4);
+          for (let i = 0; i < n; i++) {
+            colData[i * 4] = vcol.data[i * 3];
+            colData[i * 4 + 1] = vcol.data[i * 3 + 1];
+            colData[i * 4 + 2] = vcol.data[i * 3 + 2];
+            colData[i * 4 + 3] = 1;
+          }
+        } else {
+          colData = vcol.data;
+        }
+      }
       const idx = readAccessor(json, bin, prim.indices);
       layers.push({
         name: m.name || ('layer' + mi),
         pos: pos.data,
         nrm: nrm ? nrm.data : null,
         uv: uv ? uv.data : null,
+        color: colData,
         index: idx.data,
         vertices: pos.count,
         triangles: idx.count / 3

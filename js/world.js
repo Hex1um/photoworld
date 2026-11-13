@@ -737,14 +737,17 @@
     };
   }
 
-  /* 程序化地平环：视锥外的延续（不是照片内容，是"推测"出的远景雾带） */
+  /* 程序化地平环：视锥外的延续（不是照片内容，是"推测"出的远景雾带）
+   * 实验特性，默认关闭（?ring=1）。做法上只保证"不突兀"：
+   * 顶边 alpha 渐隐到 0、颜色从地平线色渐变到天顶色，否则会出现一条硬边灰带。 */
   function buildHorizonRing(analysis, opt) {
     opt = opt || {};
     const SEG = 160, R = opt.radius || 280;
-    const fog = analysis.fog, hor = analysis.skyHorizon;
+    const hor = analysis.fog, top = analysis.skyTop;   // 底部对齐天穹底色，避免地平线处出现横切线
     const pos = [], col = [], uv = [], nrm = [], idx = [];
     const rows = [-2.0, 6.0, 22.0, 48.0];
-    const tints = [0.72, 0.86, 1.0, 1.08];
+    const tints = [0.74, 0.88, 1.0, 0.96];
+    const alphas = [1.0, 0.72, 0.34, 0.0];        // 越往上越透明，融进程序化天穹
     for (let r = 0; r < rows.length; r++) {
       for (let i = 0; i <= SEG; i++) {
         const a = (i / SEG) * Math.PI * 2;
@@ -753,8 +756,8 @@
         uv.push(i / SEG, r / (rows.length - 1));
         const t = tints[r];
         const mix = r / (rows.length - 1);
-        col.push(lerp(fog[0], hor[0], mix) * t, lerp(fog[1], hor[1], mix) * t,
-                 lerp(fog[2], hor[2], mix) * t, 1);
+        col.push(lerp(hor[0], top[0], mix) * t, lerp(hor[1], top[1], mix) * t,
+                 lerp(hor[2], top[2], mix) * t, alphas[r]);
       }
     }
     for (let r = 0; r < rows.length - 1; r++) {
