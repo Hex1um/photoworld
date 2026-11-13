@@ -45,58 +45,8 @@ class Camera:
         return d
 
 
-def estimate_pitch(depth_rel: np.ndarray, cam: Camera, eye: float = 1.7) -> tuple[float, float, float]:
-    """在地平线位置未知时，搜索使"地面平面假设"最成立的俯仰角。"""
-    best = (0.0, 1e9, 0.5)
-    for hz in np.arange(0.32, 0.72, 0.02):
-        pitch = math.atan((hz - 0.5) * 2.0 * cam.tan_v)
-        c = Camera(cam.hfov, cam.vfov, cam.w, cam.h, pitch=pitch)
-        cal = _fit_scale(depth_rel, c, eye)
-        if cal["rms"] is not None and cal["rms"] < best[1]:
-            best = (pitch, cal["rms"], float(hz))
-    return best
-
-
-def _fit_scale(depth_rel: np.ndarray, cam: Camera, eye: float = 1.7) -> dict:
-    h, w = depth_rel.shape
-    rays = cam.rays()
-    ry = rays[..., 1]
-    rows = np.zeros((h, 1), dtype=bool)
-    rows[int(h * 0.55):int(h * 0.99)] = True
-    mask = (ry < -0.03) & rows
-    if mask.sum() < 500:
-        mask = ry < -0.03
-
-    t_geom = -eye / np.minimum(ry, -0.004)
-    r = depth_rel[mask]
-    z = t_geom[mask]
-    ok = np.isfinite(z) & (z > 0.5) & (z < 3000) & np.isfinite(r)
-    r, z = r[ok], z[ok]
-    if r.size < 300:
-        k = float(np.median(r * z)) if r.size else 20.0
-        return {"a": k, "b": 0.0, "n": int(r.size), "rms": None, "degenerate": True}
-
-    inv = 1.0 / z
-    A = np.stack([inv, np.ones_like(inv)], axis=1)
-    sol, *_ = np.linalg.lstsq(A, r, rcond=None)
-    a, b = float(sol[0]), float(sol[1])
-    # 稳健：剔除 3*MAD 之外的样本再拟合一次
-    for _ in range(2):
-        res = r - (a * inv + b)
-        mad = float(np.median(np.abs(res - np.median(res)))) + 1e-6
-        keep = np.abs(res) < 3.5 * mad
-        if keep.sum() < 200:
-            break
-        r2, inv2 = r[keep], inv[keep]
-        A2 = np.stack([inv2, np.ones_like(inv2)], axis=1)
-        sol, *_ = np.linalg.lstsq(A2, r2, rcond=None)
-        a, b = float(sol[0]), float(sol[1])
-    if not np.isfinite(a) or a <= 0:
-        a, b = float(np.median(r * z)), 0.0
-    res = r - (a * inv + b)
-    rms = float(np.sqrt(np.mean(res ** 2)))
-    return {"a": a, "b": b, "n": int(r.size), "rms": rms,
-            "degenerate": bool(rms > 0.22)}
+# 历史实验：早期「搜索俯仰角 + 地面带最小二乘」标定已由下方 calibrate_scale
+# 的双锚点方案取代；estimate_pitch / _fit_scale 全仓库无调用点，v1.10.0 移除。
 
 
 def calibrate_scale(depth_rel: np.ndarray, cam: Camera, eye: float = 1.7,
@@ -299,7 +249,6 @@ def build_mesh(depth_m: np.ndarray, cam: Camera, edge_ratio: float = 2.4,
     a = (jj * ww + ii)[okq]
     b = a + ww
     quad = np.stack([a, b, a + 1, a + 1, b, b + 1], axis=1).astype(np.uint32)
-    idx = []
 
     return {
         "pos": P.reshape(-1, 3).astype(np.float32),

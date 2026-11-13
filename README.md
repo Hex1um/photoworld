@@ -90,7 +90,7 @@ node tools/smoke.mjs --base … --shots /tmp/smoke --only alpine
 一行改名（例如 `opts`→`opt`）就能让主路径 100% 进不去世界，这个脚本 20 秒能抓到。
 
 不开浏览器也能跑算法回归（地面平面 / 断崖补洞 / 深度预处理 / 验收门 / 训练数据层 /
-动作编码 / RoPE 等变性 / 预编码 latent / 缓存串）：
+动作编码 / RoPE 等变性 / 预编码 latent / 重复定义与死代码 / 深度图缓存 / 缓存串）：
 
 ```bash
 node tools/test_regression.mjs
@@ -134,6 +134,7 @@ js/app.js          画廊 / 载入 / 主循环 / HUD
 models/            Depth-Anything-V2-Small 量化 ONNX（27MB）
 vendor/ort/        onnxruntime-web（WASM 单线程）
 worlds/            内置场景图
+train/             历史实验：早期本地小网络（deprecated，运行时无引用，见 train/README.md）
 tools/             语料采集 / 归一化 / 批量评测 / CDP 截图 / 算法回归 / 缓存升版
 worldmodel/        Causal World DiT（action_codec 统一训练/推理动作，data/ 读 tar 与 .latent）
 CHANGELOG.md       面向使用者的更新日志
@@ -148,5 +149,7 @@ CHANGELOG.md       面向使用者的更新日志
 - 双锚点在默认 1500m 先验下 p≈2.28，深度 10% 误差会放大成距离 27.2% 误差；
   天空/远景仍会到达 1800m 上限（属 `backdrop` 无视差背景层），根治需换度量深度后端。
 - 360° 背向画面靠镜像平铺补全，会出现重复的山形。
+- 深度图缓存只在内存（最多 4 张）：同一会话内返回已进过的世界免推理，刷新页面后仍需重算；
+  跨刷新持久化（IndexedDB）与降分辨率推理尚未做，两者都需要先按截图 A/B 确认画质损失。
 - 移动范围限制在半径 26m（`walkRadius`），再远就离开了照片能覆盖的信息。
 - 细密植被（草叶、树枝）深度不精确，近景可能略显"纸片感"。

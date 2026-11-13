@@ -438,8 +438,11 @@
       }
     }
     function at(x, z) {
-      if (x < -half || x > half || z < -half || z > half) return 0;
-      const fx = (x + half) / cell, fz = (z + half) / cell;
+      // 越界钳到边缘格：旧实现直接 return 0，而 GLB 相机系地面约在 y=-1.7，
+      // 玩家一旦走出网格就会从 -1.7 弹到 0（凭空抬高 1.7m）。
+      const cx = Math.min(half - 1e-3, Math.max(-half, x));
+      const cz = Math.min(half - 1e-3, Math.max(-half, z));
+      const fx = (cx + half) / cell, fz = (cz + half) / cell;
       const x0 = Math.min(N - 2, Math.max(0, Math.floor(fx)));
       const z0 = Math.min(N - 2, Math.max(0, Math.floor(fz)));
       const tx = fx - x0, tz = fz - z0;
@@ -538,7 +541,9 @@
         const a0 = Math.max(0.4, canvas.clientWidth / Math.max(1, canvas.clientHeight));
         const vf = clamp(2 * Math.atan(Math.tan(33 * Math.PI / 180) / a0), 0.55, 1.42);
         for (let i = 0; i < 8; i++) {
-          const m = renderer.render(world, { eye: [0, 1.7, 0], yaw: 0, pitch: 0, fov: vf },
+          // 预热相机必须和玩家实际眼位一致：asset 模式的地面在 GLB 相机系里
+          // 不是 y=0，写死 [0,1.7,0] 会让曝光按另一个视角去测量。
+          const m = renderer.render(world, { eye: [0, groundY + world.eyeHeight, 0], yaw: 0, pitch: 0, fov: vf },
             { time: 0, fade: 1, measure: true });
           if (!(m > 0)) break;
           const ratio = (world.targetLum || 0.42) / Math.max(m, 0.02);

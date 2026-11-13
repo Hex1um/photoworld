@@ -16,6 +16,39 @@
 
   const S = { session: null, loading: null, failed: null, ort: null };
 
+  /* 同一张照片重复进入世界时复用深度图，省掉一次约 5s 的 CPU 推理。
+     key 用「尺寸 + 16×16 缩略图内容指纹」而不是纯 URL：CDN 同名换图、
+     data URL 重建都会让纯 URL 缓存误命中。只做内存 LRU（最多 4 张）；
+     跨刷新持久化要 IndexedDB，会带来配额与异步复杂度，静态站点收益不确定，
+     留作后续 A/B，不在这版擅自引入。 */
+  const CACHE = new Map();
+  const CACHE_MAX = 4;
+
+  function contentKey(img) {
+    const iw = img.naturalWidth || img.width;
+    const ih = img.naturalHeight || img.height;
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 16;
+    let fp = 2166136261;
+    try {
+      const c = cv.getContext('2d', { willReadFrequently: true });
+      c.drawImage(img, 0, 0, 16, 16);
+      const p = c.getImageData(0, 0, 16, 16).data;
+      for (let i = 0; i < p.length; i += 4) {
+        fp = Math.imul(fp ^ p[i], 16777619);
+        fp = Math.imul(fp ^ p[i + 1], 16777619);
+        fp = Math.imul(fp ^ p[i + 2], 16777619);
+      }
+    } catch (e) {
+      // 画布被跨域图片污染时退回 URL 长度；这张图本来也进不了推理
+      fp = String(img.currentSrc || img.src || '').length;
+    }
+    return iw + 'x' + ih + ':' + (fp >>> 0).toString(16);
+  }
+
+  function clearCache() { CACHE.clear(); }
+  function cacheStats() { return { size: CACHE.size, max: CACHE_MAX }; }
+
   /* 等比缩放 + 黑底 padding 到正方形（与 pipeline/depth.py::_pad_to_square 一致）。
      旧实现 drawImage(img, 0, 0, SIZE, SIZE) 会把横构图直接压扁，违反离线
      pipeline/README.md「绝不拉伸」的约定，也让两条链路的几何不可比。 */
@@ -142,6 +175,11 @@
 
   /* 图片 -> 归一化深度（width×height，0..1，1 为最近；比例与原图一致） */
   async function estimate(img, onProgress) {
+    const key = contentKey(img);
+    const hit = CACHE.get(key);
+    // data 是只读约定：上层 buildRelief / drawDepthPreview 都只采样不写入
+    if (hit) return Object.assign({}, hit, { cached: true, ms: 0 });
+
     const session = await init(onProgress);
     const ort = S.ort;
 
@@ -175,18 +213,21 @@
 
     const o = out[session.outputNames[0]];
     const pp = postprocess(o.data, o.dims || [1, 1, SIZE, SIZE], crop);
-    return {
+    const result = {
       data: pp.data, width: pp.width, height: pp.height,
       size: pp.width,                 // 兼容旧字段；采样请用 width/height
       ms: Math.round(dt), inverted: pp.inverted, flippedByCorr: pp.flipped,
       corr: pp.corr
     };
+    CACHE.set(key, result);
+    if (CACHE.size > CACHE_MAX) CACHE.delete(CACHE.keys().next().value);
+    return Object.assign({}, result, { cached: false });
   }
 
   global.PW.depth = {
-    init, estimate,
-    // 暴露纯函数供 tools/test_regression.mjs 做前后端一致性回归
-    __internals: { squarePlan, postprocess, quantile },
+    init, estimate, clearCache, cacheStats,
+    // 暴露纯函数供 tools/test_regression.mjs 做前后端一致性与缓存回归
+    __internals: { squarePlan, postprocess, quantile, contentKey },
     get ready() { return !!S.session; },
     get failed() { return S.failed; }
   };

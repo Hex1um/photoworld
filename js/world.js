@@ -387,33 +387,9 @@
     return { pos, size, col, vel, count, snowy };
   }
 
-  /* ---------------- 天空贴图（重度模糊，去掉竖向拉伸条纹） ---------------- */
-  function makeSkyTexture(analysis) {
-    let minTop = 1;
-    for (let i = 0; i < NCOL; i++) minTop = Math.min(minTop, analysis.top[i]);
-    const bandH = clamp(minTop * 0.96, 0.03, 0.7);
-    const W = 384, H = 128;
-    const cv = document.createElement('canvas');
-    cv.width = W; cv.height = H;
-    const ctx = cv.getContext('2d');
-    ctx.drawImage(analysis.canvas, 0, 0, analysis.W, Math.max(2, analysis.H * bandH), 0, 0, W, H);
-    // 逐级缩小再放大，得到均匀柔化
-    let tmp = cv;
-    for (const s2 of [48, 16, 6]) {
-      const t = document.createElement('canvas');
-      t.width = s2; t.height = Math.max(3, Math.round(s2 * H / W));
-      const tc = t.getContext('2d');
-      tc.imageSmoothingEnabled = true;
-      tc.drawImage(tmp, 0, 0, t.width, t.height);
-      tmp = t;
-    }
-    ctx.imageSmoothingEnabled = true;
-    ctx.clearRect(0, 0, W, H);
-    ctx.drawImage(tmp, 0, 0, W, H);
-    return cv;
-  }
-
-  /* ---------------- 天空贴图（重度模糊，去掉竖向拉伸条纹） ---------------- */
+  /* ---------------- 天空贴图（重度模糊，去掉竖向拉伸条纹） ----------------
+     注意：这里曾有两份逐字相同的函数声明，后者静默覆盖前者。保留唯一一份，
+     tools/test_regression.mjs 会断言定义次数，防止复制粘贴再次引入。 */
   function makeSkyTexture(analysis) {
     let minTop = 1;
     for (let i = 0; i < NCOL; i++) minTop = Math.min(minTop, analysis.top[i]);
@@ -621,7 +597,6 @@
       const phi = (0.5 - v) * vfov;
       const sp = Math.sin(phi), cp = Math.cos(phi);
       const tGround = sp < -0.002 ? eye / (-sp) : 1e9;
-      const w = smoothstep(-0.03, 0.02, sp);      // 0=地面, 1=深度
       for (let i = 0; i <= NC; i++) {
         const a = (i / NC) * Math.PI * 2;
         const u = gU[i];
@@ -842,11 +817,6 @@
       vTopFade: 0.52, variation: 0.25,
       windowAz: analysis.sunAz + 1.15, windowHalf: 0.85
     });
-    // 天穹只取"绝对天空"那段：照片里最高的地形之上
-    let skyBottom = 1;
-    for (let i = 0; i < NCOL; i++) skyBottom = Math.min(skyBottom, analysis.top[i]);
-    skyBottom = clamp(skyBottom - 0.01, 0.015, 0.6);
-
     const skyCurtain = relief ? null : buildCurtain(analysis, {
       columns: 420, rows: 6, radius: 760, maxHeight: 700,
       seed: seed + 5, tint: 1.0, baseY: 0, fadeTop: 0.62,

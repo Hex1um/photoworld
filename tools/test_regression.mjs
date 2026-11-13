@@ -168,4 +168,63 @@ assert.ok(sorted[Math.floor(sorted.length * 0.5)] > 0.3,
 console.log('PASS  P1  2/98 分位截断对离群值稳健，中位深度 '
   + sorted[Math.floor(sorted.length * 0.5)].toFixed(3));
 
+// ---- 4) P3：重复定义 / 死代码 / asset 相机一致性 ----
+const appSrc = read('js/app.js');
+const depthSrc = read('js/depth.js');
+const geomSrc = read('pipeline/geom.py');
+
+const skyDefs = (worldSrc.match(/function makeSkyTexture\(/g) || []).length;
+assert.equal(skyDefs, 1,
+  'makeSkyTexture 仍有 ' + skyDefs + ' 份定义，后者会静默覆盖前者');
+assert.ok(!/const w = smoothstep\(-0\.03, 0\.02, sp\)/.test(worldSrc),
+  'buildRelief 里仍留有算完不用的死变量 w');
+assert.ok(!/skyBottom/.test(worldSrc), 'build() 里仍留有算完不用的 skyBottom');
+assert.ok(!/^\s*idx = \[\]/m.test(geomSrc), 'geom.build_mesh 里仍留有死变量 idx');
+assert.ok(!/def estimate_pitch|def _fit_scale/.test(geomSrc),
+  'geom.py 里仍有主流程不调用的历史标定函数');
+assert.ok(!/eye: \[0, 1\.7, 0\]/.test(appSrc),
+  '曝光预热相机仍写死 y=1.7，与 asset 模式烘出的地面高度不一致');
+assert.ok(/groundY \+ world\.eyeHeight/.test(appSrc), '曝光预热应使用真实眼位');
+assert.ok(!/if \(x < -half \|\| x > half \|\| z < -half \|\| z > half\) return 0;/.test(appSrc),
+  '高度图 at() 越界仍直接返回 0');
+assert.ok(/CACHE\.get\(key\)/.test(depthSrc), 'estimate 未接深度图缓存');
+console.log('PASS  P3  重复函数 / 死代码已清理，曝光相机与高度图边界一致');
+
+// ---- 5) P3：深度图缓存真的省掉第二次推理（mock ONNX session） ----
+const cs = sandbox();
+cs.PW = {};
+cs.fetch = () => Promise.resolve({ ok: true, arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)) });
+let runs = 0;
+cs.ort = {
+  env: { wasm: {} },
+  Tensor: function (type, data, dims) { this.type = type; this.data = data; this.dims = dims; },
+  InferenceSession: {
+    create: async () => ({
+      inputNames: ['input'], outputNames: ['output'],
+      run: async () => {
+        runs++;
+        return { output: { data: new Float32Array(SIZE * SIZE), dims: [1, 1, SIZE, SIZE] } };
+      }
+    })
+  }
+};
+vm.runInContext(read('js/depth.js'), cs, { filename: 'depth.js' });
+const fakeImg = { naturalWidth: 1536, naturalHeight: 968, currentSrc: 'http://localhost/worlds/alpine.jpg' };
+const r1 = await cs.PW.depth.estimate(fakeImg);
+const r2 = await cs.PW.depth.estimate(fakeImg);
+assert.equal(runs, 1, '同一张图重复进入世界又跑了一次推理（runs=' + runs + '）');
+assert.equal(r1.cached, false, '首次推理不应标记 cached');
+assert.equal(r2.cached, true, '第二次应命中深度缓存');
+assert.equal(r2.width, r1.width);
+assert.equal(r2.height, r1.height);
+assert.equal(cs.PW.depth.cacheStats().size, 1, '缓存里应只有一张深度图');
+cs.PW.depth.clearCache();
+assert.equal(cs.PW.depth.cacheStats().size, 0, 'clearCache 未清空');
+await cs.PW.depth.estimate(fakeImg);
+assert.equal(runs, 2, '清空缓存后应重新推理');
+const other = { naturalWidth: 800, naturalHeight: 600, currentSrc: fakeImg.currentSrc };
+assert.notEqual(cs.PW.depth.__internals.contentKey(fakeImg),
+  cs.PW.depth.__internals.contentKey(other), '尺寸不同必须落在不同的缓存 key');
+console.log('PASS  P3  深度图缓存：重复进入免推理（runs 1→2），清空后重算，尺寸进入 key');
+
 console.log('\n全部回归通过');

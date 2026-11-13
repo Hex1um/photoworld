@@ -3,6 +3,65 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [1.10.0] - 2026-11-13
+
+基座 `d3401ca`（本日 22:11），动工前与推送前均核对远端无并发提交。本版做算法分析报告
+**第六章 P3 工程清理**，不改任何深度/几何/训练算法。静态资源缓存串 **1.9.0 → 1.10.0**
+（index.html 12 处）。
+
+**先说明一个前提**：报告第六章列出的「重复曝光预热循环」「asset 模式碰撞写死 `()=>0`」
+「GLB 地面与眼高叠加成 3.4m」，远端在 v1.8.0～v1.9.0 期间已自行修掉（曝光预热现在只有
+一份 8 次循环；`enterAsset` 用 `buildHeightGrid` 从网格烘中位数高度图并用 3×3 邻域补洞）。
+本版**不重复修**，只把「重复定义不得回来」写成静态断言。下面才是本版实际改的内容。
+
+### 重复定义与死代码：删掉不会改变行为、但会误导维护者的部分
+
+- `js/world.js` 曾有**两份逐字相同**的 `makeSkyTexture`，函数声明提升使后者静默覆盖前者，
+  改错哪一份都会「改了没效果」。现只保留一份。
+- 删掉算完从未使用的变量：`buildRelief` 里的 `w = smoothstep(-0.03, 0.02, sp)`、
+  `build()` 里的 `skyBottom`、`geom.build_mesh` 里的 `idx = []`。
+- 删掉 `pipeline/geom.py` 的 `estimate_pitch` / `_fit_scale`（约 50 行）：二者互相调用、
+  全仓库零调用点，是早期「搜索俯仰角」标定方案，主流程早已换成 `calibrate_scale`
+  的地面带 + 双锚点。需要复现实验可从 git 历史找回。
+- `tools/test_regression.mjs` 新增静态断言锁住上述几项，防止复制粘贴再次引入。
+
+### 资产模式的两个一致性问题
+
+- **曝光预热相机看错了位置**：`enterAsset` 写死 `eye: [0, 1.7, 0]`，但 GLB 是相机系、
+  地面约在 `y=-1.7`，玩家实际眼位是 `heightAt(0,0) + 1.7 ≈ 0`。旧代码等于从**高 1.7m 的
+  另一个视角**测画面亮度去定曝光，和进入世界后看到的画面不是一回事。现改为
+  `groundY + world.eyeHeight`。
+- **高度图越界会让人弹起来**：`buildHeightGrid.at()` 在网格外直接 `return 0`，而网格内
+  地面约 `-1.7m`；一旦走到边界，眼高瞬间抬高 1.7m。现改为钳到边缘格继续双线性插值。
+  正常游玩受 `walkRadius=55`（网格半径 90）限制走不出去，这属于边界防御。
+
+### 同一张照片重复进入，不再重复推理
+
+`js/depth.js` 加了内存 LRU（最多 4 张）：key 是「图片尺寸 + 16×16 缩略图内容指纹」，
+不是纯 URL —— CDN 同名换图、data URL 重建都不会误命中。内置 `alpine` 一次 CPU 推理约
+5 秒，返回同一世界时现在直接复用深度图。回归用 mock ONNX session 实测：连续两次
+`estimate` 的 `session.run` 次数 **1 → 1**（第二次 `cached=true`），`clearCache()` 后
+**→ 2**。返回值 `data` 为只读约定，上层 `buildRelief` / 预览都只采样不写入。
+
+### 历史实验资产标注
+
+`train/`（964KB `weights.json` + 3 个 `.f32` + 早期小网络脚本）全仓库**零运行时引用**，
+主线早已换成 ONNX Depth-Anything-V2-Small 与 `worldmodel/`。新增 `train/README.md`
+说明其 deprecated 状态与用途；**不删文件**，避免破坏想复现当时实验的人。
+
+### 本版刻意未做的 P3 项
+
+以下都会改变画质或生成分布，本机无法验证收益，不擅自上线：把 518×518 降到 392×392
+（算力 0.57× 但损失细深度）、WebGPU/WebNN EP 优先 + WASM 回退、IndexedDB 跨刷新缓存、
+推理移入 Web Worker、`extend_fov` 的镜像 + 强模糊外延（侧视拉伸条带，需截图 A/B）。
+
+### 验证
+
+`node tools/test_regression.mjs` 9 项全绿（含新增 P3 两条）；`python tools/test_regression.py`
+P0/P1 + P2 全绿；浏览器冒烟 **5/5 PASS**（alpine / desert / asset-glb / ring-on / skip-sky）；
+`pipeline/reconstruct.py` 端到端产出 305,458 三角，自检 35.73dB / 尺度门 0.0522 OK；
+JS 与 Python 全量 `py_compile` / `node --check` 通过。
+
 ## [1.9.0] - 2026-11-13
 
 基座 `78cb9fe`（本日 18:17），动工前核对远端无新提交。本版只修世界模型训练侧的
