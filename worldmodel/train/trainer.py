@@ -53,8 +53,9 @@ def train(cfg: dict) -> None:
     out_dir = cfg["train"]["out"]
     os.makedirs(out_dir, exist_ok=True)
 
+    # cache=False：缓存解码后的张量会把内存吃爆（5160×6 帧 ≈ 36GB），导致疯狂换页
     ds = TarWindows(cfg["data"]["shard_dir"], cfg["data"]["width"], cfg["data"]["height"],
-                    cfg["data"]["n_hist"])
+                    cfg["data"]["n_hist"], cache=False)
     tr, va = split_dataset(ds, cfg["data"].get("val_ratio", 0.05), seed)
     bs = cfg["train"]["batch_size"]
     dl = DataLoader(tr, batch_size=bs, shuffle=True, num_workers=0,
