@@ -84,7 +84,10 @@
   }
 
   /* ---------------- 载入 ---------------- */
+  let lastProgress = 0;
   function setProgress(p, text) {
+    p = Math.max(p, lastProgress);   // 单调递增：避免阶段回退造成"卡住"的错觉
+    lastProgress = p;
     el('loaderBar').style.width = p + '%';
     if (text) el('loaderSteps').textContent = text;
   }
@@ -118,53 +121,80 @@
     }
   }
 
+  /* 深度图可视化：让"照片 → 深度 → 三维"的过程看得见 */
+  function drawDepthPreview(d) {
+    const cv = el('loaderDepth');
+    if (!cv || !d || !d.data) return;
+    const ctx = cv.getContext('2d');
+    const S = d.size;
+    const img = ctx.createImageData(cv.width, cv.height);
+    for (let y = 0; y < cv.height; y++) {
+      for (let x = 0; x < cv.width; x++) {
+        const sx = Math.floor(x / cv.width * S), sy = Math.floor(y / cv.height * S);
+        const v = Math.max(0, Math.min(1, d.data[sy * S + sx]));
+        const g = Math.round(v * 255);
+        const o = (y * cv.width + x) * 4;
+        img.data[o] = g * 0.55 + 40; img.data[o + 1] = g * 0.85; img.data[o + 2] = g;
+        img.data[o + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    cv.style.opacity = '1';
+    const lbl = el('loaderDepthLabel');
+    if (lbl) lbl.textContent = '深度图（亮=近 / 暗=远）';
+  }
+
   async function enterWorld(def) {
     if (running) stopLoop();
     loader.classList.remove('hidden', 'done', 'burst');
     pause.classList.add('hidden');
     el('loaderImg').src = def.thumb || def.src;
     el('loaderTitle').textContent = '正在重建场景';
-    setProgress(6, '读取照片…');
+    lastProgress = 0;
+    el('loaderDepthLabel').textContent = '';
+    el('loaderDepth').style.opacity = '0';
+    setProgress(4, '读取照片…');
 
     try {
       const img = await loadImage(def.src);
-      setProgress(24, '分析天际线与光位…');
+      setProgress(18, '分析天际线与光位…');
       await sleep(60);
 
       const analysis = window.PW.reconstruct.analyze(img, def.name);
-      setProgress(52, '构建分层地形…');
-      await sleep(50);
+      setProgress(30, '初始化重建器…');
+      await sleep(30);
 
       ensureRenderer();
 
       // 用预训练深度模型把照片还原成三维表面（失败则回退到分层方案）
       let depthMap = null;
       try {
-        setProgress(48, '加载深度模型（27MB，仅首次）…');
+        setProgress(34, '加载深度模型（27MB，仅首次）…');
         await window.PW.depth.init((p) => {
-          setProgress(48 + p * 16, '加载深度模型 ' + Math.round(p * 100) + '%');
+          setProgress(34 + p * 30, '下载深度模型 ' + Math.round(p * 100) + '%（27MB）');
         });
-        setProgress(66, '估计场景深度…');
+        setProgress(66, '推理：估计每个像素的距离…');
         await sleep(30);
         depthMap = await Promise.race([
           window.PW.depth.estimate(img),
           new Promise((_, rej) => setTimeout(() => rej(new Error('深度估计超时')), 60000))
         ]);
+        drawDepthPreview(depthMap);
       } catch (e) {
         console.warn('深度模型不可用，回退到天际线方案：', e && e.message);
       }
 
-      setProgress(74, depthMap ? '重建三维表面…' : '构建分层地形…');
+      setProgress(76, depthMap ? '重建三维表面（射线网格）…' : '构建分层地形…');
       await sleep(30);
       const w = window.PW.world.build(renderer.gl, analysis, {
         seed: hashString(def.id + '|' + def.name),
         depth: depthMap
       });
-      setProgress(84, '铺设地表与植被…');
+      setProgress(88, '铺设地表与植被…');
       await sleep(50);
 
       w.pointsMesh = renderer.makePointMesh(w.particles);
-      setProgress(92, '校准空气与雾…');
+      setProgress(94, '校准空气与雾…');
       await sleep(60);
 
       if (player) player.dispose();

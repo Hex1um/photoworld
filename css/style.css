@@ -376,6 +376,23 @@ button.primary:hover { background: #f0e2c0; }
   background: linear-gradient(90deg, rgba(224,207,169,.5), var(--accent));
   transition: width .45s cubic-bezier(.2,.8,.2,1);
 }
+.loader-depth {
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  opacity: 0.9;
+}
+.loader-depth canvas {
+  width: 128px; height: 85px;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.14);
+  opacity: 0;
+  transition: opacity .4s ease;
+  image-rendering: auto;
+}
+.loader-depth span { font-size: 11px; color: rgba(243,241,236,0.5); letter-spacing: .02em; }
+
 .loader-steps {
   margin-top: 12px;
   font-family: var(--mono);

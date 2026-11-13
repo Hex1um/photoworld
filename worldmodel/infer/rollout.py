@@ -45,18 +45,30 @@ def parse_actions(spec: list) -> list[torch.Tensor]:
     return out
 
 
-@torch.no_grad()
-def rollout(image: torch.Tensor, actions: list[torch.Tensor], ckpt_path: str,
-            steps: int = 8, cfg_scale: float = 4.0, device: str = "cuda",
-            use_ema: bool = True, hist_frames: int = 4):
+_CACHE = {}
+
+
+def _load(ckpt_path: str, device: str, use_ema: bool):
+    """按 checkpoint 记忆模型与 VAE：评测要跑十几次 rollout，每次重载要白等 15s。"""
+    key = (ckpt_path, device, use_ema)
+    if key in _CACHE:
+        return _CACHE[key]
     ck = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg = ck["cfg"]
     model = make_model(cfg, device)
     sd = ck["ema"] if use_ema and "ema" in ck else ck["model"]
     model.load_state_dict({k: v.to(model.state_dict()[k].dtype) for k, v in sd.items()})
     model.eval()
-
     tok = Tokenizer(cfg["data"]["vae"], device=device)
+    _CACHE[key] = (model, tok, cfg)
+    return _CACHE[key]
+
+
+@torch.no_grad()
+def rollout(image: torch.Tensor, actions: list[torch.Tensor], ckpt_path: str,
+            steps: int = 8, cfg_scale: float = 4.0, device: str = "cuda",
+            use_ema: bool = True, hist_frames: int = 4):
+    model, tok, cfg = _load(ckpt_path, device, use_ema)
     z_init = tok.encode(image.to(device))
     hist = [z_init.clone() for _ in range(hist_frames)]
     frames = []

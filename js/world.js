@@ -830,7 +830,7 @@
     });
 
     const ground = relief ? buildFallbackGround(analysis, rng) : buildGround(analysis, heightAt);
-    const horizonRing = (relief && opt.ring) ? buildHorizonRing(analysis) : null;
+    const horizonRing = (relief && opts && opts.ring) ? buildHorizonRing(analysis) : null;
     // 深度重建模式下，照片表面本身已经是有纵深的细节，不再叠加程序化植被
     const rocks = relief ? null : buildRocks(analysis, heightAt, rng, analysis.isSnow ? 70 : 120);
     const grass = (!relief && analysis.isGreen)
