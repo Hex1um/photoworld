@@ -1,0 +1,33 @@
+name: photoworld
+# 说明：onnx 后端只需要 python + onnxruntime，CPU 即可（本仓库已验证）。
+# 下面这套是**度量深度 / 多视图**重后端，需要 CUDA 的 GPU。
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      # ---- 基础（任何后端都需要）----
+      - numpy==1.26.4
+      - pillow==10.4.0
+      - onnxruntime==1.19.2          # CPU 后端；GPU 用 onnxruntime-gpu==1.19.2
+      # ---- 度量深度（推荐，替代相对深度）----
+      - torch==2.4.1                 # 按 CUDA 版本装：pip install torch --index-url https://download.pytorch.org/whl/cu124
+      - torchvision==0.19.1
+      # Depth Pro（Apple, 度量深度）：pip install "git+https://github.com/apple/ml-depth-pro.git"
+      # UniK3D：https://github.com/lpiccinelli-eth/UniK3D
+      # ---- 多视图（双图）----
+      # VGGT：https://github.com/facebookresearch/vggt（权重 facebook/VGGT-1B）
+      # DUSt3R / MASt3R：https://github.com/naver/dust3r
+      # ---- 网格化 / 导出 ----
+      - open3d==0.18.0               # TSDF / Poisson
+      - trimesh==4.4.9
+      - scipy==1.14.1
+      # ---- 3DGS（可选）----
+      # gsplat：https://github.com/nerfstudio-project/gsplat
+
+# 模型权重放这里（不入库）：
+#   pipeline/weights/depth_pro.pt
+#   pipeline/weights/VGGT-1B/…
+# 单图 CPU 路径复用仓库已有的 models/model_quantized.onnx，无需额外下载。

@@ -7,3 +7,5 @@ node_modules/
 dist/
 dist_new/
 *.log
+pipeline/weights/
+out/
