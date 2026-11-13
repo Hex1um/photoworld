@@ -174,6 +174,19 @@ def train(cfg: dict) -> None:
             z_hist = _augment_hist(z_hist, B, device, p_hist_noise, hist_sigma)
 
             _t2 = time.time()
+            # ---- scheduled sampling：消除暴露偏差 ----
+            # 训练时历史帧永远是"真值"，推理时历史帧是自己产的 → 误差按帧累积（rollout 塌黑）。
+            # 这里以概率 p 用模型自产的一帧替换最近的历史帧。
+            p_ss = cfg["train"].get("scheduled_sampling", 0.0)
+            if p_ss > 0 and torch.rand(1).item() < p_ss:
+                with torch.no_grad():
+                    z_noise = torch.randn_like(z1)
+                    t_mid = torch.full((B,), 0.35, device=device)
+                    with torch.autocast("cuda", dtype=scaler_dtype, enabled=(device == "cuda")):
+                        v_self = model(z_init, z_hist, z_noise, t_mid, act, None)
+                    z_self = (z_noise + v_self.float() * 0.65)
+                z_hist = torch.cat([z_hist[:, 1:], z_self.unsqueeze(1)], dim=1)
+
             z0 = torch.randn_like(z1)
             t = torch.rand(B, device=device)
             zt = (1 - t.view(B, 1, 1, 1)) * z0 + t.view(B, 1, 1, 1) * z1
