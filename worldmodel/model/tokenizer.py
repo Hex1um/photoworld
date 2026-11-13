@@ -10,11 +10,17 @@ class Tokenizer:
     def __init__(self, model_id: str = "stabilityai/sd-vae-ft-mse", device: str = "cuda"):
         from diffusers import AutoencoderKL
         self.device = device
-        try:
-            self.vae = AutoencoderKL.from_pretrained(model_id, torch_dtype=torch.float32,
-                                                     use_safetensors=True).to(device)
-        except Exception:
-            self.vae = AutoencoderKL.from_pretrained(model_id, torch_dtype=torch.float32).to(device)
+        # 优先用本地缓存：每次联网校验会被 HF 镜像 429 限流，白等 100s+
+        vae = None
+        for kwargs in ({"local_files_only": True},):   # 只走本地缓存，避免 429 限流卡死
+            try:
+                vae = AutoencoderKL.from_pretrained(model_id, torch_dtype=torch.float32, **kwargs)
+                break
+            except Exception:
+                continue
+        if vae is None:
+            raise RuntimeError("VAE 权重不可用：请先 HF_ENDPOINT=https://hf-mirror.com 联网下载一次")
+        self.vae = vae.to(device)
         self.vae.eval()
         for p in self.vae.parameters():
             p.requires_grad_(False)
