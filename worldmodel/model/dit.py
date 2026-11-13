@@ -204,10 +204,10 @@ class CausalWorldDiT(nn.Module):
         """时间维因果、帧内双向：token i 可看 frame(i) 及之前的帧。"""
         idx = torch.arange(n_frames * per_frame, device=device)
         fid = idx // per_frame
-        allow = fid.view(-1, 1) >= fid.view(1, -1)          # (L, L) True=可见
-        m = torch.zeros_like(allow, dtype=dtype)
-        m = m.masked_fill(~allow, -1e4)   # bf16 下 -inf 会在 softmax 里产生 NaN
-        return m.view(1, 1, *m.shape)
+        # 用 bool 掩码（True=可见）：SDPA 对 bool 掩码走高效路径，
+        # 浮点加法掩码会退回 math 回退实现，反向极慢
+        allow = fid.view(-1, 1) >= fid.view(1, -1)
+        return allow.view(1, 1, *allow.shape)
 
 
 def count_params(m: nn.Module) -> int:

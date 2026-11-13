@@ -45,7 +45,16 @@ def make_model(cfg: dict, device: str) -> CausalWorldDiT:
     return CausalWorldDiT(mcfg).to(device)
 
 
+def enable_fast_math() -> None:
+    """TF32 + cuDNN benchmark：不开的话 fp32 conv 在 sm_120 上会走极慢的回退路径
+    （实测 VAE 编码 6 帧从 10.4s 降到 0.3s，200 倍差距）。"""
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    # benchmark=True 会在 sm_120 上对每个 conv 形状做算法搜索，首步要跑几分钟，关掉
+
+
 def train(cfg: dict) -> None:
+    enable_fast_math()
     seed = cfg.get("seed", 0)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -90,12 +99,14 @@ def train(cfg: dict) -> None:
         opt.zero_grad(set_to_none=True)
         loss_acc = 0.0
         for _ in range(accum):
+            _t0 = time.time()
             try:
                 batch = next(it)
             except StopIteration:
                 it = iter(dl)
                 batch = next(it)
 
+            _t1 = time.time()
             init = batch["init"].to(device, non_blocking=True)
             hist = batch["hist"].to(device, non_blocking=True)
             target = batch["target"].to(device, non_blocking=True)
@@ -113,6 +124,7 @@ def train(cfg: dict) -> None:
                     mask = (torch.rand(B, 1, 1, 1, 1, device=device) < p_hist_noise).float()
                     z_hist = z_hist + mask * sig * torch.randn_like(z_hist)
 
+            _t2 = time.time()
             z0 = torch.randn_like(z1)
             t = torch.rand(B, device=device)
             zt = (1 - t.view(B, 1, 1, 1)) * z0 + t.view(B, 1, 1, 1) * z1
@@ -125,8 +137,12 @@ def train(cfg: dict) -> None:
             with torch.autocast("cuda", dtype=scaler_dtype, enabled=(device == "cuda")):
                 v = model(z_init, z_hist, zt, t, act, domain, drop_act=drop_act, drop_init=drop_init)
                 loss = F.mse_loss(v.float(), v_target.float()) / accum
+            _t3 = time.time()
             loss.backward()
             loss_acc += loss.item()
+            if step < 3:
+                print("  [prof] data %.2fs vae %.2fs fwd %.2fs bwd %.2fs" %
+                      (_t1 - _t0, _t2 - _t1, _t3 - _t2, time.time() - _t3), flush=True)
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["train"]["clip"])
         opt.step()

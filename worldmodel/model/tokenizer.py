@@ -21,6 +21,8 @@ class Tokenizer:
         if vae is None:
             raise RuntimeError("VAE 权重不可用：请先 HF_ENDPOINT=https://hf-mirror.com 联网下载一次")
         self.vae = vae.to(device)
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
         self.vae.eval()
         for p in self.vae.parameters():
             p.requires_grad_(False)
