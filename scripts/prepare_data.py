@@ -33,7 +33,12 @@ N_HIST = 4
 
 
 def mat4_from_rowmajor(v) -> np.ndarray:
-    return np.array(v, dtype=np.float64).reshape(4, 4)   # 行主序，T = [[R,t],[0,1]]
+    """poses.json 里的 camToWorld 是**列主序**（平移放在最后 4 个元素，与 WebGL 一致）。
+
+    必须先 reshape 再转置，否则 T[:3,3] 取到的是齐次列 [0,0,0]，
+    平移恒为零 —— 这个 bug 会让模型完全收不到"前进/后退"信号。
+    """
+    return np.array(v, dtype=np.float64).reshape(4, 4).T
 
 
 def rot_to_axis_angle(R: np.ndarray) -> np.ndarray:
@@ -83,7 +88,8 @@ def load_traj(tdir: str) -> dict | None:
     speeds = []
     for i in range(len(Ts) - 1):
         speeds.append(float(np.linalg.norm(Ts[i + 1][:3, 3] - Ts[i][:3, 3])))
-    med = float(np.median(speeds)) if speeds else 0.08
+    moving = [s for s in speeds if s > 1e-6]          # 只用真正在动的帧做尺度
+    med = float(np.median(moving)) if moving else 0.08
     return {"meta": meta, "Ts": Ts, "fov": fov, "speed": max(med, 1e-3),
             "dir": tdir, "frames": frames}
 

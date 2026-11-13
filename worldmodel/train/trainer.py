@@ -76,7 +76,8 @@ def train(cfg: dict) -> None:
 
     # cache=False：缓存解码后的张量会把内存吃爆（5160×6 帧 ≈ 36GB），导致疯狂换页
     ds = TarWindows(cfg["data"]["shard_dir"], cfg["data"]["width"], cfg["data"]["height"],
-                    cfg["data"]["n_hist"], cache=False)
+                    cfg["data"]["n_hist"], cache=False,
+                    action_scale=cfg["data"].get("action_scale"))
     tr, va = split_dataset(ds, cfg["data"].get("val_ratio", 0.05), seed)
     bs = cfg["train"]["batch_size"]
     dl = DataLoader(tr, batch_size=bs, shuffle=True, num_workers=0,
@@ -104,6 +105,20 @@ def train(cfg: dict) -> None:
     accum = cfg["train"].get("grad_accum", 1)
 
     step = 0
+    resume = cfg["train"].get("resume")
+    if resume:
+        path = os.path.join(out_dir, "last.pt")
+        if os.path.exists(path):
+            ck = torch.load(path, map_location=device, weights_only=False)
+            model.load_state_dict(ck["model"])
+            if "ema" in ck:
+                ema.shadow = {k: v.to(device).float() for k, v in ck["ema"].items()}
+                ema.step = ck.get("step", 0)
+            step = int(ck.get("step", 0))
+            print("从 %s 续训，step=%d" % (path, step), flush=True)
+        else:
+            print("没有找到可续训的 checkpoint，从头开始", flush=True)
+
     t0 = time.time()
     it = iter(dl)
     model.train()

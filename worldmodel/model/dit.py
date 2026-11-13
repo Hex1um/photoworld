@@ -43,7 +43,7 @@ class DiTConfig:
 
 
 # ---------------- RoPE（三轴） ----------------
-def rope_cache(dim: int, n_t: int, gh: int, gw: int, device, dtype):
+def rope_cache(dim: int, n_t: int, gh: int, gw: int, device, dtype, extra: int = 0):
     """把通道维均分给 (t, y, x) 三个轴。"""
     per = dim // 3
     per -= per % 2
@@ -61,6 +61,10 @@ def rope_cache(dim: int, n_t: int, gh: int, gw: int, device, dtype):
                      fy[None, :, None, :].expand(n_t, gh, gw, per),
                      fx[None, None, :, :].expand(n_t, gh, gw, per)], dim=-1)
     cos = cos.reshape(n_t * gh * gw, -1)
+    if extra:
+        # 动作 token 是单个 token，插在目标帧（最后 gh*gw 个）之前，沿用该帧的位置
+        n = gh * gw
+        cos = torch.cat([cos[:-n], cos[-1:].expand(extra, cos.shape[-1]), cos[-n:]], dim=0)
     # 通道数不整除时，剩余通道不做旋转（cos=1, sin=0）
     pad = dim - cos.shape[-1]
     if pad > 0:
@@ -132,6 +136,8 @@ class CausalWorldDiT(nn.Module):
         self.t_embed = nn.Sequential(nn.Linear(cfg.dim, cfg.dim), nn.SiLU(), nn.Linear(cfg.dim, cfg.dim))
         self.act_embed = nn.Sequential(nn.Linear(cfg.act_dim, cfg.dim), nn.SiLU(),
                                        nn.Linear(cfg.dim, cfg.dim))
+        # CFG 的"无条件"必须是独立学习的嵌入，不能拿 idle(动作=0) 冒充
+        self.null_act = nn.Parameter(torch.zeros(cfg.dim))
         self.dom_embed = nn.Embedding(cfg.n_domains, cfg.dim)
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.depth)])
         self.norm = nn.LayerNorm(cfg.dim, elementwise_affine=False)
@@ -155,7 +161,8 @@ class CausalWorldDiT(nn.Module):
         B, C, H, W = x_t.shape
         cfg = self.cfg
         n_frames = 2 + cfg.n_hist            # init + hist + target
-        L = n_frames * cfg.per_frame
+        # 序列 = init + hist×N + [动作 token] + target
+        L = n_frames * cfg.per_frame + 1
         dev = x_t.device
 
         toks = []
@@ -166,28 +173,29 @@ class CausalWorldDiT(nn.Module):
         toks.append(init_tok)
         for i in range(cfg.n_hist):
             toks.append(self._tokens(hist_lat[:, i]))
+        # 动作 token（spec 设计）：插在目标帧前，注意力层可直接"读"到动作
+        a = self.act_embed(action)                                    # (B, D)
+        if drop_act is not None:
+            keep = (~drop_act).float().view(B, 1)
+            a = a * keep + self.null_act.view(1, -1) * (1 - keep)
+        toks.append(a.unsqueeze(1))
         toks.append(self._tokens(x_t))
         seq = torch.cat(toks, dim=1)                                  # (B, L, D)
 
-        # 条件向量：时间步 + 动作 + 域
+        # 条件向量只留时间步 + 域；动作走 token
         c = self.t_embed(self._sinusoid(t, cfg.dim, dev))
-        a = self.act_embed(action)
-        if drop_act is not None:
-            a = a * (~drop_act).float().view(B, 1)
-        c = c + a
         if domain is not None:
             c = c + self.dom_embed(domain.clamp(0, cfg.n_domains - 1))
 
-        # 动作 token 插在目标帧前 → 会打乱索引，这里改为把动作并进 adaLN 条件
-        # （spec 允许"action token 插在目标帧前"，此处用等价且更省 token 的做法）
-        cos, sin = rope_cache(cfg.dim // cfg.heads, n_frames, cfg.gh, cfg.gw, dev, seq.dtype)
+        cos, sin = rope_cache(cfg.dim // cfg.heads, n_frames, cfg.gh, cfg.gw, dev, seq.dtype,
+                              extra=1)
         mask = self._causal_mask(n_frames, cfg.per_frame, dev, seq.dtype)
 
         x = seq
         for blk in self.blocks:
             x = blk(x, c, cos, sin, mask)
         x = self.norm(x)
-        out = self.head(x[:, -cfg.per_frame:])                        # 只预测目标帧
+        out = self.head(x[:, -(cfg.per_frame + 1):-1])                # 跳过动作 token
         out = out.view(B, cfg.gh, cfg.gw, cfg.patch, cfg.patch, C)
         out = out.permute(0, 5, 1, 3, 2, 4).reshape(B, C, H, W)
         return out
@@ -201,9 +209,9 @@ class CausalWorldDiT(nn.Module):
 
     @staticmethod
     def _causal_mask(n_frames: int, per_frame: int, device, dtype):
-        """时间维因果、帧内双向：token i 可看 frame(i) 及之前的帧。"""
-        idx = torch.arange(n_frames * per_frame, device=device)
-        fid = idx // per_frame
+        """时间维因果、帧内双向。序列末尾多一个动作 token，归入最后一帧。"""
+        idx = torch.arange(n_frames * per_frame + 1, device=device)
+        fid = torch.clamp(idx // per_frame, max=n_frames - 1)
         # 用 bool 掩码（True=可见）：SDPA 对 bool 掩码走高效路径，
         # 浮点加法掩码会退回 math 回退实现，反向极慢
         allow = fid.view(-1, 1) >= fid.view(1, -1)
