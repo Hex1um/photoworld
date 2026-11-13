@@ -44,6 +44,7 @@
     if (!cv || !window.PW.createIntro) return;
     intro = window.PW.createIntro(cv);
     setIntroPhoto(WORLDS[0].thumb);
+    if (!instant) intro.autoPlay();
   }
 
   function setIntroPhoto(src) {
@@ -268,6 +269,7 @@
     stage.setAttribute('aria-hidden', 'true');
     landing.style.display = 'flex';
     requestAnimationFrame(() => landing.classList.remove('leaving'));
+    if (intro && !instant) { intro.setPhoto(null); intro.autoPlay(); }
   }
 
   /* ---------------- 主循环 ---------------- */

@@ -542,6 +542,7 @@
     const aspect = analysis.W / Math.max(1, analysis.H);
     const vfov = 2 * Math.atan(Math.tan(HFOV / 2) / aspect);
     const eye = 1.7;
+    const FAR_R = 128;   // 远景固定圆柱半径
     const NC = opt.columns || 360;
     const NR = opt.rows || 200;
     const dsz = depth.size;
@@ -612,35 +613,21 @@
         const a = (i / NC) * Math.PI * 2;
         const u = gU[i];
         const tDepth = distOf(depthAt(u, clamp(v, 0, 1)));
-        let t = lerp(Math.min(tGround, 600), tDepth, w);
-        t = clamp(t, 2.4, 600);
+        let t;
+        if (sp < -0.002) {
+          // 地平线以下：严格落在 y=0 平面上（走起来才正确），不参与远景收敛
+          t = tGround;
+        } else {
+          // 地平线以上：远景收成刚性圆柱，避免离开视点后剪切成长条
+          t = tDepth;
+          t = lerp(t, FAR_R, smoothstep(18, 46, t));
+        }
+        t = clamp(t, 2.4, 420);
         const k = j * W1 + i;
         gT[k] = t;
         gx[k] = Math.sin(a) * cp * t;
         gz[k] = Math.cos(a) * cp * t;
         gy[k] = sp * t + eye;
-      }
-    }
-
-    /* 1.8) 接缝带：强制按远景处理，避免近景与对侧远景在缝合处对撞成扇形条纹 */
-    {
-      const band = Math.max(2, Math.round(NC * 0.035));
-      for (let j = 0; j <= NR; j++) {
-        for (let i = 0; i <= NC; i++) {
-          const dSeam = Math.min(i, NC - i);
-          if (dSeam >= band) continue;
-          const k = j * W1 + i;
-          const need = 30 + (1 - dSeam / band) * 40;
-          if (gT[k] < need) {
-            const t = need;
-            gT[k] = t;
-            const a = (i / NC) * Math.PI * 2;
-            const phi = (0.5 - gV[j]) * vfov;
-            gx[k] = Math.sin(a) * Math.cos(phi) * t;
-            gz[k] = Math.cos(a) * Math.cos(phi) * t;
-            gy[k] = Math.sin(phi) * t + eye;
-          }
-        }
       }
     }
 

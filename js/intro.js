@@ -1,14 +1,14 @@
-/* 开屏字标：扁平的 PHOTOWORLD（照片填进字里）→ 按照片地形立起 → 溶解进三维场景
+/* 开屏字标：PHOTOWORLD 从"扁平"立成"立体"，自动循环演示
  *
- * 用 createPattern 把照片直接填进字形，不依赖离屏合成，稳定且快。
- * 立起的幅度由"照片的暗部"决定：越暗（越近的地面）立得越深，于是字标的立体感
- * 就是这张照片的地形 —— 这正是产品要做的事。
+ * 字母内部填充当前照片；厚度是一叠沿视线方向错开的切片，配合偏航角摆动，
+ * 看起来就是一块有厚度的实体被转过来。这正是产品的隐喻：
+ * 一张平面的照片 → 一个有纵深的世界。
  */
 (function (global) {
   'use strict';
 
   const WORD = 'PHOTOWORLD';
-  const SIDE_COLOR = '#0d1216';
+  const SIDE_DARK = '#0a0e11';
 
   function fontStack() {
     return '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif';
@@ -19,30 +19,29 @@
     let photo = null;
     let faceCv = null;
     let sideCv = null;
-    const depthCols = new Float32Array(44).fill(0.5);
     let W = 2, H = 2, dpr = 1;
-    let progress = 0;
     let dissolve = 0;
+    let raf = 0, t0 = 0, looping = false;
     const reduced = global.matchMedia && global.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-    function fs() { return Math.round(H * 0.5); }
+    function fs() { return Math.round(H * 0.52); }
 
-    function wordMetrics(g) {
+    function metrics(g) {
       const size = fs();
       g.font = '900 ' + size + 'px ' + fontStack();
-      const sp = size * 0.055;
+      const sp = size * 0.05;
       let w = 0;
       for (const ch of WORD) w += g.measureText(ch).width + sp;
       return { size: size, sp: sp, width: w - sp, y: H * 0.56 };
     }
 
-    function fillWord(g, style, dy, m) {
+    function fillWord(g, style, m) {
       g.fillStyle = style;
       g.textBaseline = 'middle';
       g.textAlign = 'left';
       let x = (W - m.width) / 2;
       for (const ch of WORD) {
-        g.fillText(ch, x, m.y + dy);
+        g.fillText(ch, x, m.y);
         x += g.measureText(ch).width + m.sp;
       }
     }
@@ -51,18 +50,17 @@
       sideCv = document.createElement('canvas');
       sideCv.width = W; sideCv.height = H;
       const sg = sideCv.getContext('2d');
-      fillWord(sg, SIDE_COLOR, 0, wordMetrics(sg));
+      fillWord(sg, SIDE_DARK, metrics(sg));
 
       faceCv = document.createElement('canvas');
       faceCv.width = W; faceCv.height = H;
       const fg = faceCv.getContext('2d');
-      const m = wordMetrics(fg);
+      const m = metrics(fg);
       let ok = false;
       if (photo) {
         try {
           const s = Math.max(W / photo.width, H / photo.height);
           const dw = photo.width * s, dh = photo.height * s;
-          try { fg.filter = 'brightness(1.22) contrast(1.08) saturate(1.15)'; } catch (e) {}
           const pat = fg.createPattern(photo, 'no-repeat');
           if (pat && pat.setTransform && global.DOMMatrix) {
             const mat = new global.DOMMatrix();
@@ -70,76 +68,117 @@
             mat.e = (W - dw) / 2;
             mat.f = (H - dh) / 2;
             pat.setTransform(mat);
-            fillWord(fg, pat, 0, m);
-            try { fg.filter = 'none'; } catch (e) {}
+            if ('filter' in fg) fg.filter = 'brightness(1.18) contrast(1.06) saturate(1.12)';
+            fillWord(fg, pat, m);
+            if ('filter' in fg) fg.filter = 'none';
             ok = true;
           }
         } catch (e) { ok = false; }
       }
-      if (!ok) fillWord(fg, '#79c8b8', 0, m);
-      measureDepth();
+      if (!ok) fillWord(fg, '#79c8b8', m);
     }
 
-    /* 逐列"深度代理"：照片暗部 = 近 = 立得高 */
-    function measureDepth() {
-      if (!photo) return;
-      const S = 96;
-      const h = Math.max(8, Math.round(S * H / Math.max(1, W)));
-      const tmp = document.createElement('canvas');
-      tmp.width = S; tmp.height = h;
-      const tg = tmp.getContext('2d', { willReadFrequently: true });
-      const s = Math.max(S / photo.width, h / photo.height);
-      tg.drawImage(photo, (S - photo.width * s) / 2, (h - photo.height * s) / 2, photo.width * s, photo.height * s);
-      let data = null;
-      try { data = tg.getImageData(0, 0, S, h).data; } catch (e) { data = null; }
-      if (!data) return;
-      const n = depthCols.length;
-      for (let i = 0; i < n; i++) {
-        const x0 = Math.floor(i / n * S), x1 = Math.max(x0 + 1, Math.floor((i + 1) / n * S));
-        let sum = 0, cnt = 0;
-        for (let x = x0; x < x1; x++) {
-          for (let y = Math.floor(h * 0.5); y < h; y += 2) {
-            const o = (y * S + x) * 4;
-            sum += 0.2126 * data[o] + 0.7152 * data[o + 1] + 0.0722 * data[o + 2];
-            cnt++;
-          }
-        }
-        depthCols[i] = 1 - (sum / Math.max(1, cnt)) / 255;
-      }
-      for (let pass = 0; pass < 2; pass++) {
-        const src = depthCols.slice();
-        for (let i = 0; i < n; i++) {
-          depthCols[i] = (src[Math.max(0, i - 1)] + src[i] * 2 + src[Math.min(n - 1, i + 1)]) / 4;
-        }
-      }
-    }
-
-    function render() {
+    function drawFrame(thickness, yaw) {
       ctx.clearRect(0, 0, W, H);
       if (!faceCv) return;
 
-      const lift = (reduced ? 0.55 : progress) * fs() * 0.30;
-      const step = Math.max(1.5, 2 * dpr);
-      const layers = Math.max(1, Math.round(1 + lift / step));
+      const size = fs();
+      const depth = size * 0.62 * thickness;
+      const steps = Math.max(1, Math.round(depth / Math.max(1, 1.6 * dpr)));
+      const sinY = Math.sin(yaw);
 
-      ctx.save();
-      ctx.globalAlpha = (0.5 + 0.5 * (reduced ? 1 : progress)) * (1 - dissolve);
-      for (let k = layers; k >= 1; k--) {
-        ctx.drawImage(sideCv, 0, (k / layers) * lift);
+      if (thickness > 0.02 && dissolve < 0.9) {
+        const cx = W / 2, cy = H * 0.92;
+        const rx = Math.min(W * 0.34, size * 3.0), ry = size * 0.13;
+        const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rx);
+        g.addColorStop(0, 'rgba(0,0,0,' + (0.32 * thickness * (1 - dissolve)).toFixed(3) + ')');
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.scale(1, ry / rx);
+        ctx.translate(-cx, -cy);
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(cx, cy, rx, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
       }
-      ctx.restore();
 
       ctx.save();
+      for (let k = steps; k >= 1; k--) {
+        const z = k / steps;
+        ctx.globalAlpha = (1 - 0.42 * z) * (1 - dissolve);
+        ctx.drawImage(sideCv, -sinY * depth * z, 0);
+      }
       ctx.globalAlpha = 1 - dissolve;
-      const cols = depthCols.length;
-      const sw = W / cols;
-      for (let i = 0; i < cols; i++) {
-        const sx = Math.floor(i * sw);
-        const w = Math.max(1, Math.min(W - sx, Math.ceil(sw) + 1));
-        const off = lift * (0.15 + 0.85 * (depthCols[i] || 0.5)) * 0.5;
-        ctx.drawImage(faceCv, sx, 0, w, H, sx, off, w, H);
-      }
+      ctx.drawImage(faceCv, 0, 0);
       ctx.restore();
+    }
+
+    function loop(now) {
+      if (!looping) return;
+      const p = (((now - t0) / 1000) % 7.0) / 7.0;
+      let thickness = 0, yaw = 0;
+      if (p < 0.14) {
+        thickness = 0; yaw = 0;
+      } else if (p < 0.38) {
+        const k = (p - 0.14) / 0.24;
+        const e = 1 - Math.pow(1 - k, 3);
+        thickness = e; yaw = e * 0.40;
+      } else if (p < 0.70) {
+        const k = (p - 0.38) / 0.32;
+        thickness = 1;
+        yaw = 0.40 - Math.sin(k * Math.PI * 2) * 0.30;
+      } else if (p < 0.88) {
+        const k = (p - 0.70) / 0.18;
+        const e = k * k * (3 - 2 * k);
+        thickness = 1 - e; yaw = 0.40 * (1 - e);
+      } else {
+        thickness = 0; yaw = 0;
+      }
+      if (reduced) { thickness = 0.85; yaw = 0.34; }
+      drawFrame(thickness, yaw);
+      raf = requestAnimationFrame(loop);
+    }
+
+    function autoPlay() {
+      if (looping) return;
+      looping = true;
+      t0 = performance.now();
+      if (reduced) { drawFrame(0.85, 0.34); return; }
+      raf = requestAnimationFrame(loop);
+    }
+
+    function stopLoop() {
+      looping = false;
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+    }
+
+    function play(onMid) {
+      stopLoop();
+      return new Promise(function (res) {
+        if (reduced) {
+          drawFrame(0.85, 0.34);
+          if (onMid) onMid();
+          dissolve = 1; drawFrame(0.85, 0.34); res();
+          return;
+        }
+        const start = performance.now();
+        const DUR = 1100;
+        let mid = false;
+        function step(now) {
+          const p = Math.min(1, (now - start) / DUR);
+          const e = 1 - Math.pow(1 - Math.min(1, p / 0.55), 3);
+          const thickness = 1 - 0.15 * Math.max(0, p - 0.55);
+          if (p >= 0.5 && !mid) { mid = true; if (onMid) onMid(); }
+          dissolve = p < 0.6 ? 0 : Math.pow((p - 0.6) / 0.4, 1.4);
+          drawFrame(thickness, 0.5 * e);
+          if (p < 1) requestAnimationFrame(step);
+          else res();
+        }
+        requestAnimationFrame(step);
+      });
     }
 
     function measure() {
@@ -152,46 +191,20 @@
       }
       W = w; H = h;
       build();
-      render();
+      if (!looping) drawFrame(0, 0);
     }
 
     function setPhoto(img) {
       if (!img || !img.width || photo === img) return;
       photo = img;
-      measure();
+      build();
+      if (!looping) drawFrame(0, 0);
     }
-
-    function easeOut(x) { return 1 - Math.pow(1 - x, 3); }
-
-    function play(onMid) {
-      if (reduced) {
-        progress = 1; dissolve = 0; render();
-        if (onMid) onMid();
-        return new Promise(function (res) { setTimeout(function () { dissolve = 1; render(); res(); }, 320); });
-      }
-      const t0 = performance.now();
-      const DUR = 1500;
-      let mid = false;
-      return new Promise(function (res) {
-        function tick(now) {
-          const p = Math.min(1, (now - t0) / DUR);
-          progress = p < 0.5 ? easeOut(Math.min(1, p / 0.5)) : 1;
-          if (p >= 0.45 && !mid) { mid = true; if (onMid) onMid(); }
-          dissolve = p < 0.72 ? 0 : Math.pow((p - 0.72) / 0.28, 1.5);
-          render();
-          if (p < 1) requestAnimationFrame(tick);
-          else res();
-        }
-        requestAnimationFrame(tick);
-      });
-    }
-
-    function reset() { progress = 0; dissolve = 0; render(); }
 
     measure();
     if (global.addEventListener) global.addEventListener('resize', measure);
 
-    return { setPhoto: setPhoto, play: play, reset: reset, render: render, measure: measure };
+    return { setPhoto: setPhoto, play: play, autoPlay: autoPlay, stopLoop: stopLoop, measure: measure };
   }
 
   global.PW = global.PW || {};
