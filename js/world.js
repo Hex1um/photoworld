@@ -512,13 +512,66 @@
    *   - 360° 由镜像平铺补全，接缝处融合深度，避免出现垂直断崖
    */
   const HFOV = (62 * Math.PI) / 180;
+  /* v1.11.0：解决「整张照片被压成一张平铺贴片」的三处结构性根因
+   *   1) 旧 distOf 是经验曲线，且 46m 外一律 lerp 到 128m 固定圆柱 —— 大部分
+   *      可见像素落在同一个半径上，纵深被抹平，看起来就是贴在背景上的照片；
+   *   2) 地平线以下一律 gy=0、t 按平地反解，深度图完全不参与 —— 半张照片
+   *      是一张铺在地上的平面贴图；
+   *   3) 地面 heightAt 在深度模式被乘 0.12，兜底地面又是常量平面。
+   * 改法（思路取自 GitHub 上的同类方案，见 README「参考方案」）：
+   *   - 双锚点物理标定（仓库 pipeline/geom.py 同一口径）替代经验曲线；
+   *   - 超过 BACKDROP_T 的四边形拆成跟随相机的远景层（GLB 资产模式已验证
+   *     这是消掉「沙盘感」的关键），近景保留真实视差；
+   *   - 地面用「相对同行基线更近的深度」挤出近景物体，脚下渐隐、幅度钳制；
+   *   - 竖直夸张 + 法线/AO 增强，让起伏真的看得出来（DepthWizard / PBRCELAIN
+   *     里的 Z 夸张与局部均衡思路）。
+   */
+  const HORIZON_FAR = 520;       // 地平线远端锚点（米）
+  const BACKDROP_T = 160;        // 超过该距离归入无视差远景层（米）
+  const GROUND_LIFT_MAX = 1.4;   // 近景挤出最大高度（米）
+  const VERT_GAIN = 1.10;        // 竖直夸张：补偿单目深度对中景的压缩
+
+  /* 两锚点标定：pipeline/geom.py::calibrate_scale / metric_depth 的浏览器等价实现。
+     d 是归一化视差（1 = 最近）。近端锚点来自地面平面几何 z=eye/(-sinφ)，
+     远端锚点是声明式先验 HORIZON_FAR；解 z = A·(d+r0)^(-p)。
+     标定失败时返回 null，调用方回退到旧经验曲线。 */
+  function calibrateScale(depthAt, gV, vfov, eye) {
+    const nearVals = [], farVals = [];
+    let zSum = 0, zN = 0;
+    for (let j = 0; j < gV.length; j++) {
+      const v = gV[j];
+      const sp = Math.sin((0.5 - v) * vfov);
+      for (let i = 0; i <= 24; i++) {
+        const d = depthAt(i / 24, clamp(v, 0, 1));
+        if (!Number.isFinite(d)) continue;
+        if (v >= 0.90 && v <= 0.98 && sp < -0.10) {
+          nearVals.push(d); zSum += eye / (-sp); zN++;
+        }
+        if (v >= 0.42 && v <= 0.52) farVals.push(d);
+      }
+    }
+    const q = (a, f) => {
+      if (!a.length) return 0;
+      a.sort((x, y) => x - y);
+      return a[Math.min(a.length - 1, Math.floor(a.length * f))];
+    };
+    const rNear = Math.max(0.08, q(nearVals, 0.5));
+    const rFar = Math.min(rNear * 0.85, Math.max(0.005, q(farVals, 0.20)));
+    const zNear = zN ? Math.max(2.0, zSum / zN) : eye / 0.30;
+    if (!nearVals.length || !farVals.length || rNear <= rFar * 1.02) return null;
+    let p = clamp(Math.log(HORIZON_FAR / zNear) / Math.log(rNear / rFar), 0.6, 3.2);
+    const A = zNear * Math.pow(rNear, p);
+    const r0 = Math.pow(A / HORIZON_FAR, 1 / p);
+    const Aeff = A * Math.pow(1 + r0 / rNear, p);
+    const metric = (d) => clamp(Aeff * Math.pow(Math.max(0, d) + r0, -p), 0.6, HORIZON_FAR * 1.2);
+    return { p, r0, Aeff, zNear, rNear, rFar, metric };
+  }
 
   function buildRelief(analysis, depth, opt) {
     opt = opt || {};
     const aspect = analysis.W / Math.max(1, analysis.H);
     const vfov = 2 * Math.atan(Math.tan(HFOV / 2) / aspect);
     const eye = 1.7;
-    const FAR_R = 128;   // 远景固定圆柱半径
     const NC = opt.columns || 360;
     const NR = opt.rows || 200;
     // 深度图与照片同比例（见 js/depth.js 的等比 padding + 裁回），不再是方形拉伸图
@@ -555,8 +608,8 @@
       return d;
     };
 
-    // 深度 -> 沿射线距离（近 2.5m，远 ~260m）
-    const distOf = (d) => clamp(2.5 + 250 * Math.pow(1 - clamp(d, 0, 1), 1.7), 2.6, 280);
+    // 深度 -> 沿射线距离：在 gV 填充完成后按双锚点标定结果定义（见下方），
+    // 旧的 2.5 + 250·(1-d)^1.7 经验曲线仅作为 ?v1=1 / 标定退化时的回退。
 
     /* 天空边缘：逐列地形上缘，用来在天空处渐隐 */
     const topAt = (u) => {
@@ -587,11 +640,75 @@
       while (d > Math.PI) d -= Math.PI * 2;
       while (d < -Math.PI) d += Math.PI * 2;
       const ad = Math.abs(d);
-      // 边缘 12% 内渐隐，避免出现硬切边（像一张立起来的卡片）
-      gVis[i] = ad <= halfFov * 0.88 ? 1 : (ad >= halfFov ? 0 : (halfFov - ad) / (halfFov * 0.12));
+      // 边缘 25% 内渐隐，配合顶点 aEdge 把照片纹理融进雾色：
+      // 纯放宽渐隐会露出镜像拉伸条纹（实测 38% 时左右一大片灰弧），
+      // 但融色把它们盖住后，边界就既没有硬切也没有条纹。
+      gVis[i] = ad <= halfFov * 0.75 ? 1 : (ad >= halfFov ? 0 : (halfFov - ad) / (halfFov * 0.25));
     }
     for (let j = 0; j <= NR; j++) gV[j] = j / NR;
 
+    /* 距离标定：默认双锚点物理标定；?v1=1 或标定退化时回退旧经验曲线。 */
+    const cal = opt.legacy ? null : calibrateScale(depthAt, gV, vfov, eye);
+    const legacyCurve = (d) => clamp(2.5 + 250 * Math.pow(1 - clamp(d, 0, 1), 1.7), 2.6, 280);
+    const distOf = cal ? cal.metric : legacyCurve;
+
+    /* 逐行地面基线 + 邻域平滑的「近景超出量」：
+       单目深度对平坦地面沿行单调递增；比同排中位明显更近的像素就是物体/凸起。
+       平滑是为了不让深度噪点把地面打成锯齿（PBRCELAIN 的 local equalization 思路）。 */
+    const gD = new Float32Array(n4);
+    const gE = new Float32Array(n4);
+    const gEs = new Float32Array(n4);
+    for (let j = 0; j <= NR; j++) {
+      for (let i = 0; i < W1; i++) gD[j * W1 + i] = depthAt(gU[i], clamp(gV[j], 0, 1));
+      const sorted = Float32Array.from(gD.subarray(j * W1, (j + 1) * W1));
+      sorted.sort();
+      const base = sorted[Math.floor(W1 / 2)];
+      for (let i = 0; i < W1; i++) gE[j * W1 + i] = gD[j * W1 + i] - base;
+    }
+    // 5×5 低通：Depth Anything 在平坦水面/地面上有逐行细噪声，
+    // 若直接拿去挤地面会形成一圈圈「波纹条纹」，比平铺还难看。
+    for (let j = 0; j <= NR; j++) {
+      for (let i = 0; i < W1; i++) {
+        let sum = 0, n = 0;
+        for (let dj = -2; dj <= 2; dj++) {
+          const jj = Math.min(NR, Math.max(0, j + dj));
+          for (let di = -2; di <= 2; di++) {
+            const ii = ((i + di) % W1 + W1) % W1;
+            sum += gE[jj * W1 + ii]; n++;
+          }
+        }
+        gEs[j * W1 + i] = sum / n;
+      }
+    }
+
+    /* 近景挤出量先算成一张 (方位 × 屏行) 的场，再做行方向低通。
+       为什么必须沿行抹平：等 v 线在透视里是一圈圈同心弧，任何逐行差异都会被
+       照片纹理放大成弧形条纹（实测第一版挤出就是这样毁掉湖面的）。
+       另外避开镜像接缝 u≈0/1，那里的深度是左右混合出来的，不能拿来抬几何。 */
+    const gLift = new Float32Array(n4);
+    const gLiftS = new Float32Array(n4);
+    for (let j = 0; j <= NR; j++) {
+      const v = gV[j];
+      const wv = smoothstep(0.50, 0.70, v) * (1 - smoothstep(0.88, 1.0, v));
+      for (let i = 0; i < W1; i++) {
+        const u = gU[i];
+        const wu = smoothstep(0.02, 0.18, u) * (1 - smoothstep(0.82, 0.98, u));
+        const ex = Math.max(0, gEs[j * W1 + i] - 0.10);
+        gLift[j * W1 + i] = clamp(ex * 0.22 * 18, 0, GROUND_LIFT_MAX) * wv * wu;
+      }
+    }
+    for (let j = 0; j <= NR; j++) {
+      for (let i = 0; i < W1; i++) {
+        let s = 0, n = 0;
+        for (let dj = -4; dj <= 4; dj++) {
+          const jj = Math.min(NR, Math.max(0, j + dj));
+          s += gLift[jj * W1 + i]; n++;
+        }
+        gLiftS[j * W1 + i] = s / n;
+      }
+    }
+
+    const vg = Number.isFinite(opt.vg) ? clamp(opt.vg, 0.6, 2.2) : VERT_GAIN;
     for (let j = 0; j <= NR; j++) {
       const v = gV[j];
       const phi = (0.5 - v) * vfov;
@@ -599,24 +716,23 @@
       const tGround = sp < -0.002 ? eye / (-sp) : 1e9;
       for (let i = 0; i <= NC; i++) {
         const a = (i / NC) * Math.PI * 2;
-        const u = gU[i];
-        const tDepth = distOf(depthAt(u, clamp(v, 0, 1)));
-        let t;
-        if (sp < -0.002) {
-          // 地平线以下：严格落在 y=0 平面上（走起来才正确），不参与远景收敛
-          t = tGround;
-        } else {
-          // 地平线以上：远景收成刚性圆柱，避免离开视点后剪切成长条
-          t = tDepth;
-          t = lerp(t, FAR_R, smoothstep(18, 46, t));
-        }
-        t = clamp(t, 2.4, 420);
         const k = j * W1 + i;
-        // 垂直位移钳制：远处 y 不得超过合理山高，避免深度噪点拉出尖刺
-        const yMax = 180 + 60 * (1 - Math.abs(sp));
-        // 地面行是 y=0 的硬约束。t 被 420m 上限截断后 sp*t+eye 已不再为 0，
-        // 显式钉住，避免地平线附近浮起一片地面（实测最大偏离 1.64m）。
-        gy[k] = (sp < -0.002) ? 0 : clamp(sp * t + eye, -3.0, yMax);
+        const tDepth = distOf(gD[k]);
+        let t, y;
+        if (sp < -0.002) {
+          // 地面：水平距离仍按「平地 + 眼高」反解（透视与行走平面一致），
+          // 但深度不再被丢弃 —— 明显比同排基线更近的连续区域被抬成近景物体。
+          // gLiftS 已做死区 + 5×5 低通 + 9 行低通，平坦水面保持完全水平。
+          t = tGround;
+          y = (opt.flat || opt.legacy) ? 0 : gLiftS[k];
+        } else {
+          // 地平线以上：不再收成 128m 刚性圆柱，按标定距离放点，获得真实纵深；
+          // 过远的四边形会在索引阶段拆到 backdrop 层（跟随相机、无视差）。
+          t = tDepth;
+          y = clamp(eye + sp * t * vg, -3.0, 520);
+        }
+        t = clamp(t, 2.4, 700);
+        gy[k] = y;
         gT[k] = t;
         gx[k] = Math.sin(a) * cp * t;
         gz[k] = Math.cos(a) * cp * t;
@@ -638,8 +754,11 @@
     }
     {
       const src = gT.slice();
+      // 物理标定后距离动态范围从几米到几百米，固定 1.25 倍会把连续地形
+      // 误判成断崖、大量吸附成台阶（画面出现横向条纹与撕裂），故提高阈值。
+      const pullRatio = cal ? 1.9 : 1.25;
       for (let j = 0; j <= NR; j++) {
-        if (groundRow[j]) continue;                 // 地面：y=0 是硬约束
+        if (groundRow[j]) continue;                 // 地面行豁免前拉吸附
         for (let i = 0; i <= NC; i++) {
           const k = j * W1 + i;
           const iL = j * W1 + ((i - 1 + W1) % W1);
@@ -652,7 +771,7 @@
             groundRow[Math.max(0, j - 1)] ? Infinity : src[jD],
             groundRow[Math.min(NR, j + 1)] ? Infinity : src[jU2]
           );
-          if (Number.isFinite(mn) && src[k] > mn * 1.25) {
+          if (Number.isFinite(mn) && src[k] > mn * pullRatio) {
             // 深度断崖：吸附到前景深度（标准 DIBR 补洞），桥接面片被遮住
             const t = mn;
             gT[k] = t;
@@ -660,7 +779,7 @@
             const phi = (0.5 - gV[j]) * vfov;
             gx[k] = Math.sin(a) * Math.cos(phi) * t;
             gz[k] = Math.cos(a) * Math.cos(phi) * t;
-            gy[k] = Math.sin(phi) * t + eye;
+            gy[k] = clamp(eye + Math.sin(phi) * t * vg, -3.0, 520);
           }
         }
       }
@@ -668,11 +787,15 @@
 
     /* 3) 顶点 / UV / 法线 / 顶点色 */
     const pos = [], uv = [], col = [], nrm = [], idx = [];
+    const edge = new Float32Array(n4 * 2);
     for (let j = 0; j <= NR; j++) {
       for (let i = 0; i <= NC; i++) {
         const k = j * W1 + i;
         pos.push(gx[k], gy[k], gz[k]);
         uv.push(gU[i], gV[j]);
+        // 侧向融雾 / 底缘融地面色：让照片边界长进环境里，而不是一张硬切卡片
+        edge[k * 2] = clamp((1 - gVis[i]) * 2.0, 0, 1) * 0.98;
+        edge[k * 2 + 1] = clamp(smoothstep(0.84, 1.0, gV[j]) * 0.98, 0, 0.98);
       }
     }
 
@@ -693,42 +816,88 @@
         nx /= nl; ny /= nl; nz /= nl;
         if (nx * gx[k] + nz * gz[k] > 0) { nx = -nx; ny = -ny; nz = -nz; }
         const ndl = Math.max(0, nx * sunV[0] + ny * sunV[1] + nz * sunV[2]);
-        // 体积感来自法线：越背离太阳越暗，但要保留照片本身的明暗
-        const shade = clamp(0.80 + 0.34 * ndl + 0.06 * ny, 0.55, 1.16);
+        // 体积感来自法线：拉开受光/背光差，并在深度断崖处加一圈接触阴影（AO），
+        // 让挤出的近景物体有「侧面」而不是一张和地面同色的斜坡。
+        const gradD = Math.abs(gEs[iR] - gEs[iL]) + Math.abs(gEs[jU2] - gEs[jD]);
+        const ao = 1 - 0.26 * clamp(gradD * 7, 0, 1);
+        const shade = clamp((0.68 + 0.50 * ndl + 0.10 * ny) * ao
+                            * (1 - 0.10 * clamp(-ny, 0, 1)), 0.42, 1.34);
         // 天空处渐隐，交给程序化天穹
         const skyV = gSky[i];
         // 硬边剪影：只在天际线"上方"渐隐，下方必须实心，否则会出现亮缝
         const aSky = smoothstep(skyV - 0.012, skyV, v);
-        // 画面下缘几行渐隐，交给程序化地面兜底（避免近处被放大成黑带）
-        const aBot = 1 - smoothstep(0.985, 1.0, v);
-        const alpha = Math.min(aSky, aBot) * gVis[i];
+        // 侧向与底缘不再靠 alpha 消失（那会露出硬切边，放宽渐隐又会露出
+        // 拉伸条纹），改由顶点 edge 系数把颜色融进雾色 / 地面色；
+        // 只有天际线以上的剪影保持透明，交给程序化天穹。
+        const alpha = aSky;
         col.push(shade, shade, shade, alpha);
         nrm.push(nx, ny, nz);
       }
     }
 
-    /* 4) 索引：跳过完全在天空里的格子 */
+    /* 4) 索引：跳过完全在天空里的格子；把远景四边形拆到 backdrop 层。
+     * 远景本就不该有视差（GLB 资产模式的结论）：它由 renderer 带着相机平移，
+     * 近景保持世界坐标。这样中景不再被「压到同一个圆柱半径」，
+     * 走动时也不会出现整片照片跟着人一起滑的沙盘感。 */
+    const idxBack = [];
     for (let j = 0; j < NR; j++) {
       const v0 = gV[j], v1 = gV[j + 1];
       for (let i = 0; i < NC; i++) {
-        if (gVis[i] < 0.5 || gVis[(i + 1) % W1] < 0.5) continue;   // 视锥外不建面
+        // 渐隐带前半照常建面（到 gVis=0.5，此时已几乎全融进雾色），
+        // 视锥外不建面 —— 那里只有镜像拉伸的重复纹理，建了就是条纹。
+        if (gVis[i] < 0.5 || gVis[(i + 1) % W1] < 0.5) continue;
         const s0 = gSky[i], s1 = gSky[(i + 1) % W1];
         if (v0 < Math.min(s0, s1) - 0.05 && v1 < Math.min(s0, s1) - 0.05) continue;
         const a0 = j * W1 + i;
         const a1 = a0 + 1;
         const b0 = (j + 1) * W1 + i;
         const b1 = b0 + 1;
-        idx.push(a0, b0, a1, a1, b0, b1);
+        const far = !opt.legacy && !groundRow[j] && !groundRow[j + 1]
+          && Math.min(gT[a0], gT[a1], gT[b0], gT[b1]) > BACKDROP_T;
+        const target = far ? idxBack : idx;
+        target.push(a0, b0, a1, a1, b0, b1);
       }
     }
 
+    const posF = new Float32Array(pos);
+    const nrmF = new Float32Array(nrm);
+    const uvF = new Float32Array(uv);
+    const colF = new Float32Array(col);
+    const backdrop = idxBack.length
+      ? { pos: posF, normal: nrmF, uv: uvF, color: colF, edge, index: idxBack, tris: idxBack.length / 3 }
+      : null;
     return {
-      pos: new Float32Array(pos),
-      normal: new Float32Array(nrm),
-      uv: new Float32Array(uv),
-      color: new Float32Array(col),
+      pos: posF,
+      normal: nrmF,
+      uv: uvF,
+      color: colF,
+      edge,
       index: idx,
+      backdrop,
       vfov,
+      calibration: cal ? { p: cal.p, zNear: cal.zNear, rNear: cal.rNear, rFar: cal.rFar } : null,
+      /* 行走高度场：把挤出的近景物体当作可站立表面，避免玩家直接穿过几何。
+         按 (角度, 距离) 反查地面行并做 3×3 均值平滑，幅度收 0.8×，
+         防止站上物体时眼高突跳。 */
+      heightField: function (x, z) {
+        const r = Math.hypot(x, z);
+        if (r < 3.0 || r > 120) return 0;
+        const v = 0.5 + Math.asin(clamp(eye / r, 0, 0.999)) / vfov;
+        if (v <= 0.5 || v >= 0.995) return 0;
+        const a = ((Math.atan2(x, z) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+        const fi = a / (Math.PI * 2) * NC;
+        const fj = Math.round(v * NR);
+        let sum = 0, n = 0;
+        for (let dj = -1; dj <= 1; dj++) {
+          const j = Math.min(NR, Math.max(0, fj + dj));
+          if (!groundRow[j]) continue;
+          for (let di = -1; di <= 1; di++) {
+            const i = ((Math.round(fi) + di) % W1 + W1) % W1;
+            sum += gy[j * W1 + i]; n++;
+          }
+        }
+        return n ? clamp(sum / n * 0.8, -0.1, 1.8) : 0;
+      },
       tris: idx.length / 3
     };
   }
@@ -802,10 +971,16 @@
     const seed = opts.seed || 1;
     const rng = mulberry32(seed);
     const depthMap = opts.depth || null;
-    const heightAt = makeHeightField(analysis, depthMap ? 0.12 : 1);
     const PWGL = global.PW.GL;
 
-    const relief = depthMap ? buildRelief(analysis, depthMap, { seed }) : null;
+    const relief = depthMap ? buildRelief(analysis, depthMap, {
+      seed,
+      legacy: !!(opts && opts.legacy),   // ?v1=1 回到旧的经验曲线 / 平地面
+      flat: !!(opts && opts.flat),       // ?flat=1 关闭近景挤出，仅做 A/B
+      vg: opts && opts.vg
+    }) : null;
+    // 深度模式下玩家站在「挤出后的地面」上，不再是被乘 0.12 的程序化噪声
+    const heightAt = relief ? relief.heightField : makeHeightField(analysis, 1);
 
     const farRidge = relief ? null : buildCurtain(analysis, {
       columns: 460, rows: 8, radius: 195, maxHeight: 56,
@@ -842,6 +1017,7 @@
 
     const m = {
       relief: relief ? PWGL.createMesh(gl, relief) : null,
+      reliefBackdrop: (relief && relief.backdrop) ? PWGL.createMesh(gl, relief.backdrop) : null,
       farRidge: farRidge ? PWGL.createMesh(gl, farRidge) : null,
       nearRidge: nearRidge ? PWGL.createMesh(gl, nearRidge) : null,
       sky: skyCurtain ? PWGL.createMesh(gl, skyCurtain) : null,
@@ -855,7 +1031,7 @@
     const worldInfo = {
       mode: relief ? 'depth' : 'legacy',
       eyeHeight: 1.7,
-      walkRadius: relief ? 12 : 116
+      walkRadius: relief ? 24 : 116
     };
 
     /* 光照与雾 */

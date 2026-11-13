@@ -8,6 +8,7 @@ in vec3 aPos;
 in vec3 aNormal;
 in vec2 aUV;
 in vec4 aColor;
+in vec2 aEdge;      // x: 视锥侧向融雾  y: 底边融入地面色
 uniform mat4 uVP;
 uniform vec3 uEye;
 uniform vec2 uBackdrop;   // 远景跟随相机的水平位移（近景不跟随，保证走动真实）
@@ -16,6 +17,7 @@ out vec2 vUV;
 out vec4 vC;
 out float vDist;
 out vec3 vWorld;
+out vec2 vEdge;
 void main() {
   vec3 wp = aPos;
   // 18m 内严格世界坐标（走动真实）；42m 外整体跟随相机（远景视差可忽略，避免穿帮）
@@ -25,6 +27,7 @@ void main() {
   vN = aNormal;
   vUV = aUV;
   vC = aColor;
+  vEdge = aEdge;
   vDist = length(wp - uEye);
 }`;
 
@@ -35,6 +38,7 @@ in vec2 vUV;
 in vec4 vC;
 in float vDist;
 in vec3 vWorld;
+in vec2 vEdge;
 uniform sampler2D uTex;
 uniform vec3 uEye;
 uniform vec3 uSunDir;
@@ -113,8 +117,14 @@ void main() {
     albedo = mix(albedo, uGroundTint, k * 0.82);
     col = albedo * (uSkyAmb * fill + uSunColor * ndl * 1.02 + 0.02);
   } else if (mode == 4) {
-    // 预烘焙光照（远山 / 近岭）：贴图 × 顶点色，直接受雾影响
+    // 预烘焙光照（远山 / 近岭 / 深度表面）：贴图 × 顶点色
     col = srgb2lin(texture(uTex, vUV, uMipBias).rgb) * vC.rgb;
+    // 视锥边缘与画面底缘把照片纹理融进环境色，消掉「插在水面上的卡片」
+    // 那种四周硬切边；不做这一步，任何放宽渐隐的尝试都会露出拉伸条纹。
+    // 上半屏融天光、下半屏融地面色，否则深色场景侧边会出现一条浅灰「雾墙」
+    vec3 envCol = mix(uSkyAmb, uGroundTint, smoothstep(0.42, 0.62, vUV.y));
+    col = mix(col, envCol, vEdge.x);
+    col = mix(col, uGroundTint, vEdge.y);
   } else {
     vec3 albedo = srgb2lin(texture(uTex, vUV, uMipBias).rgb) * vC.rgb;
     col = albedo * (uSkyAmb * fill + uSunColor * ndl * 1.02 + 0.02);
@@ -338,6 +348,7 @@ void main() {
     mesh.aNormal = data.normal ? mk(data.normal, 3) : null;
     mesh.aUV = data.uv ? mk(data.uv, 2) : null;
     mesh.aColor = data.color ? mk(data.color, 4) : null;
+    mesh.aEdge = data.edge ? mk(data.edge, 2) : null;
     mesh.count = data.count !== undefined ? data.count : data.pos.length / 3;
     if (data.index) {
       const ib = gl.createBuffer();
@@ -351,9 +362,16 @@ void main() {
 
   function bindMesh(gl, program, mesh) {
     const loc = (name) => gl.getAttribLocation(program.prog, name);
-    const bind = (attrib, buf) => {
+    const bind = (attrib, buf, zero) => {
       if (attrib < 0) return;
-      if (!buf) { gl.disableVertexAttribArray(attrib); gl.vertexAttrib4f(attrib, 1, 1, 1, 1); return; }
+      if (!buf) {
+        gl.disableVertexAttribArray(attrib);
+        // aEdge 缺失的网格（GLB 资产、程序化地面等）必须默认 0，
+        // 否则整张网格会被当成边缘融进雾色。
+        if (zero) gl.vertexAttrib2f(attrib, 0, 0);
+        else gl.vertexAttrib4f(attrib, 1, 1, 1, 1);
+        return;
+      }
       gl.bindBuffer(gl.ARRAY_BUFFER, buf.buf);
       gl.enableVertexAttribArray(attrib);
       gl.vertexAttribPointer(attrib, buf.size, gl.FLOAT, false, 0, 0);
@@ -362,6 +380,7 @@ void main() {
     bind(loc('aNormal'), mesh.aNormal);
     bind(loc('aUV'), mesh.aUV);
     bind(loc('aColor'), mesh.aColor);
+    bind(loc('aEdge'), mesh.aEdge, true);
     if (mesh.index) gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, mesh.index.buf);
     else gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
   }

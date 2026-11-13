@@ -190,6 +190,22 @@
 
       drawSkyBackground(world, cam.eye, aspect);
 
+      // 深度重建的远景层：>70m 的四边形，跟随相机平移（无视差），
+      // 与 GLB 资产模式的 backdrop 同一策略，避免走动时整片照片跟着人滑。
+      // 先画远层、再画近层，深度测试处理遮挡。
+      if (world.meshes.reliefBackdrop && !skip('shell')) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.depthMask(true);
+        gl.disable(gl.CULL_FACE);
+        drawMesh(world, world.meshes.reliefBackdrop, {
+          tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.26, mipBias: 0,
+          backdrop: [cam.eye[0], cam.eye[2]]
+        });
+        gl.disable(gl.BLEND);
+        gl.enable(gl.CULL_FACE);
+      }
+
       // 深度重建的三维表面（照片即场景）
       if (world.meshes.relief && !skip('shell')) {
         gl.enable(gl.BLEND);

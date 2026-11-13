@@ -186,11 +186,16 @@
 
       setProgress(76, depthMap ? '重建三维表面（射线网格）…' : '构建分层地形…');
       await sleep(30);
+      const params = new URLSearchParams(location.search);
       const w = window.PW.world.build(renderer.gl, analysis, {
         seed: hashString(def.id + '|' + def.name),
         depth: depthMap,
         // 视锥外的程序化地平雾带是实验特性，默认关闭，用 ?ring=1 打开
-        ring: new URLSearchParams(location.search).get('ring') === '1'
+        ring: params.get('ring') === '1',
+        // 重建 A/B：?v1=1 旧经验曲线、?flat=1 关闭近景挤出、?vg=1.35 调竖直夸张
+        legacy: params.get('v1') === '1',
+        flat: params.get('flat') === '1',
+        vg: params.has('vg') ? parseFloat(params.get('vg')) : undefined
       });
       setProgress(88, '铺设地表与植被…');
       await sleep(50);

@@ -79,10 +79,16 @@ ctx.PW.GL = { createTexture: () => ({}), createMesh: () => ({}) };
 vm.runInContext(injected, ctx, { filename: 'world.js' });
 assert.equal(typeof ctx.PW.world.buildRelief, 'function', 'buildRelief 未导出到沙箱');
 
-function checkRelief(tag, dm) {
-  const r = ctx.PW.world.buildRelief(analysis, dm, {});
+/* v1.11.0：地面不再被硬钉在 y=0（那是「照片平铺在地上」的根因之一），
+   改为有上限的近景挤出；同时新增「纵深是否被压平」的量化判据：
+   旧实现把 46m 外全部 lerp 到 128m 固定圆柱，p90/p10 会趋近 1、
+   128m 顶点占比接近 100%。 */
+function reliefStats(dm, opt) {
+  const r = ctx.PW.world.buildRelief(analysis, dm, opt || {});
   const s = ctx.__stats;
   let groundN = 0, maxAbsY = 0, pulledGround = 0, pulledSky = 0;
+  let cyl = 0, skyN = 0;
+  const ts = [];
   for (let j = 0; j <= s.NR; j++) {
     const sp = Math.sin((0.5 - s.gV[j]) * s.vfov);
     for (let i = 0; i < s.W1; i++) {
@@ -92,15 +98,49 @@ function checkRelief(tag, dm) {
         groundN++;
         maxAbsY = Math.max(maxAbsY, Math.abs(s.gy[k]));
         if (pulled) pulledGround++;
-      } else if (pulled) pulledSky++;
+      } else {
+        skyN++;
+        ts.push(s.after[k]);
+        if (Math.abs(s.after[k] - 128) < 1) cyl++;
+        if (pulled) pulledSky++;
+      }
     }
   }
+  ts.sort((a, b) => a - b);
+  return {
+    r, groundN, maxAbsY, pulledGround, pulledSky,
+    p10: ts[Math.floor(ts.length * 0.1)], p90: ts[Math.floor(ts.length * 0.9)],
+    cylRatio: cyl / Math.max(1, skyN)
+  };
+}
+
+function checkRelief(tag, dm) {
+  const s = reliefStats(dm, {});
+  const r = s.r;
   assert.ok(r.tris > 0, tag + '：没有生成三角面');
-  assert.equal(pulledGround, 0, tag + '：地面顶点仍被前拉吸附');
-  assert.ok(maxAbsY < 1e-3, tag + '：地面顶点偏离 y=0 达 ' + maxAbsY + 'm');
-  console.log(`PASS  P1  前拉/地面平面 [${tag}]：地面 ${groundN} 顶点 max|y|=${maxAbsY.toFixed(4)}m，`
-    + `吸附 地面 ${pulledGround} / 非地面 ${pulledSky}，三角 ${r.tris}`);
-  return { pulledSky };
+  assert.equal(s.pulledGround, 0, tag + '：地面顶点仍被前拉吸附');
+  // 平坦水面/地面必须保持水平（旧版满屏波纹条纹就是这里没做死区+低通）；
+  // 带近景断崖的照片则必须真的挤出物体，否则「平铺在地面上」没被解决。
+  if (tag.indexOf('断崖') >= 0) {
+    assert.ok(s.maxAbsY >= 0.10, tag + '：近景挤出未生效（地面仍是死平的）');
+  } else {
+    assert.ok(s.maxAbsY <= 0.05, tag + '：平坦地面产生了波纹起伏 ' + s.maxAbsY + 'm');
+  }
+  assert.ok(s.maxAbsY <= 1.5, tag + '：地面起伏超出上限 ' + s.maxAbsY + 'm');
+  assert.ok(r.calibration && r.calibration.p >= 0.6 && r.calibration.p <= 3.2,
+    tag + '：双锚点物理标定未生效');
+  // 天空上缘很高时可见区域可能全部落在 70m 内，此时远景层为空是正确行为；
+  // 分层逻辑本身由下面的「深天空」用例单独验证。
+  assert.ok(!r.backdrop || r.backdrop.tris > 0, tag + '：远景层三角数异常');
+  const spread = s.p90 / Math.max(1e-3, s.p10);
+  assert.ok(spread > 4, tag + '：纵深仍被压平（p90/p10=' + spread.toFixed(2) + '）');
+  assert.ok(s.cylRatio < 0.10,
+    tag + '：仍有 ' + (s.cylRatio * 100).toFixed(1) + '% 顶点被压在 128m 圆柱上');
+  console.log(`PASS  P1  几何 [${tag}]：地面 ${s.groundN} 顶点 max|y|=${s.maxAbsY.toFixed(3)}m，`
+    + `纵深 p10=${s.p10.toFixed(1)}m p90=${s.p90.toFixed(1)}m (×${spread.toFixed(1)})，`
+    + `128m 圆柱占比 ${(s.cylRatio * 100).toFixed(2)}%，远层 ${r.backdrop ? r.backdrop.tris : 0} 三角，`
+    + `吸附 地面 ${s.pulledGround} / 非地面 ${s.pulledSky}`);
+  return { pulledSky: s.pulledSky };
 }
 
 const SIZE = 518;
@@ -118,6 +158,24 @@ function synth(cliff) {
 checkRelief('平滑深度', synth(false));
 const cliff = checkRelief('带断崖深度', synth(true));
 assert.ok(cliff.pulledSky > 0, '断崖处应仍有单侧补洞，否则几何会拉出"鳍"');
+
+// ---- 2a) 天际线更高的照片：远景区可见，必须真的拆出跟随相机的 backdrop 层 ----
+{
+  const deep = Object.assign({}, analysis, { top: new Float32Array(NCOL).fill(0.02) });
+  const rr = ctx.PW.world.buildRelief(deep, synth(false), {});
+  assert.ok(rr.backdrop && rr.backdrop.tris > 0, '远景可见时应拆出 backdrop 层');
+  assert.ok(rr.tris > 0, '近景层不应被拆空');
+  console.log(`PASS  P1  近/远分层：近景 ${rr.tris} 三角 / 远景 ${rr.backdrop.tris} 三角`);
+}
+
+// ---- 2b) ?v1=1 必须能完整复现旧路径（地面死平 / 无远层 / 无物理标定）----
+{
+  const s = reliefStats(synth(false), { legacy: true });
+  assert.ok(s.maxAbsY < 1e-3, 'legacy 地面应严格 y=0，实测 ' + s.maxAbsY + 'm');
+  assert.equal(s.r.backdrop, null, 'legacy 不应拆远景层');
+  assert.equal(s.r.calibration, null, 'legacy 不应走物理标定');
+  console.log('PASS  P1  ?v1=1 旧路径可复现（地面 y=0 / 无远层 / 无标定）');
+}
 
 if (args.depth && fs.existsSync(args.depth)) {
   const buf = fs.readFileSync(args.depth);
