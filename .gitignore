@@ -1,3 +1,6 @@
-data/
+# 训练产物/数据只忽略仓库根目录的 data/，不能误伤 worldmodel/data/ 代码包
+/data/
 runs/
 out/
+__pycache__/
+*.pyc

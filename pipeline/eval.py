@@ -1,7 +1,16 @@
 """质量验收：把重建结果"泼点"回渲染到原相机，和输入照片比对。
 
-纯 numpy 向量化，不需要 GPU / 渲染器。任何尺度、视场、等比处理上的错误
-都会直接反映成 PSNR 下降，所以它能当作产线的自检门。
+纯 numpy 向量化，不需要 GPU / 渲染器。
+
+重要：单独用 `splat_render` 的 PSNR/SSIM **无法**约束尺度与视场 ——
+生成与泼点用同一个相机时，全局尺度在 pos/fwd 的比值里抵消，FOV 误差
+在 tan_h/tan_v 里自洽抵消，实测坐标整体 ×0.5、FOV 错 25% 仍然是
+99.0dB / SSIM 1.0。它能发现的是 UV / 索引 / 贴图错位。
+
+因此本模块额外提供两道独立参照：
+  * `ground_scale_check`：用相机眼高这个绝对量卡住地面平面（尺度门）；
+  * `cam_verify`：用独立来源的相机内参交叉泼点（视场门，需调用方提供）。
+没有独立信息时不要声称"尺度错误一定掉分"。
 """
 from __future__ import annotations
 
@@ -74,8 +83,38 @@ def ssim(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.mean(num / np.maximum(den, 1e-8)))
 
 
-def report(pos, uv, tex, cam, ref, coverage_min=0.55, step=1) -> dict:
-    """返回 PSNR/SSIM + 覆盖率 + 尺度诊断。覆盖率过低说明网格有洞或相机参数错。"""
+def ground_scale_check(pos, uv, eye: float = 1.7, v_min: float = 0.88,
+                       v_max: float = 0.995, tol: float = 0.25) -> dict:
+    """用眼高作绝对尺度参照：地面带顶点应满足 y ≈ -eye（相机系）。
+
+    这是唯一不随全局缩放抵消的量：所有坐标 ×0.5 时 PSNR 纹丝不动，
+    但地面 y 会从 -1.7 变成 -0.85，相对误差 0.5 直接超门限。
+    """
+    v = np.asarray(uv)[:, 1]
+    y = np.asarray(pos)[:, 1]
+    m = (v >= v_min) & (v <= v_max) & np.isfinite(y)
+    n = int(m.sum())
+    if n < 50:
+        return {"n": n, "ok": False, "rel_error": None, "tol": tol,
+                "reason": "地面带顶点不足 50 个，无法验收尺度"}
+    med = float(np.median(y[m]))
+    rel = abs(med + eye) / max(eye, 1e-6)
+    return {
+        "n": n, "ground_y_median": round(med, 3), "expected": round(-eye, 3),
+        "rel_error": round(rel, 4), "tol": tol, "ok": bool(rel <= tol),
+        "reason": "" if rel <= tol else "地面平面偏离眼高 %.1f%%（疑似整体尺度错误）" % (rel * 100),
+    }
+
+
+def report(pos, uv, tex, cam, ref, coverage_min=0.55, step=1,
+           cam_verify=None, eye=None, cal=None, scale_tol=0.25,
+           psnr_min=14.0) -> dict:
+    """PSNR/SSIM + 覆盖率 + 尺度门 + 可选独立相机交叉门。
+
+    eye 不为 None 时启用地面平面尺度门；cam_verify 不为 None 时用它
+    （而不是生成用的 cam）再泼一次点，才能发现内参错误。cal 的 p 只做
+    诊断告警，不直接判失败：双锚点默认 1500m 常给出 p≈2.3。
+    """
     ref_f = ref.astype(np.float32) / 255.0 if ref.dtype == np.uint8 else ref.astype(np.float32)
     if step > 1:
         # 与网格采样点严格对齐：网格每隔 step 像素取一个顶点
@@ -90,10 +129,50 @@ def report(pos, uv, tex, cam, ref, coverage_min=0.55, step=1) -> dict:
                 "reason": "coverage too low"}
     p = psnr(img[mask], ref_f[mask])
     s = ssim(img * mask[..., None], ref_f * mask[..., None])
-    return {
-        "coverage": round(cov, 4),
-        "psnr": round(p, 2),
-        "ssim": round(s, 4),
-        "ok": bool(cov >= coverage_min and p >= 14.0),
-        "reason": "" if cov >= coverage_min else "coverage below %.2f" % coverage_min,
-    }
+    reasons = []
+    if cov < coverage_min:
+        reasons.append("coverage below %.2f" % coverage_min)
+    if p < psnr_min:
+        reasons.append("psnr below %.1f" % psnr_min)
+    ok = not reasons
+
+    out = {"coverage": round(cov, 4), "psnr": round(p, 2), "ssim": round(s, 4)}
+
+    if eye is not None:
+        out["scale"] = ground_scale_check(pos, uv, eye, tol=scale_tol)
+        if not out["scale"]["ok"]:
+            ok = False
+            reasons.append(out["scale"]["reason"])
+
+    if cam_verify is not None:
+        img2 = splat_render(pos, uv, tex, cam_verify, (h, w))
+        m2 = np.any(img2 > 1e-6, axis=2)
+        cov2 = float(m2.mean())
+        if m2.sum() >= 100:
+            p2 = psnr(img2[m2], ref_f[m2])
+            s2 = ssim(img2 * m2[..., None], ref_f * m2[..., None])
+        else:
+            p2, s2 = 0.0, 0.0
+        # 除了绝对阈值，还要求交叉渲染的覆盖率不比自洽渲染低太多：
+        # 内参不一致时顶点会缩到画面中间（实测 FOV 错 25% → 1.00 降到 0.59），
+        # 但常数贴图的 PSNR 可能看不出变化，相对覆盖率更可靠。
+        ratio = cov2 / max(cov, 1e-6)
+        cross_ok = bool(cov2 >= coverage_min and p2 >= psnr_min and ratio >= 0.90)
+        out["cross"] = {"coverage": round(cov2, 4), "psnr": round(p2, 2),
+                        "ssim": round(s2, 4), "coverage_ratio": round(ratio, 4),
+                        "ok": cross_ok}
+        if not cross_ok:
+            ok = False
+            reasons.append("独立相机交叉校验未通过（coverage %.2f / 相对 %.2f / PSNR %.1fdB）"
+                           % (cov2, ratio, p2))
+
+    if cal is not None:
+        pv = float(cal.get("p", 1.0))
+        out["calibration"] = {"p": round(pv, 4), "limit": 2.0,
+                              "warning": "" if pv <= 2.0 else
+                              "p=%.2f > 2：深度 10%% 误差会放大成距离 %.1f%% 误差" %
+                              (pv, (0.9 ** -pv - 1) * 100)}
+
+    out["ok"] = bool(ok)
+    out["reason"] = "" if ok else "; ".join(reasons)
+    return out

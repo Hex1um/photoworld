@@ -21,7 +21,10 @@ data/syn/traj_0000/
   poses.json                          {fovY, fovX, width, height, frames:[{file, camToWorld[16], action}]}
 ```
 
-`camToWorld` 是 4×4 **行主序**（相机→世界），与 Blender/COLMAP 习惯一致。
+`camToWorld` 是 4×4 **列主序**（相机→世界，平移在最后 4 个元素，与 WebGL 一致）。
+`scripts/prepare_data.py::mat4_from_rowmajor` 必须先 `reshape(4,4)` 再转置；
+早期版本漏了转置，`T[:3,3]` 取到齐次列 `[0,0,0]`，**所有动作的平移分量恒为 0**，
+模型从未收到"前进"信号（已在 93f052e 修复）。
 
 ### 训练分片
 
@@ -36,6 +39,10 @@ a_t = [axis-angle(3), Δt(3, 相机系, 除以轨迹中位速度), log(FOV 比�
 ```
 
 `Δt` 归一化后不同尺度的场景可比。窗口 `(frame_{t-4..t}, a_t, frame_{t+1})`，N=4。
+
+分片由 `worldmodel/data/dataset.py::TarWindows` 读取（补齐了此前缺失、导致训练入口
+`ModuleNotFoundError` 的包）：图片解码成 (3,H,W) float32 ∈ [-1,1]，按固定 seed 切 train/val，
+`collate` 堆叠成 batched tensor。可用 `python tools/test_regression.py` 无 torch 验证读取与形状。
 
 ### 真实数据（可选，未接入）
 

@@ -158,6 +158,7 @@ def calibrate_scale(depth_rel: np.ndarray, cam: Camera, eye: float = 1.7,
         rel = np.abs(A_ * np.power(rr, -p_) - zt) / np.maximum(zt, 1e-6)
         return {"A": A_, "p": p_, "b": 0.0, "n": int(rr.size),
                 "rms": float(np.median(rel)), "mode": "ground-fit",
+                "r_near": float(np.median(rr)) if rr.size else 0.8, "z_near": z_n,
                 "degenerate": bool(np.median(rel) > 0.5)}
 
     # 模式 A：远端锚点取地平线附近的"最远地形"视差
@@ -181,10 +182,24 @@ def calibrate_scale(depth_rel: np.ndarray, cam: Camera, eye: float = 1.7,
 
 
 def metric_depth(depth_rel: np.ndarray, a: float, b: float = 0.0,
-                 near: float = 0.5, far: float = 600.0, p: float = 1.0) -> np.ndarray:
-    """z = A * r^(-p)。p=1 时退化为视差模型。"""
-    d = np.maximum(depth_rel - b, 1e-3)
-    z = a * np.power(d, -p)
+                 near: float = 0.5, far: float = 1800.0, p: float = 1.0,
+                 r0: float | None = None) -> np.ndarray:
+    """相对视差 → 米：带软饱和的幂律 z = A·(r + r0)^(-p)。
+
+    旧的 `clip(A·r^(-p), near, far)` 有两个问题：
+      * far 默认 600m，而双锚点标定的远端先验是 1500m —— 实测 46.1%
+        像素被压到同一个 600m 平面，"拉开中景"的设计被上限吃掉；
+      * r→0 时幂律发散，直接放开 far 会让天空深度爆到 1e5m。
+    这里取 r0 = (A/far)^(1/p)：z(0) 恰好收敛到 far，中间段随 r 连续
+    变化而不是硬平面；r >> r0 时与原来的标定一致。调用方应把 A 按
+    (1 + r0/r_near)^p 修正，让近端锚点仍精确（见 reconstruct.py）。
+    """
+    d = np.maximum(depth_rel - b, 0.0)
+    if p > 0 and a > 0 and far > 0:
+        r0 = float(np.power(a / far, 1.0 / p)) if r0 is None else float(r0)
+        z = a * np.power(d + r0, -p)
+    else:
+        z = a * np.power(np.maximum(d, 1e-3), -p)
     return np.clip(z, near, far).astype(np.float32)
 
 

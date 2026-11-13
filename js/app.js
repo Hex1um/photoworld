@@ -126,12 +126,12 @@
     const cv = el('loaderDepth');
     if (!cv || !d || !d.data) return;
     const ctx = cv.getContext('2d');
-    const S = d.size;
+    const DW = d.width || d.size, DH = d.height || d.size;
     const img = ctx.createImageData(cv.width, cv.height);
     for (let y = 0; y < cv.height; y++) {
       for (let x = 0; x < cv.width; x++) {
-        const sx = Math.floor(x / cv.width * S), sy = Math.floor(y / cv.height * S);
-        const v = Math.max(0, Math.min(1, d.data[sy * S + sx]));
+        const sx = Math.floor(x / cv.width * DW), sy = Math.floor(y / cv.height * DH);
+        const v = Math.max(0, Math.min(1, d.data[sy * DW + sx]));
         const g = Math.round(v * 255);
         const o = (y * cv.width + x) * 4;
         img.data[o] = g * 0.55 + 40; img.data[o + 1] = g * 0.85; img.data[o + 2] = g;

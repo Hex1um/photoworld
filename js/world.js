@@ -545,25 +545,27 @@
     const FAR_R = 128;   // 远景固定圆柱半径
     const NC = opt.columns || 360;
     const NR = opt.rows || 200;
-    const dsz = depth.size;
+    // 深度图与照片同比例（见 js/depth.js 的等比 padding + 裁回），不再是方形拉伸图
+    const dw = depth.width || depth.size;
+    const dh = depth.height || depth.size;
     const D = depth.data;
 
     /* 深度分布拉伸 */
     const hist = [];
-    for (let y = 0; y < dsz; y += 3) for (let x = 0; x < dsz; x += 3) hist.push(D[y * dsz + x]);
+    for (let y = 0; y < dh; y += 3) for (let x = 0; x < dw; x += 3) hist.push(D[y * dw + x]);
     hist.sort((a, b) => a - b);
     const pLo = hist[Math.floor(hist.length * 0.02)] || 0;
     const pHi = hist[Math.floor(hist.length * 0.98)] || 1;
     const span = Math.max(1e-4, pHi - pLo);
 
     const rawAt = (u, v) => {
-      const x = clamp(u, 0, 1) * (dsz - 1);
-      const y = clamp(v, 0, 1) * (dsz - 1);
+      const x = clamp(u, 0, 1) * (dw - 1);
+      const y = clamp(v, 0, 1) * (dh - 1);
       const x0 = Math.floor(x), y0 = Math.floor(y);
-      const x1 = Math.min(dsz - 1, x0 + 1), y1 = Math.min(dsz - 1, y0 + 1);
+      const x1 = Math.min(dw - 1, x0 + 1), y1 = Math.min(dh - 1, y0 + 1);
       const fx = x - x0, fy = y - y0;
-      const a = D[y0 * dsz + x0], b = D[y0 * dsz + x1];
-      const c = D[y1 * dsz + x0], d = D[y1 * dsz + x1];
+      const a = D[y0 * dw + x0], b = D[y0 * dw + x1];
+      const c = D[y1 * dw + x0], d = D[y1 * dw + x1];
       return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
     };
     const dn = (u, v) => clamp((rawAt(u, v) - pLo) / span, 0, 1);
@@ -637,27 +639,46 @@
         const k = j * W1 + i;
         // 垂直位移钳制：远处 y 不得超过合理山高，避免深度噪点拉出尖刺
         const yMax = 180 + 60 * (1 - Math.abs(sp));
-        gy[k] = clamp(sp * t + eye, -3.0, yMax);
+        // 地面行是 y=0 的硬约束。t 被 420m 上限截断后 sp*t+eye 已不再为 0，
+        // 显式钉住，避免地平线附近浮起一片地面（实测最大偏离 1.64m）。
+        gy[k] = (sp < -0.002) ? 0 : clamp(sp * t + eye, -3.0, yMax);
         gT[k] = t;
         gx[k] = Math.sin(a) * cp * t;
         gz[k] = Math.cos(a) * cp * t;
       }
     }
 
-    /* 2) 前拉约束：相邻格距离不允许突变（深度断崖 -> 陡坡而不是"鳍"） */
-    for (let pass = 0; pass < 3; pass++) {
+    /* 2) 前拉约束：断崖处单轮单侧吸附，地面行豁免
+     *
+     * 旧实现是 3 轮四邻域 min 腐蚀，有两个系统性副作用：
+     *  - 地面行 t = eye/(-sinφ)，靠近地平线时相邻行比值轻易 > 1.25，
+     *    即使深度图完全平滑也会被吸附；吸附后按当前行 φ 重算 gy，
+     *    地面离开 y=0（实测 1083 个顶点、最大 1.64m，是"走动尖刺"同源伪影）；
+     *  - 三轮腐蚀等于对整张深度图做形态学腐蚀，断崖周边被拉成台阶。
+     * 现在：地面行既不参与吸附，也不作为吸附目标；其余区域只做一轮。
+     */
+    const groundRow = new Uint8Array(NR + 1);
+    for (let j = 0; j <= NR; j++) {
+      groundRow[j] = Math.sin((0.5 - gV[j]) * vfov) < -0.002 ? 1 : 0;
+    }
+    {
       const src = gT.slice();
       for (let j = 0; j <= NR; j++) {
+        if (groundRow[j]) continue;                 // 地面：y=0 是硬约束
         for (let i = 0; i <= NC; i++) {
           const k = j * W1 + i;
           const iL = j * W1 + ((i - 1 + W1) % W1);
           const iR = j * W1 + ((i + 1) % W1);
           const jD = Math.max(0, j - 1) * W1 + i;
           const jU2 = Math.min(NR, j + 1) * W1 + i;
-          const mn = Math.min(src[iL], src[iR], src[jD], src[jU2]);
-          if (src[k] > mn * 1.25) {
-            // 深度断崖：直接吸附到前景深度（标准 DIBR 补洞），
-            // 桥接面片因此贴在物体前面被遮住，而不是横拉成条纹
+          // 垂直邻居若是地面行则忽略，避免把天空行拉到近地面距离
+          const mn = Math.min(
+            src[iL], src[iR],
+            groundRow[Math.max(0, j - 1)] ? Infinity : src[jD],
+            groundRow[Math.min(NR, j + 1)] ? Infinity : src[jU2]
+          );
+          if (Number.isFinite(mn) && src[k] > mn * 1.25) {
+            // 深度断崖：吸附到前景深度（标准 DIBR 补洞），桥接面片被遮住
             const t = mn;
             gT[k] = t;
             const a = (i / NC) * Math.PI * 2;

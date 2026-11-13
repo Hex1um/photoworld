@@ -68,6 +68,10 @@ def main() -> int:
                     help="近景/远景分层距离（米）：远景做成无视差背景层")
     ap.add_argument("--horizon-far", type=float, default=1500.0,
                     help="地平线先验距离（米），0=只用地面带拟合")
+    ap.add_argument("--far", type=float, default=0.0,
+                    help="度量深度上限（米）；0=自动取 1.2×horizon-far（或 600）")
+    ap.add_argument("--verify-fov", type=float, default=0.0,
+                    help="独立测量得到的水平视场角（度），用于交叉验收；未提供时只做尺度门")
     ap.add_argument("--tex-max", type=int, default=2048)
     ap.add_argument("--jpeg-quality", type=int, default=88)
     args = ap.parse_args()
@@ -100,11 +104,27 @@ def main() -> int:
 
     print("[3/5] 尺度标定（近处地面带锚定，z = a / r）…")
     cal = geom.calibrate_scale(res.depth, cam, eye=args.eye, horizon_far=args.horizon_far)
-    z_m = geom.metric_depth(res.depth, cal["A"], cal.get("b", 0.0), p=cal["p"])
+    # 上限必须与远端锚点联动：旧实现用 far=600 配 horizon_far=1500，
+    # 实测 46.1% 像素被压到同一平面。软饱和 r0 让 r→0 时收敛到 far 而不发散。
+    far_m = args.far if args.far > 0 else (1.2 * args.horizon_far if args.horizon_far > 0 else 600.0)
+    pv = float(cal["p"])
+    r0 = float((cal["A"] / far_m) ** (1.0 / pv)) if pv > 0 and cal["A"] > 0 else 0.0
+    r_near = max(float(cal.get("r_near", 0.8)), 1e-3)
+    a_eff = cal["A"] * (1.0 + r0 / r_near) ** pv   # 保持 z(r_near) = z_near
+    z_m = geom.metric_depth(res.depth, a_eff, cal.get("b", 0.0),
+                            p=pv, far=far_m, r0=r0)
     ground_rows = z_m[int(z_m.shape[0] * 0.95):]
-    print(f"      模式={cal.get('mode', '-')} A={cal['A']:.2f} p={cal['p']:.2f} "
+    touched = float((z_m >= far_m - 0.5).mean() * 100)
+    print(f"      模式={cal.get('mode', '-')} A={a_eff:.2f}(标定 {cal['A']:.2f}) p={pv:.2f} "
+          f"上限={far_m:.0f}m r0={r0:.4f} 触顶={touched:.1f}% "
           f"近地中位距={float(np.median(ground_rows)):.2f}m "
           f"{'（退化：地平线假设可能不成立）' if cal.get('degenerate') else ''}")
+    if pv > 2.0:
+        print(f"      警告：p={pv:.2f} > 2，深度 10% 误差会放大成距离 "
+              f"{(0.9 ** -pv - 1) * 100:.1f}% 误差；建议用度量深度后端或调小 horizon-far")
+    cal["far"] = far_m
+    cal["r0"] = r0
+    cal["a_effective"] = a_eff
 
     print(f"[4/5] 视场外延拓 → {args.target_fov:.0f}° …")
     img2, z2, cam2 = geom.extend_fov(arr, z_m, cam, target_hfov=math.radians(args.target_fov))
@@ -126,10 +146,37 @@ def main() -> int:
     tex_bytes = buf.getvalue()
 
     hh, ww, mstep = mesh["grid"]
-    chk = eval_mod.report(mesh["pos"], mesh["uv"], np.asarray(tex_img, dtype=np.float32) / 255.0,
-                          cam2, (np.clip(img2, 0, 1) * 255).astype(np.uint8), step=mstep)
+    tex_f = np.asarray(tex_img, dtype=np.float32) / 255.0
+    ref_u8 = (np.clip(img2, 0, 1) * 255).astype(np.uint8)
+
+    # 独立来源的相机内参：只有显式给 --verify-fov，或 CLI 覆盖了 EXIF
+    # （此时 EXIF 就是独立来源）时才存在。没有独立信息就不声称能验视场。
+    cam_verify = None
+    hfov_ref = None
+    if args.verify_fov > 0:
+        hfov_ref = math.radians(args.verify_fov)
+    elif args.fov > 0:
+        hfov_ref, _, _ = hfov_from_image(img)
+    if hfov_ref is not None:
+        vfov_ref = vfov_of(hfov_ref, img.size[0], img.size[1])
+        cam_verify = geom.Camera(hfov=cam2.hfov, vfov=vfov_ref,
+                                 w=cam2.w, h=cam2.h, pitch=cam.pitch)
+
+    chk = eval_mod.report(mesh["pos"], mesh["uv"], tex_f, cam2, ref_u8,
+                          step=mstep, eye=args.eye, cam_verify=cam_verify, cal=cal)
     print(f"      自检：覆盖 {chk['coverage'] * 100:.1f}%  PSNR {chk['psnr']}dB  "
           f"SSIM {chk['ssim']}  {'OK' if chk['ok'] else '注意：' + chk['reason']}")
+    sc = chk.get("scale")
+    if sc:
+        print(f"      尺度门：地面 y 中位 {sc['ground_y_median']}m / 期望 {sc['expected']}m  "
+              f"相对误差 {sc['rel_error']}  {'OK' if sc['ok'] else '注意：' + sc['reason']}")
+    cr = chk.get("cross")
+    if cr:
+        print(f"      交叉门：覆盖 {cr['coverage'] * 100:.1f}%  PSNR {cr['psnr']}dB  "
+              f"SSIM {cr['ssim']}  {'OK' if cr['ok'] else '注意：相机内参不一致'}")
+    warn = chk.get("calibration", {}).get("warning")
+    if warn:
+        print(f"      标定告警：{warn}")
 
     # 分层：近景（真几何，走动正确）+ 远景（无视差背景层，避免"沙盘感"）
     pos_m, nrm_m, uv_m, idx_m = mesh["pos"], mesh["nrm"], mesh["uv"], mesh["index"]
@@ -186,7 +233,9 @@ def main() -> int:
         "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "sources": [os.path.basename(p) for p in jobs],
         "backend": res.backend,
-        "metric": True,
+        # ONNX 是相对深度 + 几何标定，不能把标定后的米写成"度量深度后端"
+        "metric": bool(res.metric),
+        "depth_kind": "metric" if res.metric else "relative-calibrated",
         "camera": {"hfov": hfov, "vfov": vfov, "w": img.size[0], "h": img.size[1],
                    "eye_height": args.eye, "fov_source": meta.get("fov_source")},
         "extended": {"hfov": cam2.hfov, "w": cam2.w, "h": cam2.h},
