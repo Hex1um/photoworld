@@ -1,0 +1,27 @@
+data:
+  height: 256
+  n_hist: 4
+  shard_dir: data/wm
+  vae: stabilityai/sd-vae-ft-mse
+  val_ratio: 0.1
+  width: 384
+model:
+  depth: 12
+  dim: 768
+  heads: 12
+seed: 0
+train:
+  batch_size: 2
+  clip: 1.0
+  drop_action: 0.1
+  drop_init: 0.1
+  ema: 0.999
+  grad_accum: 1
+  hist_noise_prob: 0.5
+  hist_noise_sigma: 0.3
+  log_every: 50
+  lr: 0.00015
+  out: runs/s1_300
+  steps: 300
+  val_every: 150
+  warmup: 100

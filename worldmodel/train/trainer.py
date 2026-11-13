@@ -16,12 +16,24 @@ from worldmodel.model.tokenizer import Tokenizer
 
 
 class EMA:
+    """带 warmup 的 EMA。
+
+    固定 decay=0.999 在短训练里是灾难：300 步后影子权重仍有 74% 是初始随机值，
+    rollout 拿它推理等于用了个没训过的模型。warmup 让早期紧跟当前权重。
+    """
+
     def __init__(self, model: torch.nn.Module, decay: float = 0.999):
-        self.decay = decay
+        self.max_decay = decay
+        self.step = 0
         self.shadow = {k: v.detach().clone().float() for k, v in model.state_dict().items()}
+
+    @property
+    def decay(self):
+        return min(self.max_decay, (1.0 + self.step) / (10.0 + self.step))
 
     @torch.no_grad()
     def update(self, model: torch.nn.Module):
+        self.step += 1
         d = self.decay
         for k, v in model.state_dict().items():
             s = self.shadow[k]

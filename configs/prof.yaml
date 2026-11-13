@@ -19,9 +19,9 @@ train:
   grad_accum: 1
   hist_noise_prob: 0.5
   hist_noise_sigma: 0.3
-  log_every: 5
+  log_every: 10
   lr: 0.00015
   out: runs/quick
-  steps: 10
-  val_every: 10
+  steps: 40
+  val_every: 40
   warmup: 100
