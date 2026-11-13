@@ -195,11 +195,21 @@
         // 重建 A/B：?v1=1 旧经验曲线、?flat=1 关闭近景挤出、?vg=1.35 调竖直夸张
         legacy: params.get('v1') === '1',
         flat: params.get('flat') === '1',
+        cartesian: params.get('cart') !== '0', // ?cart=0 回到旧的视锥/球面参数化（A/B）
+        ldi: params.get('ldi') === '1',      // ?ldi=1 实验：断崖跳面 + 背景补洞（A/B 未达标，默认关）
+        proxy: params.get('proxy') === '1', // ?proxy=1 实验：360° 低频世界幕（默认关）
         vg: params.has('vg') ? parseFloat(params.get('vg')) : undefined
       });
       setProgress(88, '铺设地表与植被…');
       await sleep(50);
 
+      // 视觉闭环：tools/quality_gate.py 实测首帧中央区域比原片暗约 19%
+      // (luma_ratio ≈ 0.81)。?expo= 用来对 targetLum 做对齐 A/B；
+      // 探针口径是全屏、质量门口径是中央 ROI，所以补偿系数要实测而非拍脑袋。
+      const expoAlign = parseFloat(params.get('expo'));
+      if (Number.isFinite(expoAlign) && expoAlign > 0.5 && expoAlign < 2) {
+        w.targetLum = clamp(w.targetLum * expoAlign, 0.05, 0.95);
+      }
       w.pointsMesh = renderer.makePointMesh(w.particles);
       setProgress(94, '校准空气与雾…');
       await sleep(60);
@@ -233,28 +243,8 @@
         if (instant) document.title = 'PW meas=' + lastMeas.toFixed(3) + ' target=' + world.targetLum.toFixed(3) + ' expo=' + world.exposure.toFixed(3);
       } catch (e) { if (instant) document.title = 'PW err ' + e.message; }
 
-      // 入景前先做一次曝光收敛：避免进入后画面亮度跳变
-      try {
-        const aspect0 = Math.max(0.4, canvas.clientWidth / Math.max(1, canvas.clientHeight));
-        const hf = (66 * Math.PI / 180) * player.state.fovMul;
-        const vf = clamp(2 * Math.atan(Math.tan(hf / 2) / aspect0), 0.55, 1.42);
-        let lastMeas = -1;
-        for (let i = 0; i < 10; i++) {
-          const m = renderer.render(world, {
-            eye: [player.state.x, player.state.y, player.state.z],
-            yaw: player.state.yaw,
-            pitch: player.state.pitch,
-            fov: vf
-          }, { time: 0, fade: 1, measure: true });
-          if (!(m > 0)) break;
-          lastMeas = m;
-          const ratio = (world.targetLum || 0.35) / Math.max(m, 0.02);
-          if (Math.abs(ratio - 1) < 0.02) break;
-          world.exposure = clamp(world.exposure * Math.pow(ratio, 0.7), 0.08, 3.6);
-        }
-        if (instant) document.title = 'PW meas=' + lastMeas.toFixed(3) + ' target=' + world.targetLum.toFixed(3) + ' expo=' + world.exposure.toFixed(3);
-      } catch (e) { if (instant) document.title = 'PW err ' + e.message; }
-
+      // 曝光预热只保留一份：这里曾有两份逐字相同的 10 次循环，
+      // 第二份在第一份已收敛后又白跑最多 10 帧全屏渲染（首屏进入白白变慢）。
       el('hudName').textContent = def.name;
       el('hudSub').textContent = (def.sub || 'photoworld');
       el('keysHint').classList.remove('fade');

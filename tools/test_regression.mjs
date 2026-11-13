@@ -69,7 +69,7 @@ const injected = worldSrc
     'global.__stats = { before: gT_before, after: gT.slice(), gy: gy.slice(), gV, W1, NR, vfov };\n'
     + '    /* 3) 顶点 / UV / 法线 / 顶点色 */')
   .replace('global.PW.world = { build, makeHeightField, panoU };',
-    'global.PW.world = { build, buildRelief, makeHeightField, panoU };');
+    'global.PW.world = { build, buildRelief, buildCartesianWorld, makeHeightField, panoU };');
 const ctx = sandbox();
 for (const f of ['mat.js', 'reconstruct.js']) {
   vm.runInContext(read('js/' + f), ctx, { filename: f });
@@ -183,6 +183,68 @@ if (args.depth && fs.existsSync(args.depth)) {
   checkRelief('真实 ONNX 深度', { data: d, width: SIZE, height: SIZE, size: SIZE });
 }
 
+// ---- 2c) v1.12 质量门（three-live spatial lint / img2threejs quality-gated 的轻量版）----
+{
+  const r = ctx.PW.world.buildRelief(analysis, synth(false), {});
+  assert.equal(r.skipped, 0, '默认不应启用断崖跳面（A/B 未达标，默认画面不得倒退）');
+  assert.equal(r.bg, null, '默认不应生成背景补洞层');
+  let badP = 0, badN = 0, badE = 0;
+  for (const v of r.pos) if (!Number.isFinite(v)) badP++;
+  for (let i = 0; i < r.normal.length; i += 3) {
+    const l = Math.hypot(r.normal[i], r.normal[i + 1], r.normal[i + 2]);
+    if (l > 0.02 && Math.abs(l - 1) > 0.02) badN++;   // 退化面允许零向量
+  }
+  for (const e of r.edge) if (e < 0 || e > 1) badE++;
+  assert.equal(badP, 0, '顶点含 NaN/Inf');
+  assert.equal(badN, 0, '法线未归一化');
+  assert.equal(badE, 0, 'aEdge 越界');
+  assert.ok(r.index.length > 0 && r.tris > 0, '前景索引为空');
+  console.log(`PASS  P1  质量门：${r.pos.length / 3} 顶点全有限 / 法线归一化 / aEdge 合法，实验层默认关`);
+}
+{
+  const r = ctx.PW.world.buildRelief(analysis, synth(true), { ldi: true });
+  assert.ok(r.skipped > 0, '显式 ?ldi=1 应产生断崖跳面');
+  assert.ok(r.bg && r.bg.tris > 0, '跳面必须有背景补洞层');
+  let bad = 0;
+  for (const v of r.bg.pos) if (!Number.isFinite(v)) bad++;
+  assert.equal(bad, 0, '背景层顶点含 NaN/Inf');
+  console.log(`PASS  P1  ?ldi=1 实验层：跳面 ${r.skipped} / 补洞 ${r.bg.tris} 三角`);
+}
+
+// ---- 2d) v1.13 直角坐标重建：反投影 + 有限区域 + 断崖跳面 ----
+{
+  const S2 = 300, GWt = 96, GHt = 60;
+  const d = new Float32Array(S2 * S2);
+  for (let y = 0; y < S2; y++) {
+    for (let x = 0; x < S2; x++) {
+      let v = (y / S2) * 0.9;
+      if (y > S2 * 0.55 && x > S2 * 0.40 && x < S2 * 0.60) v += 0.25;  // 近景块
+      d[y * S2 + x] = v;
+    }
+  }
+  const r = ctx.PW.world.buildCartesianWorld(analysis,
+    { data: d, width: S2, height: S2, size: S2 }, { gw: GWt, gh: GHt });
+  assert.ok(r.tris > 0, '直角重建没有三角面');
+  assert.equal(r.pos.length, GWt * GHt * 3, '顶点数量不对');
+  assert.ok(Number.isFinite(r.heightField(0, -5)), '高度场返回非有限值');
+  let badP = 0, badN = 0;
+  for (const v of r.pos) if (!Number.isFinite(v)) badP++;
+  for (let i = 0; i < r.normal.length; i += 3) {
+    const l = Math.hypot(r.normal[i], r.normal[i + 1], r.normal[i + 2]);
+    if (l > 0.02 && Math.abs(l - 1) > 0.02) badN++;
+  }
+  assert.equal(badP, 0, '直角重建顶点含 NaN/Inf');
+  assert.equal(badN, 0, '直角重建法线未归一化');
+  let badIdx = 0;
+  for (const vi of r.index) {
+    const x = r.pos[vi * 3], z = r.pos[vi * 3 + 2];
+    if (Math.abs(x) > r.bbox.A + 1e-3 || z < -r.bbox.B - 1e-3 || z > 1.5 + 1e-3) badIdx++;
+  }
+  assert.equal(badIdx, 0, '索引引用了有限直角区域外的顶点');
+  console.log(`PASS  P1  直角重建：${r.tris} 三角 / ${GWt}×${GHt} 顶点全有限、法线归一化，`
+    + `索引全部落在 ±${r.bbox.A}m × −${r.bbox.B}m 的直角区域内，跳面 ${r.skipped}`);
+}
+
 // ---- 3) 深度预处理：等比 padding 规划与后处理 ----
 const ds = sandbox();
 ds.PW = {};
@@ -242,6 +304,9 @@ assert.ok(!/def estimate_pitch|def _fit_scale/.test(geomSrc),
   'geom.py 里仍有主流程不调用的历史标定函数');
 assert.ok(!/eye: \[0, 1\.7, 0\]/.test(appSrc),
   '曝光预热相机仍写死 y=1.7，与 asset 模式烘出的地面高度不一致');
+const expoLoops = (appSrc.match(/入景前先做一次曝光收敛/g) || []).length;
+assert.equal(expoLoops, 1,
+  'enterWorld 仍有 ' + expoLoops + ' 份曝光预热循环，第二份是白跑的全屏渲染');
 assert.ok(/groundY \+ world\.eyeHeight/.test(appSrc), '曝光预热应使用真实眼位');
 assert.ok(!/if \(x < -half \|\| x > half \|\| z < -half \|\| z > half\) return 0;/.test(appSrc),
   '高度图 at() 越界仍直接返回 0');

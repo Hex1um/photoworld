@@ -3,6 +3,73 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [1.13.0] - 2026-11-14
+
+合并 v1.12（未单独发布）的工程质量项，并把**默认重建路径从「视锥/球面参数化」
+整体换成「直角坐标反投影」**。静态资源缓存串 **1.11.0 → 1.13.0**（index.html 12 处）。
+
+### 为什么必须换掉视锥模型
+
+v1.11 的几何是「屏幕行=仰角、深度=半径」的球面网格，再乘一个 `gVis` 视锥掩码；
+视锥内才建面、边缘用 `aEdge` 融色盖住。这套结构有三个不可修复的副作用：
+
+- 视锥边界是**人为裁切**，任何放宽都会露出镜像拉伸条纹（v1.11 已实测 38% 时一片灰弧）；
+- 边缘顶点沿射线排布，深度断崖处只能靠「前拉吸附」硬拉，结果就是**尖刺/鳍**；
+- 地平线以下若强制 `y=0`，半张照片就是**平铺贴图**；若交给深度，又和球面半径打架。
+
+结论：视锥参数化本身会产生尖刺与平铺，融色只是把症状盖住。
+
+### 读到的方案（github.com/google/three-live、topics/image-to-3d、topics/scene-generation）
+
+| 来源 | 可迁移的结论 |
+| --- | --- |
+| `google/three-live`（`compileFromImage` / `from-image`） | **REFERENCE \| RENDER \| OVERLAY** 视觉闭环、`--visual-turns` 自纠错、spatial lint（有限边界/网格数/覆盖/重叠）。→ 落到 `tools/quality_gate.py` 与回归断言。 |
+| `Tencent-Hunyuan/HunyuanWorld-Voyager` | 单图 → **RGB-D 序列 → 世界坐标点云**，world cache + 点剔除保证全局一致。→ 反投影点云是正解，不是球面网格。 |
+| `ZiYang-xie/WorldGen`、`SkyworkAI/Matrix-3D` | RGBD → mesh / 3DGS，360° 可探索，**先粗几何 scaffold 再补细节**。→ 有限区域 + 地面低通 = 轻量 scaffold。 |
+| `WHU-USI3DV/VistaDream` | 单视图先建 coarse 3D scaffold，再做 RGB-D inpainting 补洞。→ 断崖跳面 + 背景层实验（默认关）。 |
+| `VAST-AI-Research/MIDI-3D`、`mschneider456/WorldMesh` | 多实例/网格条件生成，**遮挡关系要显式建模**。→ 跳面避免把前景背景连成一张面。 |
+| `facebookresearch/map-anything`、`HunyuanWorld-Mirror` | 度量 3D / 法线与深度联合输出。→ 法线 3×3 平滑 + 双锚点标定。 |
+
+**没有采用**：Hunyuan3D / TRELLIS / 3DGS / 视频扩散等需要 GPU 与大权重，和「零依赖、
+27MB ONNX、CPU 可跑」的约束冲突；mid-air 的数据集与训练也不在本次范围。
+
+### 实际改动
+
+1. **新增 `buildCartesianWorld`（默认路径）**：相机内参反投影 `P = eye + dir(u,v)·z(u,v)`，
+   只在**有限直角区域** `x∈[-60,60]m、z∈[-90,0]m、y∈[-2,40]m` 内建面；没有 `gVis`、
+   没有 `panoU` 镜像、没有球面半径。
+2. **深度预处理**：2/98 分位归一化 → 5×5 中值（压单像素尖刺）→ 地平线以下横向 7 列 /
+   纵向 5 行各向异性低通（压掉水面倒影造成的「漂浮碎片」）。
+3. **断崖跳面**：四边形四角距离比 > 2.6 时跳过（`pipeline/geom.py` 同一判据），
+   不再用前拉吸附硬拉成鳍。
+4. **法线**：世界坐标邻居差分叉积 + 3×3 平滑，统一朝上；顶点色烘焙太阳 ndl + 断崖 AO。
+5. **行走高度场**：把反投影顶点烘进 1m XZ 网格（格内取最高点 + 两轮邻域补洞），
+   玩家站在真实几何上；`walkRadius=22m`。
+6. **边界**：照片投影成梯形，alpha 2% 渐隐；不融色（融色会形成灰带）。
+   `?cart=0` 回退 v1.11 的视锥路径，`?v1=1` 回退经验曲线，便于 A/B。
+7. **质量门**：`tools/quality_gate.py` 生成 REFERENCE | RENDER | OVERLAY 三联图，
+   输出 `gray_mae / mean_centered_mae / edge_iou / luma_ratio`；回归新增 4 条断言。
+8. **工程清理**：删除 `enterWorld` 里**第二份逐字相同**的 10 次曝光预热循环
+   （第一份已收敛后白跑最多 10 帧全屏渲染）；回归静态断言锁住。
+
+### 验证
+
+- `node tools/test_regression.mjs` 全绿：直角重建 `6650 三角 / 96×60 顶点全有限、法线归一化、
+  索引全部落在 ±60m × −90m 区域内`；v1.11 视锥路径与 `?ldi=1` 实验层仍可复现。
+- `python tools/test_regression.py` P0/P1 + P2 全绿；`node --check` 全部通过；
+  `bump_cache --check` 12 处版本串一致。
+- `node tools/smoke.mjs` **5/5 PASS**（alpine / desert / asset-glb / ring-on / skip-sky）。
+- 走动 6m 画面 MAE **62.21 → 66.07 /255**（v1.11 → v1.13），视差进一步拉开；
+  湖面碎片、视锥尖刺均为 0（截图逐张检查）。
+- `quality_gate.py` 三联图：`ab/quality_v111.png` / `ab/quality_v113.png`。
+
+### 仍存在的限制（如实说明）
+
+- **有限区域的边界可见**：照片投影成梯形，窗口外是程序化地面/雾；这是「有限直角区域」
+  方案的固有边界，不是伪影。要做到无边界必须做 inpainting / 360° 生成（需生成模型）。
+- 单目深度仍是相对深度，尺度来自地面平面 + 远端先验；水面倒影会被当成几何（已低通）。
+- 走动范围 22m；再远离开照片覆盖区，边界与重复会更明显。
+
 ## [1.11.0] - 2026-11-13
 
 基座：远端 `main`（v1.10.0）。静态资源缓存串 **1.10.0 → 1.11.0**（index.html 12 处）。

@@ -190,6 +190,21 @@
 
       drawSkyBackground(world, cam.eye, aspect);
 
+      // 360° 低频世界幕：补上照片没覆盖到的方向与断崖跳面留下的洞
+      // （coarse scaffold / world proxy 思路）。跟随相机平移，远景不该有视差。
+      if (world.meshes.worldBackdrop && !skip('bg')) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.depthMask(true);
+        gl.disable(gl.CULL_FACE);
+        drawMesh(world, world.meshes.worldBackdrop, {
+          tex: world.tex.worldBackdrop, mode: 4, fog: 0.55, mipBias: 1.2,
+          backdrop: [cam.eye[0], cam.eye[2]]
+        });
+        gl.disable(gl.BLEND);
+        gl.enable(gl.CULL_FACE);
+      }
+
       // 深度重建的远景层：>70m 的四边形，跟随相机平移（无视差），
       // 与 GLB 资产模式的 backdrop 同一策略，避免走动时整片照片跟着人滑。
       // 先画远层、再画近层，深度测试处理遮挡。
@@ -201,6 +216,20 @@
         drawMesh(world, world.meshes.reliefBackdrop, {
           tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.26, mipBias: 0,
           backdrop: [cam.eye[0], cam.eye[2]]
+        });
+        gl.disable(gl.BLEND);
+        gl.enable(gl.CULL_FACE);
+      }
+
+      // 背景补洞层：断崖跳面留下的洞由它填（低频模糊照片 = 零依赖 inpainting 替身），
+      // 先于前景渲染，depth test 保证只在洞里露出来。
+      if (world.meshes.reliefBg && !skip('shell')) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.depthMask(true);
+        gl.disable(gl.CULL_FACE);
+        drawMesh(world, world.meshes.reliefBg, {
+          tex: world.tex.backdrop, mode: 4, fog: 0.30, mipBias: 1.0
         });
         gl.disable(gl.BLEND);
         gl.enable(gl.CULL_FACE);

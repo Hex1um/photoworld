@@ -415,6 +415,88 @@
     return cv;
   }
 
+  /* ---------------- 低频「世界代理」：不可见区域的补全层 ----------------
+   * 读 github.com/topics/scene-generation 与 google/three-live 后的共识：
+   * VistaDream 的 coarse 3D scaffold、HunyuanWorld 的 panorama world proxy、
+   * WorldGen 的 background inpainting、3d-photo-inpainting 的 LDI 补洞，
+   * 都在解决同一件事 —— 单张照片只覆盖视锥内，物体背后/视锥外必须有东西。
+   * 纯前端零依赖做不到 diffusion inpainting，这里用「多级降采样 + 边缘混环境色」
+   * 得到一张没有物体细节的低频色带，作为零依赖的 coarse scaffold 替身：
+   * 断崖跳面留下的洞、以及转身后视锥外的区域，看到的都是它而不是空白雾。 */
+  function makeWorldBackdropTexture(analysis) {
+    const W = 512, H = 256;
+    const cv = document.createElement('canvas');
+    cv.width = W; cv.height = H;
+    const ctx = cv.getContext('2d');
+    ctx.drawImage(analysis.canvas, 0, 0, analysis.W, analysis.H, 0, 0, W, H);
+    let tmp = cv;
+    for (const s of [64, 24, 10]) {
+      const t = document.createElement('canvas');
+      t.width = s; t.height = Math.max(4, Math.round(s * H / W));
+      const tc = t.getContext('2d');
+      tc.imageSmoothingEnabled = true;
+      tc.drawImage(tmp, 0, 0, t.width, t.height);
+      tmp = t;
+    }
+    ctx.imageSmoothingEnabled = true;
+    ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(tmp, 0, 0, W, H);
+    // 顶/底缘向天光 / 雾色靠拢，避免与程序化天穹、地面之间出现硬横切线
+    const img = ctx.getImageData(0, 0, W, H);
+    const d = img.data;
+    const fog = analysis.fog, sky = analysis.skyTop;
+    for (let y = 0; y < H; y++) {
+      const v = y / (H - 1);
+      const kTop = Math.pow(1 - clamp(v / 0.30, 0, 1), 2) * 0.55;
+      const kBot = Math.pow(clamp((v - 0.70) / 0.30, 0, 1), 2) * 0.72;
+      const k = Math.max(kTop, kBot);
+      const tgt = kBot > kTop ? fog : sky;
+      for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 4;
+        for (let c = 0; c < 3; c++) d[i + c] = lerp(d[i + c], tgt[c] * 255, k);
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    return cv;
+  }
+
+  /* 360° 连续低频远景幕：只提供「照片没覆盖到的地方」的连续背景，不参与近景视差；
+     渲染时跟随相机平移（与 GLB 资产模式 backdrop 层同一策略）。
+     R 取 780m（> 所有近景几何的 700m 上限，< 透视 far 900m），深度测试保证
+     它永远在近景之后；高度按逐列天际线起伏，不是一堵等高的墙。 */
+  function buildWorldBackdrop(analysis, opt) {
+    opt = opt || {};
+    const SEG = 180, ROWS = 5, R = opt.radius || 780;
+    const pos = [], uv = [], col = [], nrm = [], idx = [];
+    const hor = analysis.horizon;
+    for (let i = 0; i <= SEG; i++) {
+      const a = (i / SEG) * Math.PI * 2;
+      const u = panoU(a);
+      const topV = sampleTop(analysis, u);
+      const h = clamp((hor - topV) * 220 + 24, 18, 260);
+      const sa = Math.sin(a), ca = Math.cos(a);
+      for (let j = 0; j <= ROWS; j++) {
+        const t = j / ROWS;
+        pos.push(sa * R, lerp(h, -8, t), ca * R);
+        nrm.push(-sa, 0.12, -ca);
+        uv.push(u, lerp(clamp(topV * 0.72, 0, 1), clamp(hor + 0.14, 0, 1), t));
+        const shade = 0.88 + 0.12 * t;
+        col.push(shade, shade, shade, 1);
+      }
+    }
+    for (let i = 0; i < SEG; i++) {
+      for (let j = 0; j < ROWS; j++) {
+        const a0 = i * (ROWS + 1) + j, a1 = a0 + 1;
+        const b0 = (i + 1) * (ROWS + 1) + j, b1 = b0 + 1;
+        idx.push(a0, b0, a1, a1, b0, b1);
+      }
+    }
+    return {
+      pos: new Float32Array(pos), normal: new Float32Array(nrm),
+      uv: new Float32Array(uv), color: new Float32Array(col), index: idx
+    };
+  }
+
   /* ---------------- 程序化地面贴图（纯噪声，不铺照片） ---------------- */
   function makeProceduralGroundTexture(analysis, seed) {
     const rng = mulberry32(seed >>> 0);
@@ -658,11 +740,13 @@
     const gD = new Float32Array(n4);
     const gE = new Float32Array(n4);
     const gEs = new Float32Array(n4);
+    const rowBase = new Float32Array(NR + 1);
     for (let j = 0; j <= NR; j++) {
       for (let i = 0; i < W1; i++) gD[j * W1 + i] = depthAt(gU[i], clamp(gV[j], 0, 1));
       const sorted = Float32Array.from(gD.subarray(j * W1, (j + 1) * W1));
       sorted.sort();
       const base = sorted[Math.floor(W1 / 2)];
+      rowBase[j] = base;
       for (let i = 0; i < W1; i++) gE[j * W1 + i] = gD[j * W1 + i] - base;
     }
     // 5×5 低通：Depth Anything 在平坦水面/地面上有逐行细噪声，
@@ -697,6 +781,9 @@
         gLift[j * W1 + i] = clamp(ex * 0.22 * 18, 0, GROUND_LIFT_MAX) * wv * wu;
       }
     }
+    // 行方向 9 行低通。曾试过「横向 9 列 + 纵向 21 行」把挤出做成大块
+    // （MIDI-3D 按实例建模的近似），但视锥边缘出现规则的点状竖条纹，
+    // A/B 截图后回退；这里的 9 行低通是实测最稳的一组。
     for (let j = 0; j <= NR; j++) {
       for (let i = 0; i < W1; i++) {
         let s = 0, n = 0;
@@ -795,7 +882,7 @@
         uv.push(gU[i], gV[j]);
         // 侧向融雾 / 底缘融地面色：让照片边界长进环境里，而不是一张硬切卡片
         edge[k * 2] = clamp((1 - gVis[i]) * 2.0, 0, 1) * 0.98;
-        edge[k * 2 + 1] = clamp(smoothstep(0.84, 1.0, gV[j]) * 0.98, 0, 0.98);
+        edge[k * 2 + 1] = clamp(smoothstep(0.80, 1.0, gV[j]) * 1.0, 0, 1.0);
       }
     }
 
@@ -820,8 +907,8 @@
         // 让挤出的近景物体有「侧面」而不是一张和地面同色的斜坡。
         const gradD = Math.abs(gEs[iR] - gEs[iL]) + Math.abs(gEs[jU2] - gEs[jD]);
         const ao = 1 - 0.26 * clamp(gradD * 7, 0, 1);
-        const shade = clamp((0.68 + 0.50 * ndl + 0.10 * ny) * ao
-                            * (1 - 0.10 * clamp(-ny, 0, 1)), 0.42, 1.34);
+        const shade = clamp((0.64 + 0.56 * ndl + 0.10 * ny) * ao
+                            * (1 - 0.10 * clamp(-ny, 0, 1)), 0.40, 1.40);
         // 天空处渐隐，交给程序化天穹
         const skyV = gSky[i];
         // 硬边剪影：只在天际线"上方"渐隐，下方必须实心，否则会出现亮缝
@@ -840,6 +927,9 @@
      * 近景保持世界坐标。这样中景不再被「压到同一个圆柱半径」，
      * 走动时也不会出现整片照片跟着人一起滑的沙盘感。 */
     const idxBack = [];
+    const bgIdx = [];
+    let skipped = 0;
+    const useLdi = !opt.legacy && opt.ldi === true;
     for (let j = 0; j < NR; j++) {
       const v0 = gV[j], v1 = gV[j + 1];
       for (let i = 0; i < NC; i++) {
@@ -852,8 +942,20 @@
         const a1 = a0 + 1;
         const b0 = (j + 1) * W1 + i;
         const b1 = b0 + 1;
-        const far = !opt.legacy && !groundRow[j] && !groundRow[j + 1]
-          && Math.min(gT[a0], gT[a1], gT[b0], gT[b1]) > BACKDROP_T;
+        const t0 = gT[a0], t1 = gT[a1], t2 = gT[b0], t3 = gT[b1];
+        const tMin = Math.min(t0, t1, t2, t3), tMax = Math.max(t0, t1, t2, t3);
+        /* 断崖跳面（LDI / VistaDream / pipeline/geom.py 的共同判据）：
+           前景物体与背景被强行连成一张面，就是「拉伸的鳍 / 纸片感」的来源。
+           只在近中景、且确实跨越深度不连续处断开四边形，洞里由低频世界幕补齐。 */
+        if (useLdi && !groundRow[j] && tMin < 90 && tMax / Math.max(tMin, 0.6) > 1.9) {
+          const grad = Math.max(
+            Math.abs(gEs[a0] - gEs[a1]), Math.abs(gEs[b0] - gEs[b1]),
+            Math.abs(gEs[a0] - gEs[b0]), Math.abs(gEs[a1] - gEs[b1]));
+          // 洞不是丢掉，而是交给背景补洞层（只在洞里画，与前景不重叠，
+          // 否则两层半透明曲面叠在一起会产生波纹干涉条纹）。
+          if (grad > 0.05) { bgIdx.push(a0, b0, a1, a1, b0, b1); skipped++; continue; }
+        }
+        const far = !opt.legacy && !groundRow[j] && !groundRow[j + 1] && tMin > BACKDROP_T;
         const target = far ? idxBack : idx;
         target.push(a0, b0, a1, a1, b0, b1);
       }
@@ -866,6 +968,38 @@
     const backdrop = idxBack.length
       ? { pos: posF, normal: nrmF, uv: uvF, color: colF, edge, index: idxBack, tris: idxBack.length / 3 }
       : null;
+
+    /* 5) 背景补洞层（LDI 轻量版，对应 3d-photo-inpainting / VistaDream 的
+       「遮挡区域必须有内容」）：用每行的地面基线深度替代前景深度，得到一张
+       「去掉近景物体后的连续曲面」，整体推远 25% 保证 depth test 下永远在
+       前景之后。断崖跳面留下的洞由它填，贴图是低频模糊照片（零依赖的
+       RGB-D inpainting 替身），不会出现 360° 世界幕那种竖直色带与尖峰。 */
+    let bg = null;
+    if (useLdi) {
+      const bpos = new Float32Array(n4 * 3);
+      const bcol = new Float32Array(n4 * 4);
+      const bidx = bgIdx.slice();
+      for (let j = 0; j <= NR; j++) {
+        const v = gV[j];
+        const phi = (0.5 - v) * vfov;
+        const sp = Math.sin(phi), cp = Math.cos(phi);
+        const tBg = clamp(distOf(rowBase[j]) * 1.25 + 6, 2.6, 700);
+        for (let i = 0; i < W1; i++) {
+          const a = (i / NC) * Math.PI * 2;
+          const k = j * W1 + i;
+          bpos[k * 3] = Math.sin(a) * cp * tBg;
+          bpos[k * 3 + 1] = (sp < -0.002)
+            ? gLiftS[k] * 0.35 : clamp(eye + sp * tBg * vg, -3.0, 520);
+          bpos[k * 3 + 2] = Math.cos(a) * cp * tBg;
+          const shade = colF[k * 4] * 0.86;
+          bcol[k * 4] = shade; bcol[k * 4 + 1] = shade; bcol[k * 4 + 2] = shade;
+          bcol[k * 4 + 3] = colF[k * 4 + 3];
+        }
+      }
+      bg = bidx.length
+        ? { pos: bpos, normal: nrmF, uv: uvF, color: bcol, edge, index: bidx, tris: bidx.length / 3 }
+        : null;
+    }
     return {
       pos: posF,
       normal: nrmF,
@@ -874,6 +1008,8 @@
       edge,
       index: idx,
       backdrop,
+      bg,
+      skipped,
       vfov,
       calibration: cal ? { p: cal.p, zNear: cal.zNear, rNear: cal.rNear, rFar: cal.rFar } : null,
       /* 行走高度场：把挤出的近景物体当作可站立表面，避免玩家直接穿过几何。
@@ -899,6 +1035,290 @@
         return n ? clamp(sum / n * 0.8, -0.1, 1.8) : 0;
       },
       tris: idx.length / 3
+    };
+  }
+
+  /* ---------------- 直角坐标重建（v1.13，默认路径） ----------------
+   * 放弃「视锥 / 球面参数化」：把屏幕行当仰角、把深度当半径、视锥外用镜像外推，
+   * 这套做法在边界必然产生尖刺与平铺贴片（v1.11 的融色只是把症状盖住）。
+   * 改成 video-to-3D 方案同一口径（HunyuanWorld-Voyager 的 RGB-D → 世界点云、
+   * WorldGen 的 RGBD→mesh、VistaDream 的 coarse scaffold + 遮挡补全）：
+   *   1) 每个像素按相机内参反投影成世界坐标 P = eye + dir(u,v) · z(u,v)；
+   *   2) 只保留有限直角区域 x∈[-A,A]、z∈[-B,0]、y∈[-2,Y]；
+   *   3) 按屏幕邻接关系连网格，深度断崖处跳过四边形（不连成拉伸鳍）；
+   *   4) 3×3 中值压掉单像素尖刺，法线 3×3 平滑。
+   * 没有视锥掩码、没有镜像平铺、没有球面半径 —— 几何就是世界坐标本身。
+   */
+  function buildCartesianWorld(analysis, depth, opt) {
+    opt = opt || {};
+    const GW = opt.gw || 256, GH = opt.gh || 160;
+    const A = opt.areaX || 60;           // 直角区域半宽（米），大于视野在远处张开的半宽
+    const B = opt.areaZ || 90;           // 相机前方深度（米）
+    const edgeRatio = opt.edgeRatio || 2.6;   // 真实深度噪声大，1.8 会在湖面打出一片碎片洞
+    const eye = 1.7;
+    const aspect = analysis.W / Math.max(1, analysis.H);
+    const tanH = Math.tan(HFOV / 2);
+    const tanV = tanH / aspect;
+    const vfov = 2 * Math.atan(tanV);
+
+    const dw = depth.width || depth.size;
+    const dh = depth.height || depth.size;
+    const D = depth.data;
+
+    // 逐列天际线（与 buildRelief 同一份逻辑，后者的是函数内私有，不能跨用）
+    const topAt = (u) => {
+      const f = clamp(u, 0, 0.9999) * NCOL;
+      const i0 = Math.floor(f), i1 = (i0 + 1) % NCOL;
+      return lerp(analysis.top[i0], analysis.top[i1], f - i0);
+    };
+
+    /* 2/98 分位归一化（与 depth.js / pipeline 的约定一致） */
+    const hist = [];
+    for (let y = 0; y < dh; y += 3) for (let x = 0; x < dw; x += 3) hist.push(D[y * dw + x]);
+    hist.sort((a, b) => a - b);
+    const pLo = hist[Math.floor(hist.length * 0.02)] || 0;
+    const pHi = hist[Math.floor(hist.length * 0.98)] || 1;
+    const span = Math.max(1e-4, pHi - pLo);
+    const dnAt = (u, v) => {
+      const x = clamp(u, 0, 1) * (dw - 1);
+      const y = clamp(v, 0, 1) * (dh - 1);
+      const x0 = Math.floor(x), y0 = Math.floor(y);
+      const x1 = Math.min(dw - 1, x0 + 1), y1 = Math.min(dh - 1, y0 + 1);
+      const fx = x - x0, fy = y - y0;
+      const a = D[y0 * dw + x0], b = D[y0 * dw + x1];
+      const c = D[y1 * dw + x0], d = D[y1 * dw + x1];
+      const raw = (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
+      return clamp((raw - pLo) / span, 0, 1);
+    };
+
+    /* 网格深度 + 3×3 中值：Depth Anything 的单像素离群值就是「尖刺」的来源 */
+    const gD = new Float32Array(GW * GH);
+    const gM = new Float32Array(GW * GH);
+    for (let j = 0; j < GH; j++) {
+      for (let i = 0; i < GW; i++) gD[j * GW + i] = dnAt(i / (GW - 1), j / (GH - 1));
+    }
+    // 5×5 中值：3×3 对真实 ONNX 深度不够，湖面/云边会残留成片的单像素跳变，
+    // 反投影后就是「漂浮碎片」。25 元素插入排序，40960 顶点约 10ms。
+    const win = new Float32Array(25);
+    for (let j = 0; j < GH; j++) {
+      for (let i = 0; i < GW; i++) {
+        let n = 0;
+        for (let dj = -2; dj <= 2; dj++) {
+          const jj = clamp(j + dj, 0, GH - 1);
+          for (let di = -2; di <= 2; di++) {
+            const ii = clamp(i + di, 0, GW - 1);
+            win[n++] = gD[jj * GW + ii];
+          }
+        }
+        for (let a = 1; a < 25; a++) {
+          const v = win[a]; let b = a - 1;
+          while (b >= 0 && win[b] > v) { win[b + 1] = win[b]; b--; }
+          win[b + 1] = v;
+        }
+        gM[j * GW + i] = win[12];
+      }
+    }
+    /* 地平线以下（地面/水面）再做一次各向异性低通：单目深度会把水面倒影当成
+       另一层几何，反投影后就是一片「漂浮碎片」。横向 7 列 + 纵向 5 行的均值
+       保留大尺度起伏，抹掉高频碎片；地平线以上（山体/物体）保留原深度。 */
+    const gS = new Float32Array(GW * GH);
+    for (let j = 0; j < GH; j++) {
+      const v = j / (GH - 1);
+      const isGround = v > analysis.horizon + 0.005;
+      for (let i = 0; i < GW; i++) {
+        if (!isGround) { gS[j * GW + i] = gM[j * GW + i]; continue; }
+        let s = 0, n = 0;
+        for (let dj = -2; dj <= 2; dj++) {
+          const jj = clamp(j + dj, 0, GH - 1);
+          for (let di = -3; di <= 3; di++) {
+            const ii = clamp(i + di, 0, GW - 1);
+            s += gM[jj * GW + ii]; n++;
+          }
+        }
+        gS[j * GW + i] = s / n;
+      }
+    }
+    const dSample = (u, v) => {
+      const x = clamp(u, 0, 1) * (GW - 1);
+      const y = clamp(v, 0, 1) * (GH - 1);
+      const x0 = Math.floor(x), y0 = Math.floor(y);
+      const x1 = Math.min(GW - 1, x0 + 1), y1 = Math.min(GH - 1, y0 + 1);
+      const fx = x - x0, fy = y - y0;
+      const a = gS[y0 * GW + x0], b = gS[y0 * GW + x1];
+      const c = gS[y1 * GW + x0], d = gS[y1 * GW + x1];
+      return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
+    };
+
+    /* 双锚点标定沿用 v1.11 的成果：深度 → 米，不再拍脑袋 */
+    const gV = new Float32Array(GH);
+    for (let j = 0; j < GH; j++) gV[j] = j / (GH - 1);
+    const cal = calibrateScale(dSample, gV, vfov, eye);
+    const metric = cal ? cal.metric
+      : (d) => clamp(2.5 + 250 * Math.pow(1 - clamp(d, 0, 1), 1.7), 2.6, 280);
+
+    /* 1) 反投影：世界坐标点（相机朝 -Z，yaw=0，眼高 1.7m） */
+    const pos = new Float32Array(GW * GH * 3);
+    const uv = new Float32Array(GW * GH * 2);
+    const col = new Float32Array(GW * GH * 4);
+    const edge = new Float32Array(GW * GH * 2);
+    const gT = new Float32Array(GW * GH);
+    for (let j = 0; j < GH; j++) {
+      const v = j / (GH - 1);
+      for (let i = 0; i < GW; i++) {
+        const u = i / (GW - 1);
+        const k = j * GW + i;
+        const t = clamp(metric(dSample(u, v)), 0.6, B * 1.6);
+        const dx = (u - 0.5) * 2 * tanH;
+        const dy = (0.5 - v) * 2 * tanV;
+        const dz = -1;
+        const l = Math.hypot(dx, dy, dz) || 1;
+        pos[k * 3] = (dx / l) * t;
+        pos[k * 3 + 1] = eye + (dy / l) * t;
+        pos[k * 3 + 2] = (dz / l) * t;
+        uv[k * 2] = u;
+        uv[k * 2 + 1] = v;
+        gT[k] = t;
+        /* alpha：天际线以上透明（交给天穹），四周 3.5% 渐隐（边界是照片梯形
+           的投影，不是视锥卡片，所以不需要镜像/融色） */
+        const skyV = topAt(u);
+        const aSky = smoothstep(skyV - 0.012, skyV, v);
+        const aU = smoothstep(0, 0.02, u) * (1 - smoothstep(0.98, 1, u));
+        const aV = smoothstep(0, 0.02, v) * (1 - smoothstep(0.98, 1, v));
+        col[k * 4 + 3] = aSky * aU * aV;
+        col[k * 4] = 1; col[k * 4 + 1] = 1; col[k * 4 + 2] = 1;
+        // 有限区域的边界就是照片投影的梯形，alpha 硬边比"融色灰带"干净；
+        // edge 保持 0，不参与 mode 4 的环境色混合。
+        edge[k * 2] = 0;
+        edge[k * 2 + 1] = 0;
+      }
+    }
+
+    /* 2) 法线：世界坐标邻居差分叉积 + 3×3 平滑（尖刺的第二道防线） */
+    const nrm = new Float32Array(GW * GH * 3);
+    for (let j = 0; j < GH; j++) {
+      for (let i = 0; i < GW; i++) {
+        const k = j * GW + i;
+        const iL = j * GW + Math.max(0, i - 1), iR = j * GW + Math.min(GW - 1, i + 1);
+        const jD = Math.max(0, j - 1) * GW + i, jU = Math.min(GH - 1, j + 1) * GW + i;
+        const ax = pos[iR * 3] - pos[iL * 3], ay = pos[iR * 3 + 1] - pos[iL * 3 + 1], az = pos[iR * 3 + 2] - pos[iL * 3 + 2];
+        const bx = pos[jU * 3] - pos[jD * 3], by = pos[jU * 3 + 1] - pos[jD * 3 + 1], bz = pos[jU * 3 + 2] - pos[jD * 3 + 2];
+        let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+        const nl = Math.hypot(nx, ny, nz);
+        if (nl > 1e-8) { nx /= nl; ny /= nl; nz /= nl; }
+        else { nx = 0; ny = 1; nz = 0; }
+        // 地形法线统一朝上（索引顺序决定叉积朝 -Z，地面会变成背光）
+        if (ny < 0) { nx = -nx; ny = -ny; nz = -nz; }
+        nrm[k * 3] = nx; nrm[k * 3 + 1] = ny; nrm[k * 3 + 2] = nz;
+      }
+    }
+    const nrmS = new Float32Array(nrm.length);
+    for (let j = 0; j < GH; j++) {
+      for (let i = 0; i < GW; i++) {
+        let sx = 0, sy = 0, sz = 0;
+        for (let dj = -1; dj <= 1; dj++) {
+          const jj = clamp(j + dj, 0, GH - 1);
+          for (let di = -1; di <= 1; di++) {
+            const ii = clamp(i + di, 0, GW - 1);
+            const kk = jj * GW + ii;
+            sx += nrm[kk * 3]; sy += nrm[kk * 3 + 1]; sz += nrm[kk * 3 + 2];
+          }
+        }
+        const l = Math.hypot(sx, sy, sz) || 1;
+        const k = j * GW + i;
+        nrmS[k * 3] = sx / l; nrmS[k * 3 + 1] = sy / l; nrmS[k * 3 + 2] = sz / l;
+      }
+    }
+
+    /* 3) 顶点色：预烘焙太阳光照 + 深度断崖接触阴影 */
+    const sunAz = analysis.sunAz, sunEl = analysis.sunElev;
+    const sunV = [Math.sin(sunAz) * Math.cos(sunEl), Math.sin(sunEl), Math.cos(sunAz) * Math.cos(sunEl)];
+    for (let j = 0; j < GH; j++) {
+      for (let i = 0; i < GW; i++) {
+        const k = j * GW + i;
+        const iL = j * GW + Math.max(0, i - 1), iR = j * GW + Math.min(GW - 1, i + 1);
+        const jD = Math.max(0, j - 1) * GW + i, jU = Math.min(GH - 1, j + 1) * GW + i;
+        const ndl = Math.max(0, nrmS[k * 3] * sunV[0] + nrmS[k * 3 + 1] * sunV[1] + nrmS[k * 3 + 2] * sunV[2]);
+        const gx = (gT[iR] - gT[iL]) / Math.max(0.5, gT[k] * 0.1);
+        const gy = (gT[jU] - gT[jD]) / Math.max(0.5, gT[k] * 0.1);
+        const ao = 1 - 0.24 * clamp(Math.hypot(gx, gy) * 1.6, 0, 1);
+        const shade = clamp((0.64 + 0.56 * ndl + 0.08 * nrmS[k * 3 + 1]) * ao, 0.40, 1.38);
+        col[k * 4] = shade; col[k * 4 + 1] = shade; col[k * 4 + 2] = shade;
+      }
+    }
+
+    /* 4) 索引：alpha 剔除 + 有限直角区域裁剪 + 断崖跳面。
+       区域裁剪是「有限直角坐标世界」的边界：照片投影成梯形后自然收边，
+       不再需要视锥掩码或镜像平铺。 */
+    const idx = [];
+    let skipped = 0;
+    for (let j = 0; j < GH - 1; j++) {
+      for (let i = 0; i < GW - 1; i++) {
+        const a0 = j * GW + i, a1 = a0 + 1;
+        const b0 = (j + 1) * GW + i, b1 = b0 + 1;
+        const alpha = Math.max(col[a0 * 4 + 3], col[a1 * 4 + 3], col[b0 * 4 + 3], col[b1 * 4 + 3]);
+        if (alpha < 0.06) continue;
+        let inside = true;
+        for (const k of [a0, a1, b0, b1]) {
+          if (Math.abs(pos[k * 3]) > A || pos[k * 3 + 2] < -B || pos[k * 3 + 2] > 1.5) { inside = false; break; }
+        }
+        if (!inside) continue;
+        const tMax = Math.max(gT[a0], gT[a1], gT[b0], gT[b1]);
+        const tMin = Math.min(gT[a0], gT[a1], gT[b0], gT[b1]);
+        if (tMax / Math.max(tMin, 0.6) > edgeRatio) { skipped++; continue; }
+        idx.push(a0, b0, a1, a1, b0, b1);
+      }
+    }
+
+    /* 5) 行走高度场：把反投影顶点烘进 1m 的 XZ 网格（取格内最高点），
+       玩家站在真实几何上，而不是被强制 y=0 的平面。 */
+    const cell = 1.0;
+    const hw = Math.ceil((2 * A) / cell) + 1, hh = Math.ceil(B / cell) + 1;
+    const hgrid = new Float32Array(hw * hh).fill(-1e9);
+    for (let k = 0; k < GW * GH; k++) {
+      const x = pos[k * 3], y = pos[k * 3 + 1], z = pos[k * 3 + 2];
+      if (Math.abs(x) > A || z < -B || z > 0) continue;
+      const gi = clamp(Math.round((x + A) / cell), 0, hw - 1);
+      const gj = clamp(Math.round((-z) / cell), 0, hh - 1);
+      const idx2 = gj * hw + gi;
+      if (y > hgrid[idx2]) hgrid[idx2] = y;
+    }
+    // 空格用 3×3 邻域均值补两轮，避免走到网格缝里掉下去
+    for (let pass = 0; pass < 2; pass++) {
+      const src = hgrid.slice();
+      for (let gj = 0; gj < hh; gj++) {
+        for (let gi = 0; gi < hw; gi++) {
+          const k = gj * hw + gi;
+          if (src[k] > -1e8) continue;
+          let s = 0, n = 0;
+          for (let dj = -1; dj <= 1; dj++) {
+            for (let di = -1; di <= 1; di++) {
+              const jj = gj + dj, ii = gi + di;
+              if (jj < 0 || jj >= hh || ii < 0 || ii >= hw) continue;
+              const v = src[jj * hw + ii];
+              if (v > -1e8) { s += v; n++; }
+            }
+          }
+          if (n) hgrid[k] = s / n;
+        }
+      }
+    }
+    function heightField(x, z) {
+      const fx = clamp((x + A) / cell, 0, hw - 1.001);
+      const fz = clamp((-z) / cell, 0, hh - 1.001);
+      const i0 = Math.floor(fx), j0 = Math.floor(fz);
+      const tx = fx - i0, tz = fz - j0;
+      const a = hgrid[j0 * hw + i0], b = hgrid[j0 * hw + i0 + 1];
+      const c = hgrid[(j0 + 1) * hw + i0], d = hgrid[(j0 + 1) * hw + i0 + 1];
+      const v = (a * (1 - tx) + b * tx) * (1 - tz) + (c * (1 - tx) + d * tx) * tz;
+      return (v > -1e8 && Number.isFinite(v)) ? clamp(v, -0.4, 40) : 0;
+    }
+
+    return {
+      pos, normal: nrmS, uv, color: col, edge, index: idx,
+      vfov, tris: idx.length / 3, skipped,
+      calibration: cal ? { p: cal.p, zNear: cal.zNear, rNear: cal.rNear, rFar: cal.rFar } : null,
+      heightField,
+      bbox: { A, B }
     };
   }
 
@@ -973,12 +1393,23 @@
     const depthMap = opts.depth || null;
     const PWGL = global.PW.GL;
 
-    const relief = depthMap ? buildRelief(analysis, depthMap, {
-      seed,
-      legacy: !!(opts && opts.legacy),   // ?v1=1 回到旧的经验曲线 / 平地面
-      flat: !!(opts && opts.flat),       // ?flat=1 关闭近景挤出，仅做 A/B
-      vg: opts && opts.vg
-    }) : null;
+    /* v1.13：默认走直角坐标反投影重建（buildCartesianWorld）。
+       ?cart=0 或 ?v1=1 才回到旧的视锥/球面参数化路径，仅作 A/B 与复现。 */
+    const useCartesian = !!(depthMap && !(opts && opts.legacy) && !(opts && opts.cartesian === false));
+    const relief = depthMap
+      ? (useCartesian
+          ? buildCartesianWorld(analysis, depthMap, {
+              areaX: opts && opts.areaX, areaZ: opts && opts.areaZ,
+              gw: opts && opts.gw, gh: opts && opts.gh
+            })
+          : buildRelief(analysis, depthMap, {
+              seed,
+              legacy: !!(opts && opts.legacy),
+              flat: !!(opts && opts.flat),
+              ldi: !!(opts && opts.ldi),
+              vg: opts && opts.vg
+            }))
+      : null;
     // 深度模式下玩家站在「挤出后的地面」上，不再是被乘 0.12 的程序化噪声
     const heightAt = relief ? relief.heightField : makeHeightField(analysis, 1);
 
@@ -998,6 +1429,10 @@
       fixedHeight: 700, flat: true
     });
 
+    // 360° 低频世界幕：补上照片没覆盖到的方向，也兜住断崖跳面留下的洞。
+    // 默认关闭（?proxy=1 开启）：A/B 截图里它会在卡片边缘露出竖直色带与
+    // 重复天际线尖峰，比 v1.11 的融色边界更突兀，故先作为实验特性保留。
+    const worldBackdrop = (relief && opts && opts.proxy) ? buildWorldBackdrop(analysis) : null;
     const ground = relief ? buildFallbackGround(analysis, rng) : buildGround(analysis, heightAt);
     const horizonRing = (relief && opts && opts.ring) ? buildHorizonRing(analysis) : null;
     // 深度重建模式下，照片表面本身已经是有纵深的细节，不再叠加程序化植被
@@ -1010,14 +1445,20 @@
 
     const tex = {
       photo: PWGL.createTexture(gl, analysis.canvas, { wrap: 'clamp', clampV: true, aniso: 8, flipY: false }),
+      // 区域外地面用程序化色斑（A/B：改用照片底部延展会在边界外出现大面积
+      // 照片纹理重复，比纯色更糟，已回退）。
       ground: PWGL.createTexture(gl, relief ? makeProceduralGroundTexture(analysis, seed + 3) : makeGroundTexture(analysis, seed + 3), { wrap: 'mirror', aniso: 8 }),
       sky: PWGL.createTexture(gl, makeSkyTexture(analysis), { wrap: 'clamp', clampV: true, flipY: false }),
+      worldBackdrop: worldBackdrop ? PWGL.createTexture(gl, makeWorldBackdropTexture(analysis), { wrap: 'mirror', aniso: 4 }) : null,
+      backdrop: (relief && relief.bg) ? PWGL.createTexture(gl, makeWorldBackdropTexture(analysis), { wrap: 'mirror', aniso: 4 }) : null,
       grass: PWGL.createTexture(gl, makeGrassTexture(mulberry32(seed + 77)), { wrap: 'clamp', clampV: true })
     };
 
     const m = {
       relief: relief ? PWGL.createMesh(gl, relief) : null,
+      reliefBg: (relief && relief.bg) ? PWGL.createMesh(gl, relief.bg) : null,
       reliefBackdrop: (relief && relief.backdrop) ? PWGL.createMesh(gl, relief.backdrop) : null,
+      worldBackdrop: worldBackdrop ? PWGL.createMesh(gl, worldBackdrop) : null,
       farRidge: farRidge ? PWGL.createMesh(gl, farRidge) : null,
       nearRidge: nearRidge ? PWGL.createMesh(gl, nearRidge) : null,
       sky: skyCurtain ? PWGL.createMesh(gl, skyCurtain) : null,
@@ -1031,7 +1472,7 @@
     const worldInfo = {
       mode: relief ? 'depth' : 'legacy',
       eyeHeight: 1.7,
-      walkRadius: relief ? 24 : 116
+      walkRadius: relief ? (useCartesian ? 22 : 24) : 116
     };
 
     /* 光照与雾 */
