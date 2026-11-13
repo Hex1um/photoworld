@@ -596,10 +596,21 @@
     const gU = new Float32Array(W1);
     const gSky = new Float32Array(W1);
 
+    // 视锥掩码：照片只决定"初始视角能看到的东西"。
+    // 视锥外不再造几何（不镜像、不外推），交给背景渐变 + 雾，避免拉伸与尖刺。
+    const halfFov = HFOV * 0.5 * 1.06;
+    const gVis = new Float32Array(W1);
     for (let i = 0; i <= NC; i++) {
       const a = (i / NC) * Math.PI * 2;
       gU[i] = panoU(a);
       gSky[i] = topAt(gU[i]);
+      // a=π 是照片中心
+      let d = a - Math.PI;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      const ad = Math.abs(d);
+      // 边缘 12% 内渐隐，避免出现硬切边（像一张立起来的卡片）
+      gVis[i] = ad <= halfFov * 0.88 ? 1 : (ad >= halfFov ? 0 : (halfFov - ad) / (halfFov * 0.12));
     }
     for (let j = 0; j <= NR; j++) gV[j] = j / NR;
 
@@ -694,7 +705,7 @@
         const aSky = smoothstep(skyV - 0.012, skyV, v);
         // 画面下缘几行渐隐，交给程序化地面兜底（避免近处被放大成黑带）
         const aBot = 1 - smoothstep(0.985, 1.0, v);
-        const alpha = Math.min(aSky, aBot);
+        const alpha = Math.min(aSky, aBot) * gVis[i];
         col.push(shade, shade, shade, alpha);
         nrm.push(nx, ny, nz);
       }
@@ -704,6 +715,7 @@
     for (let j = 0; j < NR; j++) {
       const v0 = gV[j], v1 = gV[j + 1];
       for (let i = 0; i < NC; i++) {
+        if (gVis[i] < 0.5 || gVis[(i + 1) % W1] < 0.5) continue;   // 视锥外不建面
         const s0 = gSky[i], s1 = gSky[(i + 1) % W1];
         if (v0 < Math.min(s0, s1) - 0.05 && v1 < Math.min(s0, s1) - 0.05) continue;
         const a0 = j * W1 + i;
