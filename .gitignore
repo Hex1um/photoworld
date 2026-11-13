@@ -1,11 +1,9 @@
-train/data.npz
-train/*.npz
-*.psd
-thumbs.db
-
-_d*.html
-_w*.png
-w_*.png
-
-# CI 工作流需要 token 具备 workflow 权限才能推送；拿到权限后删掉下面这行再提交
-.github/workflows/
+# 语料与本地产物（不入库）
+corpus/
+_shots/
+_work/
+_repo/
+node_modules/
+dist/
+dist_new/
+*.log
