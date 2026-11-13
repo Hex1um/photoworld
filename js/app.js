@@ -310,17 +310,23 @@
       await sleep(40);
 
       const col = colorsFromImage(asset.img);
-      const mesh = renderer.gl ? null : null;
       const gl = renderer.gl;
-      const meshObj = {
-        aPos: buf(gl, asset.pos, 3),
-        aNormal: asset.nrm ? buf(gl, asset.nrm, 3) : null,
-        aUV: asset.uv ? buf(gl, asset.uv, 2) : null,
+      const toMesh = (l) => ({
+        aPos: buf(gl, l.pos, 3),
+        aNormal: l.nrm ? buf(gl, l.nrm, 3) : null,
+        aUV: l.uv ? buf(gl, l.uv, 2) : null,
         aColor: null,
-        index: { buf: idxBuf(gl, asset.index), count: asset.index.length },
-        count: asset.index.length,
+        index: { buf: idxBuf(gl, l.index), count: l.index.length },
+        count: l.index.length,
         mode: gl.TRIANGLES
-      };
+      });
+      let nearMesh = null, farMesh = null;
+      for (const l of asset.layers) {
+        const mo = toMesh(l);
+        if (l.name === 'backdrop') farMesh = mo;
+        else if (!nearMesh) nearMesh = mo;
+        else farMesh = mo;
+      }
       const tex = PW.GL.createTexture(gl, asset.img, { wrap: 'clamp', clampV: true, aniso: 8, flipY: false });
 
       const w = {
@@ -340,7 +346,7 @@
         sunDir: [0.3, 0.5, -0.8],
         lights: { fogDensity: 0.0016 },
         tex: { photo: tex, ground: null, sky: null, grass: null },
-        meshes: { relief: meshObj, farRidge: null, nearRidge: null, sky: null, ground: null, rocks: null, grass: null, shrub: null },
+        meshes: { relief: nearMesh, backdrop: farMesh, farRidge: null, nearRidge: null, sky: null, ground: null, rocks: null, grass: null, shrub: null },
         particles: null,
         pointsMesh: null,
         analysis: { horizon: 0.5, meanLum: col.lum }
@@ -353,7 +359,7 @@
       player.reset(0, 0, 0);
 
       el('hudName').textContent = '离线重建世界';
-      el('hudSub').textContent = asset.triangles.toLocaleString() + ' 三角 · ' + (asset.bytes / 1048576).toFixed(1) + 'MB';
+      el('hudSub').textContent = asset.triangles.toLocaleString() + ' 三角 · ' + (asset.bytes / 1048576).toFixed(1) + 'MB · ' + asset.layers.length + ' 层';
       setProgress(100, '完成');
 
       landing.classList.add('leaving');

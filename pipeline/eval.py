@@ -14,13 +14,14 @@ def splat_render(pos: np.ndarray, uv: np.ndarray, tex: np.ndarray,
                  cam, out_hw: tuple[int, int] | None = None) -> np.ndarray:
     """正交投影到原相机（z 已知，直接用相机模型反投影），返回渲染图。"""
     h, w = out_hw if out_hw else (tex.shape[0], tex.shape[1])
-    xs = (pos[:, 0] / np.maximum(pos[:, 2], 1e-6)) / cam.tan_h * 0.5 + 0.5
-    ys = 0.5 - (pos[:, 1] / np.maximum(pos[:, 2], 1e-6)) / cam.tan_v * 0.5
+    fwd = np.maximum(-pos[:, 2], 1e-6)          # glTF 约定：视线朝 -Z
+    xs = (pos[:, 0] / fwd) / cam.tan_h * 0.5 + 0.5
+    ys = 0.5 - (pos[:, 1] / fwd) / cam.tan_v * 0.5
     px = np.clip((xs * w).astype(np.int32), 0, w - 1)
     py = np.clip((ys * h).astype(np.int32), 0, h - 1)
 
-    order = np.argsort(-pos[:, 2])          # 远的先画（z 大 = 远？这里 z 是米数，越大越远）
-    px, py, z = px[order], py[order], pos[order, 2]
+    order = np.argsort(-fwd)               # 远的先画
+    px, py, z = px[order], py[order], fwd[order]
 
     th, tw = tex.shape[:2]
     tu = np.clip((uv[order, 0] * tw).astype(np.int32), 0, tw - 1)

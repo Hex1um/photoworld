@@ -64,6 +64,10 @@ def main() -> int:
     ap.add_argument("--target-fov", type=float, default=120.0, help="延拓到的水平视场角（度）")
     ap.add_argument("--max-tris", type=int, default=480_000)
     ap.add_argument("--edge-ratio", type=float, default=1.6, help="多大深度比视为断崖")
+    ap.add_argument("--split", type=float, default=70.0,
+                    help="近景/远景分层距离（米）：远景做成无视差背景层")
+    ap.add_argument("--horizon-far", type=float, default=1500.0,
+                    help="地平线先验距离（米），0=只用地面带拟合")
     ap.add_argument("--tex-max", type=int, default=2048)
     ap.add_argument("--jpeg-quality", type=int, default=88)
     args = ap.parse_args()
@@ -95,10 +99,10 @@ def main() -> int:
     print(f"      {res.backend}  metric={res.metric}  {time.time() - t0:.1f}s")
 
     print("[3/5] 尺度标定（近处地面带锚定，z = a / r）…")
-    cal = geom.calibrate_scale(res.depth, cam, eye=args.eye)
+    cal = geom.calibrate_scale(res.depth, cam, eye=args.eye, horizon_far=args.horizon_far)
     z_m = geom.metric_depth(res.depth, cal["A"], cal.get("b", 0.0), p=cal["p"])
     ground_rows = z_m[int(z_m.shape[0] * 0.95):]
-    print(f"      A={cal['A']:.2f} p={cal['p']:.2f} rms={cal['rms']} "
+    print(f"      模式={cal.get('mode', '-')} A={cal['A']:.2f} p={cal['p']:.2f} "
           f"近地中位距={float(np.median(ground_rows)):.2f}m "
           f"{'（退化：地平线假设可能不成立）' if cal.get('degenerate') else ''}")
 
@@ -127,11 +131,38 @@ def main() -> int:
     print(f"      自检：覆盖 {chk['coverage'] * 100:.1f}%  PSNR {chk['psnr']}dB  "
           f"SSIM {chk['ssim']}  {'OK' if chk['ok'] else '注意：' + chk['reason']}")
 
+    # 分层：近景（真几何，走动正确）+ 远景（无视差背景层，避免"沙盘感"）
+    pos_m, nrm_m, uv_m, idx_m = mesh["pos"], mesh["nrm"], mesh["uv"], mesh["index"]
+    fwd = -pos_m[:, 2]
+    tri = idx_m.reshape(-1, 3)
+    cz = (fwd[tri[:, 0]] + fwd[tri[:, 1]] + fwd[tri[:, 2]]) / 3.0
+    near_mask = cz < args.split
+
+    def submesh(mask):
+        t = tri[mask]
+        if t.size == 0:
+            return None
+        flat = t.reshape(-1)
+        used, inv = np.unique(flat, return_inverse=True)
+        return {"pos": pos_m[used], "nrm": nrm_m[used], "uv": uv_m[used],
+                "index": inv.astype(np.uint32)}
+
+    layers = []
+    near = submesh(near_mask)
+    far = submesh(~near_mask)
+    if near is not None:
+        near["name"] = "near"
+        layers.append(near)
+    if far is not None:
+        far["name"] = "backdrop"
+        layers.append(far)
+
     out_glb = os.path.join(args.out, "world.glb")
-    info = glb.write_glb(out_glb, mesh["pos"], mesh["nrm"], mesh["uv"], mesh["index"],
-                         tex_bytes, name="photoworld")
-    print(f"      {out_glb}  {info['bytes'] / 1e6:.1f}MB "
+    info = glb.write_glb(out_glb, layers, tex_bytes, name="photoworld")
+    print(f"      {out_glb}  {info['bytes'] / 1e6:.1f}MB  {info['layers']} 层 "
           f"({info['vertices']} 顶点 / {info['triangles']} 三角)")
+    print(f"      近景 {int(near_mask.sum())} 三角 / 远景 {int((~near_mask).sum())} 三角"
+          f"（分界 {args.split:.0f}m）")
 
     # 可走区域高度网格（前端碰撞用）：在相机前方 60m×60m 上采样表面高度
     gh, gw = 64, 64
@@ -140,8 +171,9 @@ def main() -> int:
     grid = np.full((gh, gw), np.nan, dtype=np.float32)
     span = 60.0
     gx = (pos[:, 0] + span * 0.5) / span * (gw - 1)
-    gz = (pos[:, 2]) / span * (gh - 1)
-    ok = (pos[:, 0] > -span * 0.5) & (pos[:, 0] < span * 0.5) & (pos[:, 2] > 0.2) & (pos[:, 2] < span)
+    fwd = -pos[:, 2]                            # 朝前的距离（z 为负）
+    gz = fwd / span * (gh - 1)
+    ok = (pos[:, 0] > -span * 0.5) & (pos[:, 0] < span * 0.5) & (fwd > 0.2) & (fwd < span)
     ix = np.clip(gx[ok].astype(np.int32), 0, gw - 1)
     iz = np.clip(gz[ok].astype(np.int32), 0, gh - 1)
     for a, b, y in zip(ix, iz, pos[ok, 1]):
@@ -162,6 +194,9 @@ def main() -> int:
                         for k, v in cal.items()},
         "bbox": {"min": pos.min(axis=0).tolist(), "max": pos.max(axis=0).tolist()},
         "mesh": {"vertices": info["vertices"], "triangles": info["triangles"],
+                 "layers": info.get("layers", 1),
+                 "near_triangles": int(near_mask.sum()),
+                 "split_m": args.split,
                  "skipped_quads": round(mesh["skipped"], 4)},
         "check": chk,
         "walkable": {"span": span, "grid": gh, "height": grid.round(3).tolist()},

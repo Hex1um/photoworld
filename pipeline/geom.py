@@ -99,52 +99,85 @@ def _fit_scale(depth_rel: np.ndarray, cam: Camera, eye: float = 1.7) -> dict:
             "degenerate": bool(rms > 0.22)}
 
 
-def calibrate_scale(depth_rel: np.ndarray, cam: Camera, eye: float = 1.7) -> dict:
-    """相对视差 → 米：用**整条地面带**拟合 z = A * r^(-p)。
+def calibrate_scale(depth_rel: np.ndarray, cam: Camera, eye: float = 1.7,
+                    horizon_far: float = 0.0) -> dict:
+    """相对视差 → 米，分两种模式：
 
-    约束来自真实几何：地平线以下所有像素都落在同一个水平面上，
-    它们的距离 z = eye / sinθ 是精确已知的。于是「模型的 r」和「真实的 z」
-    在很宽的范围内一一对应，拟合出的幂律才能外推到中景。
-    这不是经验曲线：参数完全由这张图的地面决定。
+    A. horizon_far > 0（默认 1500m）：**双锚点**
+       近端锚点来自地面平面（俯角最大处，z=eye/sinθ，物理精确）；
+       远端锚点来自地平线先验（地平线≈无穷远，取可配置的 horizon_far 米）。
+       两个锚点定下 z = A·r^(-p) 的两个参数，中景因此被真正拉开，
+       不会挤成"微缩沙盘"。
+
+    B. horizon_far = 0：只用地面带做最小二乘（物理最硬，但中远景会被模型压缩）。
+
+    两条路都不用任何"看心情"的常数：A 的远端是明确声明的先验，B 全是几何约束。
     """
     h, w = depth_rel.shape
     rays = cam.rays()
     ry = rays[..., 1]
-    # 地面带：地平线以下、避开最底部两行（可能入镜遮挡物）
-    rows = np.zeros((h, 1), dtype=bool)
-    rows[int(h * 0.42):int(h * 0.97)] = True
-    mask = (ry < -0.02) & rows
-    if mask.sum() < 2000:
-        mask = ry < -0.01
 
-    z_true = -eye / np.minimum(ry[mask], -0.004)
-    r = depth_rel[mask]
-    ok = np.isfinite(z_true) & np.isfinite(r) & (z_true > 1.0) & (z_true < 4000) & (r > 0.02)
-    r, z_true = r[ok], z_true[ok]
-    if r.size < 500:
-        return {"A": 4.3, "p": 1.0, "n": int(r.size), "rms": None, "degenerate": True}
+    # 近端：画面最下方的地面带
+    near = np.zeros((h, 1), dtype=bool)
+    near[int(h * 0.93):] = True
+    m_near = (ry < -0.10) & near
+    if m_near.sum() < 200:
+        m_near = ry < -0.06
+    z_near = -eye / np.minimum(ry[m_near], -0.01)
+    r_near = depth_rel[m_near]
+    ok = np.isfinite(z_near) & np.isfinite(r_near) & (r_near > 1e-3)
+    r_n = float(np.median(r_near[ok])) if ok.sum() > 50 else 0.8
+    z_n = float(np.median(z_near[ok])) if ok.sum() > 50 else eye / 0.34
 
-    lx, ly = np.log(r), np.log(z_true)
-    A2 = np.stack([-lx, np.ones_like(lx)], axis=1)   # ly = -p*lx + lnA
-    sol, *_ = np.linalg.lstsq(A2, ly, rcond=None)
-    p_, lnA = float(sol[0]), float(sol[1])
-    for _ in range(2):                                # 稳健剔除
-        pred = -p_ * lx + lnA
-        res = ly - pred
-        mad = float(np.median(np.abs(res - np.median(res)))) + 1e-6
-        keep = np.abs(res) < 3.0 * mad
-        if keep.sum() < 500:
-            break
-        sol, *_ = np.linalg.lstsq(A2[keep], ly[keep], rcond=None)
+    if horizon_far <= 0:
+        # 模式 B：整条地面带拟合
+        rows = np.zeros((h, 1), dtype=bool)
+        rows[int(h * 0.42):int(h * 0.97)] = True
+        mask = (ry < -0.02) & rows
+        if mask.sum() < 2000:
+            mask = ry < -0.01
+        zt = -eye / np.minimum(ry[mask], -0.004)
+        rr = depth_rel[mask]
+        good = np.isfinite(zt) & np.isfinite(rr) & (zt > 1.0) & (zt < 4000) & (rr > 0.02)
+        rr, zt = rr[good], zt[good]
+        if rr.size < 500:
+            return {"A": 4.3, "p": 1.0, "n": int(rr.size), "rms": None, "degenerate": True}
+        lx, ly = np.log(rr), np.log(zt)
+        M = np.stack([-lx, np.ones_like(lx)], axis=1)
+        sol, *_ = np.linalg.lstsq(M, ly, rcond=None)
         p_, lnA = float(sol[0]), float(sol[1])
+        for _ in range(2):
+            res = ly - (-p_ * lx + lnA)
+            mad = float(np.median(np.abs(res - np.median(res)))) + 1e-6
+            keep = np.abs(res) < 3.0 * mad
+            if keep.sum() < 500:
+                break
+            sol, *_ = np.linalg.lstsq(M[keep], ly[keep], rcond=None)
+            p_, lnA = float(sol[0]), float(sol[1])
+        A_ = float(math.exp(lnA)); p_ = float(np.clip(p_, 0.25, 3.0))
+        rel = np.abs(A_ * np.power(rr, -p_) - zt) / np.maximum(zt, 1e-6)
+        return {"A": A_, "p": p_, "b": 0.0, "n": int(rr.size),
+                "rms": float(np.median(rel)), "mode": "ground-fit",
+                "degenerate": bool(np.median(rel) > 0.5)}
 
-    A_ = float(math.exp(lnA))
-    p_ = float(np.clip(p_, 0.25, 3.0))
-    pred = A_ * np.power(r, -p_)
-    rel = np.abs(pred - z_true) / np.maximum(z_true, 1e-6)
-    rms = float(np.median(rel))
-    return {"A": A_, "p": p_, "b": 0.0, "n": int(r.size), "rms": rms,
-            "degenerate": bool(rms > 0.5)}
+    # 模式 A：远端锚点取地平线附近的"最远地形"视差
+    sky_rows = np.zeros((h, 1), dtype=bool)
+    sky_rows[: int(h * 0.6)] = True
+    m_far = (ry >= -0.02) & (ry < 0.06) & sky_rows       # 贴着地平线的一条带
+    r_far = depth_rel[m_far]
+    r_far = r_far[np.isfinite(r_far) & (r_far > 1e-3)]
+    r_f = float(np.percentile(r_far, 20)) if r_far.size > 50 else max(0.05, r_n * 0.3)
+
+    r_n = max(1e-3, r_n)
+    r_f = max(1e-4, min(r_f, r_n * 0.85))
+    if abs(math.log(r_n / r_f)) < 1e-3:
+        return {"A": 4.3, "p": 1.0, "n": 0, "rms": None, "degenerate": True}
+    p_ = math.log(horizon_far / max(z_n, 0.1)) / math.log(r_n / r_f)
+    p_ = float(np.clip(p_, 0.1, 4.0))
+    A_ = z_n * (r_n ** p_)
+    return {"A": A_, "p": p_, "b": 0.0, "n": int(r_n), "rms": None,
+            "mode": "two-anchor", "r_near": r_n, "z_near": z_n,
+            "r_far": r_f, "z_far": horizon_far, "degenerate": False}
 
 
 def metric_depth(depth_rel: np.ndarray, a: float, b: float = 0.0,
@@ -204,6 +237,7 @@ def build_mesh(depth_m: np.ndarray, cam: Camera, edge_ratio: float = 1.6,
     hh, ww = z.shape
 
     P = rays * z[..., None]                      # 相机系：x 右，y 上，z 前
+    P[..., 2] *= -1.0                            # 转成 glTF 相机约定：视线朝 -Z
 
     uv = np.zeros((hh, ww, 2), dtype=np.float32)
     uv[..., 0] = ((np.arange(ww) * step + 0.5) / cam.w)[None, :]

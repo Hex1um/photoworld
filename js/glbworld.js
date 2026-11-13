@@ -86,11 +86,25 @@
     }
 
     const { json, bin } = parseGLB(buf);
-    const prim = json.meshes[0].primitives[0];
-    const pos = readAccessor(json, bin, prim.attributes.POSITION);
-    const nrm = prim.attributes.NORMAL !== undefined ? readAccessor(json, bin, prim.attributes.NORMAL) : null;
-    const uv = prim.attributes.TEXCOORD_0 !== undefined ? readAccessor(json, bin, prim.attributes.TEXCOORD_0) : null;
-    const idx = readAccessor(json, bin, prim.indices);
+    const layers = [];
+    for (let mi = 0; mi < json.meshes.length; mi++) {
+      const m = json.meshes[mi];
+      if (!m.primitives || !m.primitives.length) continue;
+      const prim = m.primitives[0];
+      const pos = readAccessor(json, bin, prim.attributes.POSITION);
+      const nrm = prim.attributes.NORMAL !== undefined ? readAccessor(json, bin, prim.attributes.NORMAL) : null;
+      const uv = prim.attributes.TEXCOORD_0 !== undefined ? readAccessor(json, bin, prim.attributes.TEXCOORD_0) : null;
+      const idx = readAccessor(json, bin, prim.indices);
+      layers.push({
+        name: m.name || ('layer' + mi),
+        pos: pos.data,
+        nrm: nrm ? nrm.data : null,
+        uv: uv ? uv.data : null,
+        index: idx.data,
+        vertices: pos.count,
+        triangles: idx.count / 3
+      });
+    }
 
     let img = null;
     if (json.images && json.images.length) {
@@ -99,16 +113,9 @@
       img = await toImage(bin.slice(start, start + bv.byteLength));
     }
 
-    return {
-      pos: pos.data,
-      nrm: nrm ? nrm.data : null,
-      uv: uv ? uv.data : null,
-      index: idx.data,
-      img,
-      vertices: pos.count,
-      triangles: idx.count / 3,
-      bytes: buf.byteLength
-    };
+    let verts = 0, tris = 0;
+    for (const l of layers) { verts += l.vertices; tris += l.triangles; }
+    return { layers, img, vertices: verts, triangles: tris, bytes: buf.byteLength };
   }
 
   global.PW = global.PW || {};
