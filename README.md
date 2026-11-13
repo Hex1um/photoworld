@@ -53,6 +53,16 @@ python pipeline/reconstruct.py worlds/alpine.jpg --out out/alpine   # → world.
 
 离线管线的设计与参数见 [`pipeline/README.md`](pipeline/README.md)。
 
+### 资产模式（加载离线产物）
+
+```
+https://…/?glb=assets/world-alpine.glb      # 直接加载 glb，跳过在线重建
+```
+
+`js/glbworld.js` 自己解析 GLB（不引入 three.js）：取出 POSITION/NORMAL/TEXCOORD_0/索引与内嵌 JPEG，
+喂给现有渲染器，交互、天空、雾、曝光、FXAA 全部复用。仓库里的 `assets/world-alpine.glb`
+就是 `pipeline/` 用 `worlds/alpine.jpg` 生成的样例（195,180 三角 / 5.6MB）。
+
 ## 数据驱动调参
 
 `tools/` 下是一条完整的语料 → 评测 → 调参链路（仅本地使用，不参与发布）：

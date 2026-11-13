@@ -272,6 +272,141 @@
     if (intro && !instant) { intro.setPhoto(null); intro.autoPlay(); }
   }
 
+  /* ---------------- 资产模式（离线管线产物） ---------------- */
+  function colorsFromImage(img) {
+    const c = document.createElement('canvas');
+    c.width = 64; c.height = 64;
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.drawImage(img, 0, 0, 64, 64);
+    let top = [0, 0, 0], bot = [0, 0, 0], all = 0;
+    try {
+      const d = g.getImageData(0, 0, 64, 64).data;
+      const acc = (y0, y1) => {
+        const s = [0, 0, 0]; let n = 0;
+        for (let y = y0; y < y1; y++) for (let x = 0; x < 64; x++) {
+          const i = (y * 64 + x) * 4;
+          s[0] += d[i]; s[1] += d[i + 1]; s[2] += d[i + 2]; n++;
+        }
+        return s.map((v) => v / n / 255);
+      };
+      top = acc(0, 14); bot = acc(50, 64);
+      for (let i = 0; i < d.length; i += 4) {
+        all += (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) / 255;
+      }
+      all /= (d.length / 4);
+    } catch (e) { /* 跨域时用默认色 */ }
+    return { top, bot, lum: all || 0.45 };
+  }
+
+  async function enterAsset(url) {
+    loader.classList.remove('hidden', 'done', 'burst');
+    el('loaderImg').style.opacity = '0';
+    el('loaderTitle').textContent = '加载三维世界';
+    setProgress(4, '下载资产…');
+    try {
+      ensureRenderer();
+      const asset = await PW.loadGLB(url, (p) => setProgress(4 + p * 82, '下载资产 ' + Math.round(p * 100) + '%'));
+      setProgress(90, '上传显卡…');
+      await sleep(40);
+
+      const col = colorsFromImage(asset.img);
+      const mesh = renderer.gl ? null : null;
+      const gl = renderer.gl;
+      const meshObj = {
+        aPos: buf(gl, asset.pos, 3),
+        aNormal: asset.nrm ? buf(gl, asset.nrm, 3) : null,
+        aUV: asset.uv ? buf(gl, asset.uv, 2) : null,
+        aColor: null,
+        index: { buf: idxBuf(gl, asset.index), count: asset.index.length },
+        count: asset.index.length,
+        mode: gl.TRIANGLES
+      };
+      const tex = PW.GL.createTexture(gl, asset.img, { wrap: 'clamp', clampV: true, aniso: 8, flipY: false });
+
+      const w = {
+        name: '离线重建',
+        mode: 'asset',
+        heightAt: () => 0,
+        eyeHeight: 1.7,
+        walkRadius: 55,
+        fogColor: col.bot,
+        skyTop: col.top,
+        skyHorizon: col.bot,
+        ambient: [1, 1, 1],
+        sunColor: [0.9, 0.9, 0.9],
+        sunPower: 0.4,
+        exposure: 1.0,
+        targetLum: Math.min(0.55, Math.max(0.28, col.lum * 0.82)),
+        sunDir: [0.3, 0.5, -0.8],
+        lights: { fogDensity: 0.0016 },
+        tex: { photo: tex, ground: null, sky: null, grass: null },
+        meshes: { relief: meshObj, farRidge: null, nearRidge: null, sky: null, ground: null, rocks: null, grass: null, shrub: null },
+        particles: null,
+        pointsMesh: null,
+        analysis: { horizon: 0.5, meanLum: col.lum }
+      };
+
+      if (player) player.dispose();
+      world = w;
+      current = { name: '离线重建', sub: 'asset · world.glb' };
+      player = PW.createPlayer(canvas, world);
+      player.reset(0, 0, 0);
+
+      el('hudName').textContent = '离线重建世界';
+      el('hudSub').textContent = asset.triangles.toLocaleString() + ' 三角 · ' + (asset.bytes / 1048576).toFixed(1) + 'MB';
+      setProgress(100, '完成');
+
+      landing.classList.add('leaving');
+      setTimeout(() => { landing.style.display = 'none'; }, 820);
+      stage.classList.add('visible');
+      stage.setAttribute('aria-hidden', 'false');
+      loader.classList.add('burst');
+      await sleep(150);
+      loader.classList.add('done');
+      setTimeout(() => loader.classList.add('hidden'), 900);
+
+      // 曝光预热：让画面均值对齐贴图亮度
+      try {
+        const a0 = Math.max(0.4, canvas.clientWidth / Math.max(1, canvas.clientHeight));
+        const vf = clamp(2 * Math.atan(Math.tan(33 * Math.PI / 180) / a0), 0.55, 1.42);
+        for (let i = 0; i < 8; i++) {
+          const m = renderer.render(world, { eye: [0, 1.7, 0], yaw: 0, pitch: 0, fov: vf },
+            { time: 0, fade: 1, measure: true });
+          if (!(m > 0)) break;
+          const ratio = (world.targetLum || 0.42) / Math.max(m, 0.02);
+          if (Math.abs(ratio - 1) < 0.03) break;
+          world.exposure = clamp(world.exposure * Math.pow(ratio, 0.7), 0.08, 3.6);
+        }
+      } catch (e) { /* 预热失败不阻塞 */ }
+
+      fadeStart = performance.now();
+      fadeFrames = 0; expoCount = 0; frameIdx = 0;
+      fade = instant ? 1 : 0.02;
+      lastT = performance.now();
+      startLoop();
+      if (document.body) document.body.dataset.ready = '1';
+      if (document.body) document.body.dataset.mode = 'asset';
+    } catch (e) {
+      console.error(e);
+      el('loaderTitle').textContent = '资产加载失败';
+      setProgress(100, String(e.message || e));
+      if (document.body) document.body.dataset.err = String(e.message || e).slice(0, 200);
+    }
+  }
+
+  function buf(gl, data, size) {
+    const b = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, b);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    return { buf: b, size: size };
+  }
+  function idxBuf(gl, data) {
+    const b = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, b);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    return b;
+  }
+
   /* ---------------- 主循环 ---------------- */
   function fovRad() {
     const aspect = Math.max(0.4, canvas.clientWidth / Math.max(1, canvas.clientHeight));
@@ -282,6 +417,7 @@
 
   function updateParticles(dt) {
     const p = world.particles;
+    if (!p) return;
     const pos = p.pos;
     const n = p.count;
     const px = player.state.x, pz = player.state.z;
@@ -470,6 +606,8 @@
     const syaw = parseFloat(q.get('yaw') || '0');
     window.__spawn = { x: isNaN(sx) ? 0 : sx, z: isNaN(sz) ? 0 : sz, yaw: isNaN(syaw) ? 0 : syaw };
     if (instant) document.body.classList.add('instant');
+    const glbUrl = q.get('glb');
+    if (glbUrl) { setTimeout(() => enterAsset(glbUrl), 100); }
     const wid = q.get('w');
     if (wid) {
       const def = WORLDS.find((w) => w.id === wid);
