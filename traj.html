@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>traj</title>
+<style>html,body{margin:0;background:#000}canvas{display:block}</style>
+</head><body>
+<canvas id="cv" width="384" height="256"></canvas>
+<script src="../js/mat.js"></script>
+<script src="../js/glutil.js"></script>
+<script src="../js/glbworld.js"></script>
+<script>
+/* 轨迹渲染器：把 glb 世界沿一条相机路径逐帧渲染，导出 JPEG + 位姿
+ * 位姿用 4x4 行主序（相机到世界），与 COLMAP/Blender 习惯一致。
+ */
+const W = 384, H = 256;
+const cv = document.getElementById('cv');
+cv.width = W; cv.height = H;
+const gl = cv.getContext('webgl2', { preserveDrawingBuffer: true, antialias: true });
+
+function mat4() { return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]); }
+function mul(a, b) {
+  const o = new Float32Array(16);
+  for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
+    let s = 0;
+    for (let k = 0; k < 4; k++) s += a[k * 4 + j] * b[i * 4 + k];
+    o[i * 4 + j] = s;
+  }
+  return o;
+}
+function trs(x, y, z, yaw, pitch) {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  // R = Ry(yaw) * Rx(pitch)
+  const r = [
+    cy, 0, sy, 0,
+    sy * sp, cp, -cy * sp, 0,
+    -sy * cp, sp, cy * cp, 0,
+    x, y, z, 1
+  ];
+  return new Float32Array(r);
+}
+function perspective(fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2);
+  return new Float32Array([
+    f / aspect, 0, 0, 0,
+    0, f, 0, 0,
+    0, 0, (far + near) / (near - far), -1,
+    0, 0, 2 * far * near / (near - far), 0
+  ]);
+}
+function viewOf(camToWorld) {
+  // 求逆（刚体：R^T, -R^T t）
+  const m = camToWorld;
+  const r = [
+    m[0], m[4], m[8],
+    m[1], m[5], m[9],
+    m[2], m[6], m[10]
+  ];
+  const t = [m[12], m[13], m[14]];
+  const tx = -(r[0] * t[0] + r[1] * t[1] + r[2] * t[2]);
+  const ty = -(r[3] * t[0] + r[4] * t[1] + r[5] * t[2]);
+  const tz = -(r[6] * t[0] + r[7] * t[1] + r[8] * t[2]);
+  return new Float32Array([
+    r[0], r[3], r[6], 0,
+    r[1], r[4], r[7], 0,
+    r[2], r[5], r[8], 0,
+    tx, ty, tz, 1
+  ]);
+}
+
+let state = null;
+
+async function init(url) {
+  const asset = await window.PW.loadGLB(url);
+  const prog = window.PW.GL.createProgram(gl, window.PW.GL.VS_MAIN, window.PW.GL.FS_MAIN);
+  const mesh = {};
+  const near = asset.layers.find((l) => l.name !== 'backdrop') || asset.layers[0];
+  const far = asset.layers.find((l) => l.name === 'backdrop');
+  const mk = (l) => {
+    if (!l) return null;
+    const b = (data, size) => {
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+      return { buf, size };
+    };
+    const ib = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, l.index, gl.STATIC_DRAW);
+    return {
+      aPos: b(l.pos, 3), aNormal: b(l.nrm, 3), aUV: b(l.uv, 2), aColor: null,
+      index: { buf: ib, count: l.index.length }, count: l.index.length, mode: gl.TRIANGLES
+    };
+  };
+  mesh.near = mk(near);
+  mesh.far = mk(far);
+  const tex = window.PW.GL.createTexture(gl, asset.img, { wrap: 'clamp', clampV: true, flipY: false });
+  state = { prog, mesh, tex, asset };
+  return { layers: asset.layers.length, tris: asset.triangles };
+}
+
+function draw(camToWorld, fovy) {
+  const { prog, mesh, tex } = state;
+  gl.viewport(0, 0, W, H);
+  gl.clearColor(0.72, 0.76, 0.82, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST);
+  gl.disable(gl.CULL_FACE);
+  const view = viewOf(camToWorld);
+  const proj = perspective(fovy, W / H, 0.2, 900);
+  const vp = mul(proj, view);
+  const eye = [camToWorld[12], camToWorld[13], camToWorld[14]];
+
+  const world = {
+    sunColor: [0.92, 0.92, 0.92], ambient: [1, 1, 1], fogColor: [0.72, 0.76, 0.82],
+    lights: { fogDensity: 0.0016 }, exposure: 1.0
+  };
+
+  const drawLayer = (m, backdrop) => {
+    if (!m) return;
+    gl.useProgram(prog.prog);
+    const loc = gl.getAttribLocation(prog.prog, 'aPos');
+    gl.bindBuffer(gl.ARRAY_BUFFER, m.aPos.buf);
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
+    const ln = gl.getAttribLocation(prog.prog, 'aNormal');
+    gl.bindBuffer(gl.ARRAY_BUFFER, m.aNormal.buf);
+    gl.enableVertexAttribArray(ln);
+    gl.vertexAttribPointer(ln, 3, gl.FLOAT, false, 0, 0);
+    const lu = gl.getAttribLocation(prog.prog, 'aUV');
+    gl.bindBuffer(gl.ARRAY_BUFFER, m.aUV.buf);
+    gl.enableVertexAttribArray(lu);
+    gl.vertexAttribPointer(lu, 2, gl.FLOAT, false, 0, 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    window.PW.GL.setUniforms(gl, prog, {
+      uVP: vp, uEye: eye, uTime: 0,
+      uSunDir: [0.3, 0.5, -0.8], uSunColor: world.sunColor, uSkyAmb: world.ambient,
+      uFogColor: world.fogColor, uFogAmount: backdrop ? 0.3 : 0.26, uFogDensity: 0.0016,
+      uExposure: 1.0, uTex: 0, uMode: 4, uMipBias: 0,
+      uGroundTint: [0.5, 0.5, 0.5], uAlphaTest: 0,
+      uBackdrop: backdrop ? [eye[0], eye[2]] : [0, 0]
+    });
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, m.index.buf);
+    gl.drawElements(m.mode, m.count, gl.UNSIGNED_INT, 0);
+  };
+  drawLayer(mesh.far, true);
+  drawLayer(mesh.near, false);
+}
+
+function shoot(camToWorld, fovy) {
+  draw(camToWorld, fovy);
+  return cv.toDataURL('image/jpeg', 0.9).split(',')[1];
+}
+
+/* 一次调用跑完整条路径，返回 base64 数组（避免逐帧往返） */
+function runPath(poses, fovy) {
+  const out = [];
+  for (const p of poses) {
+    out.push(shoot(trs(p[0], p[1], p[2], p[3], p[4]), fovy));
+  }
+  return out;
+}
+window.__traj = { init, shoot, runPath, trs, W, H };
+document.body.dataset.ready = '0';
+</script>
+</body></html>
