@@ -24,7 +24,10 @@
     let raf = 0, t0 = 0, looping = false;
     const reduced = global.matchMedia && global.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-    function fs() { return Math.round(H * 0.52); }
+    function fs() {
+      // 双约束：高度上限 + 宽度上限（10 个字母，粗体宽度约 1.05em）
+      return Math.max(10, Math.round(Math.min(H * 0.52, W / 10.5)));
+    }
 
     function metrics(g) {
       const size = fs();
@@ -82,6 +85,16 @@
       ctx.clearRect(0, 0, W, H);
       if (!faceCv) return;
 
+      // 兜底缩放：无论字号怎么算，都保证字标完整落在画布内（窄屏尤其重要）
+      const m = metrics(ctx);
+      const fit = Math.min(1, (W * 0.9) / Math.max(1, m.width));
+      ctx.save();
+      if (fit < 1) {
+        ctx.translate(W / 2, H / 2);
+        ctx.scale(fit, fit);
+        ctx.translate(-W / 2, -H / 2);
+      }
+
       const size = fs();
       const depth = size * 0.62 * thickness;
       const steps = Math.max(1, Math.round(depth / Math.max(1, 1.6 * dpr)));
@@ -112,6 +125,7 @@
       }
       ctx.globalAlpha = 1 - dissolve;
       ctx.drawImage(faceCv, 0, 0);
+      ctx.restore();
       ctx.restore();
     }
 

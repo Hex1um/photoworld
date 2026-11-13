@@ -624,10 +624,12 @@
         }
         t = clamp(t, 2.4, 420);
         const k = j * W1 + i;
+        // 垂直位移钳制：远处 y 不得超过合理山高，避免深度噪点拉出尖刺
+        const yMax = 180 + 60 * (1 - Math.abs(sp));
+        gy[k] = clamp(sp * t + eye, -3.0, yMax);
         gT[k] = t;
         gx[k] = Math.sin(a) * cp * t;
         gz[k] = Math.cos(a) * cp * t;
-        gy[k] = sp * t + eye;
       }
     }
 
@@ -814,7 +816,7 @@
     const worldInfo = {
       mode: relief ? 'depth' : 'legacy',
       eyeHeight: 1.7,
-      walkRadius: relief ? 1.2 : 116
+      walkRadius: relief ? 12 : 116
     };
 
     /* 光照与雾 */

@@ -89,6 +89,11 @@ def load_traj(tdir: str) -> dict | None:
 
 
 def jpeg_bytes(path: str, size: tuple[int, int], quality: int) -> bytes:
+    # 已是目标尺寸就直接复用原字节（省掉 3 万次重编码）
+    if quality >= 92:
+        with Image.open(path) as probe:
+            if probe.size == size and probe.format == "JPEG":
+                return open(path, "rb").read()
     im = Image.open(path).convert("RGB")
     if im.size != size:
         im = im.resize(size, Image.LANCZOS)
