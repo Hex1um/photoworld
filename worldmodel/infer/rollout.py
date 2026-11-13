@@ -1,47 +1,50 @@
 """自回归 rollout：初始图 + 动作序列 → 视频帧。
 
-单步采样（Euler）：
-    x_{t+dt} = x_t + dt * v(x_t, t)
+单步采样（Euler 中点）：
+    t_s = (s + 0.5) * dt
+    x_{t+dt} = x_t + dt * v(x_t, t_s)
     t 从 0（纯噪声）走到 1（数据）；CFG：
-    v = v_cond + w * (v_cond - v_uncond)，uncond = drop 动作条件
+    v = v_cond + w * (v_cond - v_uncond)
+
+无条件分支必须走 `uncond=True`（与训练侧联合 dropout 同一路径），
+不能再只把 action 置零：act_embed 有 bias，且训练还同时丢了 init/domain。
 """
 from __future__ import annotations
 
-import math
-
+import numpy as np
 import torch
 
+from worldmodel.action_codec import dsl_action, parse_spec
 from worldmodel.model.dit import DiTConfig
 from worldmodel.train.trainer import make_model
 from worldmodel.model.tokenizer import Tokenizer
 
-DSL = {
-    "forward": (0.0, -1.0, 0.0),      # (dyaw, dforward, dpitch)
-    "back": (0.0, 1.0, 0.0),
-    "turn_left": (1.0, 0.0, 0.0),
-    "turn_right": (-1.0, 0.0, 0.0),
-    "look_up": (0.0, 0.0, 1.0),
-    "look_down": (0.0, 0.0, -1.0),
-    "idle": (0.0, 0.0, 0.0),
-}
+# 可解析的动作名，与 action_codec.DSL_NAMES 保持一致
+DSL_ACTIONS = ("forward", "back", "turn_left", "turn_right",
+               "look_up", "look_down", "idle")
 
 
-def parse_actions(spec: list) -> list[torch.Tensor]:
-    """['forward 20', 'turn_left 30'] → 每帧一个 7 维动作张量。"""
+def parse_actions(spec, *, speed=None, move_step=None,
+                  yaw_step=None, pitch_step=None, fov=None) -> list[torch.Tensor]:
+    """['forward 20', 'turn_left 15'] → 每帧一个 **7 维**动作张量。
+
+    动作由 `worldmodel.action_codec.dsl_action` 生成，与训练标签共用同一个
+    `rel_action`：轴角 3 + 相机系平移 3（按速度归一化）+ logFOV 1。
+    旧实现只填 a[1]/a[3]/a[5] 三个 DSL 标量，维度与符号都是错的。
+
+    可选参数用于对齐具体数据集的动作幅度；默认取合成轨迹的典型幅度。
+    """
+    kw = {}
+    for key, val in (("speed", speed), ("move_step", move_step),
+                     ("yaw_step", yaw_step), ("pitch_step", pitch_step),
+                     ("fov", fov)):
+        if val is not None:
+            kw[key] = float(val)
     out = []
-    for item in spec:
-        if isinstance(item, (list, tuple)):
-            name, n = item[0], int(item[1])
-        else:
-            parts = str(item).split()
-            name, n = parts[0], int(parts[1]) if len(parts) > 1 else 1
-        yaw, fwd, pitch = DSL.get(name, (0.0, 0.0, 0.0))
+    for name, n in parse_spec(spec):
+        a = torch.from_numpy(np.asarray(dsl_action(name, **kw), dtype=np.float32))
         for _ in range(n):
-            a = torch.zeros(7)
-            a[1] = yaw * 0.05
-            a[3] = fwd * 0.12
-            a[5] = pitch * 0.03
-            out.append(a)
+            out.append(a.clone())
     return out
 
 
@@ -78,14 +81,14 @@ def rollout(image: torch.Tensor, actions: list[torch.Tensor], ckpt_path: str,
         z = torch.randn_like(z_init)
         dt = 1.0 / steps
         for s in range(steps):
-            t = torch.full((1,), s * dt, device=device)
-            zt = z
+            # 中点代替左端点：最后一步 t 从 0.875 抬到 0.9375，更贴近积分区间末端
+            t = torch.full((1,), (s + 0.5) * dt, device=device)
+            hb = torch.stack(hist, dim=1)
+            dom = torch.zeros(1, dtype=torch.long, device=device)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=(device == "cuda")):
-                v_cond = model(z_init, torch.stack(hist, dim=1), zt, t, ab,
-                               torch.zeros(1, dtype=torch.long, device=device))
+                v_cond = model(z_init, hb, z, t, ab, dom)
                 if cfg_scale > 1.0:
-                    v_null = model(z_init, torch.stack(hist, dim=1), zt, t, ab * 0,
-                                   torch.zeros(1, dtype=torch.long, device=device))
+                    v_null = model(z_init, hb, z, t, ab, dom, uncond=True)
                     v = v_cond + cfg_scale * (v_cond - v_null)
                 else:
                     v = v_cond

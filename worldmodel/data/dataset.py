@@ -11,6 +11,9 @@
     {key}.target.jpg   目标帧
     {key}.json         {"action": [7], ...}
 图片解码成 (3, H, W) float32，范围 [-1, 1]（Tokenizer.encode 的约定）。
+也支持 `scripts/preencode_latents.py` 产出的 `{key}.latent` 分片：直接读
+(2+n_hist, 4, H/8, W/8) float32，训练侧跳过 VAE encode；两种格式按样本自动识别，
+旧分片行为不变。
 
 设计取舍：
   * torch 只在 `collate()` 里延迟导入 —— 数据集本身可脱离 torch 单测，
@@ -52,12 +55,17 @@ def _stack(batch: list[dict], key: str) -> np.ndarray:
 
 
 def collate(batch: list[dict]) -> dict:
-    """DataLoader collate_fn：list[dict] → batched tensor dict。"""
+    """DataLoader collate_fn：list[dict] → batched tensor dict。
+
+    图片分片给 (init, hist, target)，预编码分片给 (z_init, z_hist, z_target)；
+    trainer 按 "z_init" in batch 判断走哪条路径，两者可混合在同一 DataLoader 之外分别使用。
+    """
     import torch  # 延迟导入：数据集与切分不依赖 torch
-    return {
-        key: torch.from_numpy(_stack(batch, key)).float()
-        for key in ("init", "hist", "target", "action")
-    }
+    keys = (("z_init", "z_hist", "z_target") if "z_init" in batch[0]
+            else ("init", "hist", "target"))
+    out = {key: torch.from_numpy(_stack(batch, key)).float() for key in keys}
+    out["action"] = torch.from_numpy(_stack(batch, "action")).float()
+    return out
 
 
 class _Subset:
@@ -139,6 +147,8 @@ class TarWindows:
                     name = member.name
                     if name.endswith(".json"):
                         key, role = name[:-5], "meta"
+                    elif name.endswith(".latent"):
+                        key, role = name[:-len(".latent")], "latent"
                     elif name.lower().endswith((".jpg", ".jpeg", ".png")):
                         key, _, role = name.rsplit(".", 1)[0].rpartition(".")
                         if not key:
@@ -147,8 +157,11 @@ class TarWindows:
                         continue
                     groups.setdefault(key, {})[role] = name
             for key, files in sorted(groups.items()):
-                if wanted.issubset(files):
-                    self.samples.append((si, key, files))
+                # 预编码分片只有 {key}.latent + {key}.json，不再需要 6 张 JPEG
+                pre = "latent" in files
+                need = ({"latent", "meta"} if pre else wanted)
+                if need.issubset(files):
+                    self.samples.append((si, key, files, pre))
         if not self.samples:
             raise RuntimeError(
                 "%s 里的分片没有完整样本（需要 init/target/json + h0..h%d）。"
@@ -181,13 +194,7 @@ class TarWindows:
     def __getitem__(self, idx: int) -> dict:
         if self.cache_enabled and idx in self._cache:
             return self._cache[idx]
-        si, _key, files = self.samples[int(idx)]
-        init = _decode_image(self._read(si, files["init"]), self.width, self.height)
-        target = _decode_image(self._read(si, files["target"]), self.width, self.height)
-        hist = np.stack([
-            _decode_image(self._read(si, files["h%d" % k]), self.width, self.height)
-            for k in range(self.n_hist)
-        ], axis=0)
+        si, _key, files, pre = self.samples[int(idx)]
         meta = json.loads(self._read(si, files["meta"]).decode("utf-8"))
         action = np.asarray(meta.get("action", []), dtype=np.float32).reshape(-1)
         if action.size != ACT_DIM:
@@ -197,7 +204,29 @@ class TarWindows:
             )
         if self.action_scale is not None:
             action = action * self.action_scale
-        out = {"init": init, "hist": hist, "target": target, "action": action}
+
+        if pre:
+            # 预编码 latent：一次 frombuffer 替代 6 张 JPEG 解码 + 6 次 VAE encode。
+            # 布局固定为 (init, h0..hN-1, target) 共 2+n_hist 帧，每帧 (4, H/8, W/8)。
+            raw = self._read(si, files["latent"])
+            lat = np.frombuffer(raw, dtype="<f4").copy()
+            default = (2 + self.n_hist, 4, self.height // 8, self.width // 8)
+            shape = tuple(int(v) for v in meta.get("latent_shape", default))
+            if lat.size != int(np.prod(shape)):
+                raise ValueError(
+                    "样本 %s 的 latent 有 %d 个 float，但 latent_shape=%s 需要 %d 个"
+                    % (_key, lat.size, shape, int(np.prod(shape))))
+            lat = lat.reshape(shape)
+            out = {"z_init": lat[0], "z_hist": lat[1:1 + self.n_hist],
+                   "z_target": lat[1 + self.n_hist], "action": action}
+        else:
+            init = _decode_image(self._read(si, files["init"]), self.width, self.height)
+            target = _decode_image(self._read(si, files["target"]), self.width, self.height)
+            hist = np.stack([
+                _decode_image(self._read(si, files["h%d" % k]), self.width, self.height)
+                for k in range(self.n_hist)
+            ], axis=0)
+            out = {"init": init, "hist": hist, "target": target, "action": action}
         if self.cache_enabled:
             self._cache[idx] = out
         return out

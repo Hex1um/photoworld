@@ -150,4 +150,7 @@ if __name__ == "__main__":
     test_dataset()
     test_eval_gates()
     test_metric_depth()
-    print("\n全部回归通过")
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import test_regression_p2  # noqa: E402
+    test_regression_p2.main()
+    print("\n全部回归通过（P0/P1 + P2）")

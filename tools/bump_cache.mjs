@@ -3,7 +3,7 @@
  * 静态资源缓存击穿：index.html 里所有 `?v=x.y.z` 必须同版本，否则浏览器
  * 会混用新旧 JS/CSS（改了代码但拿不到新代码，是这类无构建站点最常见的事故）。
  *
- *   node tools/bump_cache.mjs 1.8.0     # 升版并写回
+ *   node tools/bump_cache.mjs 1.9.0     # 升版并写回
  *   node tools/bump_cache.mjs --check  # 只校验一致性，供 CI 使用
  */
 import fs from 'node:fs';

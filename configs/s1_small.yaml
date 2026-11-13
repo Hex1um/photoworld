@@ -13,8 +13,7 @@ seed: 0
 train:
   batch_size: 2
   clip: 1.0
-  drop_action: 0.1
-  drop_init: 0.1
+  drop_cond: 0.1
   ema: 0.999
   grad_accum: 8
   hist_noise_prob: 0.5

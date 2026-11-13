@@ -62,13 +62,19 @@ def ssim_gray(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def phase_shift(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
-    """相位相关估计 b 相对 a 的整体位移（像素）。返回 (dx, dy)。"""
+    """相位相关估计 b 相对 a 的整体位移（像素）。返回 (dx, dy)。
+
+    互功率谱必须是 `F(b) * conj(F(a))`，峰值才落在 **b 相对 a** 的位移上。
+    旧代码写反成 `F(a) * conj(F(b))`，返回值恰好是 a 相对 b 的位移（差一个负号）：
+    内容右移 6 像素会报 dx=-6。修好动作语义后这会让 `turn_left` 期望的
+    "场景右移"被系统性误判为失败。
+    """
     ga = a.astype(np.float32).mean(axis=2)
     gb = b.astype(np.float32).mean(axis=2)
     ga = ga - ga.mean()
     gb = gb - gb.mean()
     win = np.outer(np.hanning(ga.shape[0]), np.hanning(ga.shape[1]))
-    F = np.fft.fft2(ga * win) * np.conj(np.fft.fft2(gb * win))
+    F = np.fft.fft2(gb * win) * np.conj(np.fft.fft2(ga * win))
     F = F / (np.abs(F) + 1e-8)
     r = np.fft.ifft2(F).real
     iy, ix = np.unravel_index(np.argmax(r), r.shape)

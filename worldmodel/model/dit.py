@@ -44,32 +44,15 @@ class DiTConfig:
 
 # ---------------- RoPE（三轴） ----------------
 def rope_cache(dim: int, n_t: int, gh: int, gw: int, device, dtype, extra: int = 0):
-    """把通道维均分给 (t, y, x) 三个轴。"""
-    per = dim // 3
-    per -= per % 2
-    def freqs(n, axis_dim):
-        half = axis_dim // 2
-        inv = 1.0 / (10000 ** (torch.arange(half, device=device, dtype=torch.float32) / half))
-        pos = torch.arange(n, device=device, dtype=torch.float32)
-        ang = torch.outer(pos, inv)                      # (n, half)
-        return torch.cat([ang, ang], dim=-1)             # (n, axis_dim)
-    ft = freqs(n_t, per)
-    fy = freqs(gh, per)
-    fx = freqs(gw, per)
-    # 每个 token 的 cos/sin
-    cos = torch.cat([ft[:, None, None, :].expand(n_t, gh, gw, per),
-                     fy[None, :, None, :].expand(n_t, gh, gw, per),
-                     fx[None, None, :, :].expand(n_t, gh, gw, per)], dim=-1)
-    cos = cos.reshape(n_t * gh * gw, -1)
-    if extra:
-        # 动作 token 是单个 token，插在目标帧（最后 gh*gw 个）之前，沿用该帧的位置
-        n = gh * gw
-        cos = torch.cat([cos[:-n], cos[-1:].expand(extra, cos.shape[-1]), cos[-n:]], dim=0)
-    # 通道数不整除时，剩余通道不做旋转（cos=1, sin=0）
-    pad = dim - cos.shape[-1]
-    if pad > 0:
-        cos = torch.cat([cos, torch.zeros(cos.shape[0], pad, device=device)], dim=-1)
-    return cos.cos().to(dtype), cos.sin().to(dtype)
+    """角度表由纯 numpy 的 rope_angles 生成：前后半频率严格配对。
+
+    旧实现把三轴各 20 维拼接成 60 维再补 4 个零，与 apply_rope 的
+    half-split 旋转不配对，破坏了旋转等变性。详见 worldmodel/model/rope.py。
+    """
+    from worldmodel.model.rope import rope_angles
+    ang = torch.as_tensor(rope_angles(dim, n_t, gh, gw, extra),
+                          dtype=torch.float32, device=device)
+    return ang.cos().to(dtype), ang.sin().to(dtype)
 
 
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -115,6 +98,13 @@ class Block(nn.Module):
             nn.Linear(int(cfg.dim * cfg.mlp_ratio), cfg.dim),
         )
         self.mod = nn.Linear(cfg.dim, cfg.dim * 6)   # adaLN: shift/scale/gate ×2
+        # 标准 DiT 初始化：残差分支的 gate 从 0 起步，block 初始为恒等映射。
+        # chunk(6) 的顺序是 (s1, sc1, g1, s2, sc2, g2)，g1/g2 是第 3、6 段。
+        # 与"输出头零初始化"相反，这样第一步梯度就能贯通所有层。
+        with torch.no_grad():
+            for lo in (2 * cfg.dim, 5 * cfg.dim):
+                self.mod.weight[lo:lo + cfg.dim].zero_()
+                self.mod.bias[lo:lo + cfg.dim].zero_()
 
     def forward(self, x, c, cos, sin, mask):
         m = self.mod(F.silu(c))[:, None, :]
@@ -138,11 +128,14 @@ class CausalWorldDiT(nn.Module):
                                        nn.Linear(cfg.dim, cfg.dim))
         # CFG 的"无条件"必须是独立学习的嵌入，不能拿 idle(动作=0) 冒充
         self.null_act = nn.Parameter(torch.zeros(cfg.dim))
+        self.null_dom = nn.Parameter(torch.zeros(cfg.dim))
         self.dom_embed = nn.Embedding(cfg.n_domains, cfg.dim)
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.depth)])
         self.norm = nn.LayerNorm(cfg.dim, elementwise_affine=False)
         self.head = nn.Linear(cfg.dim, cfg.in_ch * cfg.patch * cfg.patch)
-        nn.init.zeros_(self.head.weight)
+        # 不再零初始化输出头：W_head=0 会让 dL/dx = W_head^T·grad = 0，
+        # 训练最初若干步所有 block 的梯度恒为零，只有 head 在拟合常数速度场。
+        nn.init.normal_(self.head.weight, std=0.02)
         nn.init.zeros_(self.head.bias)
 
     # ---- 组装 token 序列 ----
@@ -150,42 +143,43 @@ class CausalWorldDiT(nn.Module):
         """(B, C, H, W) → (B, gh*gw, dim)"""
         return self.patch(x_frame).flatten(2).transpose(1, 2)
 
-    def forward(self, init_lat, hist_lat, x_t, t, action, domain=None, drop_act=None, drop_init=None):
+    def forward(self, init_lat, hist_lat, x_t, t, action, domain=None, uncond=False):
         """
         init_lat : (B, C, H, W) 初始帧潜变量
         hist_lat : (B, N, C, H, W) 历史帧（旧→新）
         x_t      : (B, C, H, W) 目标帧在当前 t 的噪声样本
         t        : (B,) 0..1
         action   : (B, act_dim)
+        uncond   : bool 或 (B,) bool。True 时**同时**丢弃动作、初始帧与域标签，
+                   与训练侧的联合 dropout 走完全相同的路径。推理的 CFG 无条件
+                   分支必须传 True，不能再只把 action 置零（act_embed 有 bias，
+                   且训练还丢了 init/domain，两条路径根本不等价）。
         """
         B, C, H, W = x_t.shape
         cfg = self.cfg
         n_frames = 2 + cfg.n_hist            # init + hist + target
-        # 序列 = init + hist×N + [动作 token] + target
-        L = n_frames * cfg.per_frame + 1
         dev = x_t.device
+        u = self._uncond_mask(uncond, B, dev).view(B, 1)   # 0=有条件, 1=无条件
 
         toks = []
-        init_tok = self._tokens(init_lat)
-        if drop_init is not None:
-            keep = (~drop_init).float().view(B, 1, 1)
-            init_tok = init_tok * keep
+        init_tok = self._tokens(init_lat) * (1.0 - u).view(B, 1, 1)
         toks.append(init_tok)
         for i in range(cfg.n_hist):
             toks.append(self._tokens(hist_lat[:, i]))
-        # 动作 token（spec 设计）：插在目标帧前，注意力层可直接"读"到动作
+        # 动作 token：插在目标帧前，注意力层可直接"读"到动作
         a = self.act_embed(action)                                    # (B, D)
-        if drop_act is not None:
-            keep = (~drop_act).float().view(B, 1)
-            a = a * keep + self.null_act.view(1, -1) * (1 - keep)
+        a = (1.0 - u) * a + u * self.null_act.view(1, -1)
         toks.append(a.unsqueeze(1))
         toks.append(self._tokens(x_t))
-        seq = torch.cat(toks, dim=1)                                  # (B, L, D)
+        seq = torch.cat(toks, dim=1)
 
         # 条件向量只留时间步 + 域；动作走 token
         c = self.t_embed(self._sinusoid(t, cfg.dim, dev))
         if domain is not None:
-            c = c + self.dom_embed(domain.clamp(0, cfg.n_domains - 1))
+            dom = self.dom_embed(domain.clamp(0, cfg.n_domains - 1))
+        else:
+            dom = torch.zeros_like(c)
+        c = c + (1.0 - u) * dom + u * self.null_dom.view(1, -1)
 
         cos, sin = rope_cache(cfg.dim // cfg.heads, n_frames, cfg.gh, cfg.gw, dev, seq.dtype,
                               extra=1)
@@ -199,6 +193,13 @@ class CausalWorldDiT(nn.Module):
         out = out.view(B, cfg.gh, cfg.gw, cfg.patch, cfg.patch, C)
         out = out.permute(0, 5, 1, 3, 2, 4).reshape(B, C, H, W)
         return out
+
+    @staticmethod
+    def _uncond_mask(uncond, B: int, device) -> torch.Tensor:
+        """bool / (B,) bool → (B,) float 0/1，供条件与无条件分支共用一条前向路径。"""
+        if isinstance(uncond, bool):
+            return torch.full((B,), 1.0 if uncond else 0.0, device=device)
+        return torch.as_tensor(uncond, dtype=torch.float32, device=device).reshape(-1)
 
     @staticmethod
     def _sinusoid(t: torch.Tensor, dim: int, device) -> torch.Tensor:

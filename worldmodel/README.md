@@ -40,9 +40,17 @@ a_t = [axis-angle(3), Δt(3, 相机系, 除以轨迹中位速度), log(FOV 比�
 
 `Δt` 归一化后不同尺度的场景可比。窗口 `(frame_{t-4..t}, a_t, frame_{t+1})`，N=4。
 
+**训练与推理共用 `worldmodel/action_codec.py`**。`scripts/prepare_data.py` 和
+`worldmodel/infer/rollout.py` 都调用它的 `rel_action` / `dsl_action`，后者把 DSL
+名称转成与训练标签同构的 7 维（构造与 `render_traj.mjs::makePoses` 相同的相邻位姿）。
+1.9.0 之前推理侧只手填 `a[1]/a[3]/a[5]` 三个标量：`forward` 被编码成"绕 y 轴转 + x 平移"，
+`turn_left` 的轴角符号还是反的，模型学到的动作语义在推理时被整体换掉。
+`python tools/test_regression_p2.py` 会复现合成轨迹标签并比对，最大偏差需 < 0.02。
+
 分片由 `worldmodel/data/dataset.py::TarWindows` 读取（补齐了此前缺失、导致训练入口
 `ModuleNotFoundError` 的包）：图片解码成 (3,H,W) float32 ∈ [-1,1]，按固定 seed 切 train/val，
-`collate` 堆叠成 batched tensor。可用 `python tools/test_regression.py` 无 torch 验证读取与形状。
+`collate` 堆叠成 batched tensor。也可用 `.latent` 预编码分片直读（见第四节）。
+可用 `python tools/test_regression.py` 无 torch 验证读取与形状。
 
 ### 真实数据（可选，未接入）
 
@@ -67,13 +75,14 @@ HF_ENDPOINT=https://hf-mirror.com python -c "from worldmodel.model.tokenizer imp
 | 项 | 取值 |
 |---|---|
 | 潜变量 | 2×2 patchify → 每帧 16×24=384 token |
-| 序列 | 1(初始) + 4(历史) + 1(目标) = 6 帧 = 2304 token |
+| 序列 | 1(初始) + 4(历史) + 1(目标) = 6 帧 = 2304 token，另有 1 个动作 token（共 2305） |
 | Transformer | hidden 768 / 12 层 / 12 头，**SDPA** |
-| 位置编码 | RoPE 三轴 (t, y, x) |
+| 位置编码 | RoPE 三轴 (t, y, x)，`worldmodel/model/rope.py` 保证 half-split 前后半频率配对 |
 | 注意力 | 时间维因果、帧内双向（bool 掩码） |
-| 条件 | adaLN 注入 时间步 + 动作 + 域标签；初始帧与历史帧作为前缀 token |
-| 目标 | rectified flow，v-prediction，单步 `x ← x + dt·v(x,t)` 从 t=0 积分到 1 |
-| CFG | 训练 drop 动作 10%、drop 初始帧 10% |
+| 条件 | adaLN 注入 时间步 + 域标签；动作为独立 token；初始帧与历史帧作为前缀 |
+| 初始化 | block 的 adaLN gate 零初始化（残差恒等），输出头常规小随机初始化 |
+| 目标 | rectified flow，v-prediction，Euler 8 步 `x ← x + dt·v(x,t)` 从 t=0 积分到 1 |
+| CFG | 训练/推理共用 `uncond=True`：一次联合 drop 动作 + 初始帧 + 域标签（`drop_cond: 0.1`） |
 
 ## 四、训练
 
@@ -90,6 +99,26 @@ data 0.11s  vae 0.09s  fwd 0.26s  bwd 0.26s   ≈ 0.8 s/step
 **8G 显存下的取舍**：batch 2（前向峰值 4.56GB），有效 batch 靠 `grad_accum` 堆。
 4090 24G 可以 batch 8~12，吞吐约 3~4 倍，5 万窗口 3000 步约 3 小时。
 
+### 可选：离线预编码 latent
+
+默认每个 micro-batch 在线编码 `init + 4×hist + target = 6` 张图；按
+`s1_base.yaml`（batch 2 / grad_accum 16）是 **每 optimizer step 192 次 VAE encode**，
+2000 步约 38.4 万次。可在有 CUDA 的训练机上先跑一次：
+
+```bash
+python scripts/preencode_latents.py --shards data/wm --out data/wm_latent
+# 把配置里的 data.shard_dir 改成 data/wm_latent
+```
+
+产物每个样本只有 `{key}.latent`（float32，`(6,4,32,48)`）+ `{key}.json`，约 147KB，
+比 6 张 JPEG 更小。`TarWindows` 检测到 `.latent` 自动走 `numpy.frombuffer` 直读，
+trainer 检测到 batch 的 `z_init` 就跳过 VAE，这个瓶颈归零；原分片不受影响，
+验证循环也走同一条读取路径。该脚本需要 torch + diffusers，**本机无 torch 未实跑**，
+通路本身由 `tools/test_regression_p2.py` 用合成 latent 分片验证。
+
+验证 loss 现在临时换上 EMA 权重再评估（评估完恢复训练权重），与默认加载 EMA 的
+rollout 同源；日志里的 `val loss ... (EMA)` 即此路径。
+
 ## 五、Rollout
 
 ```bash
@@ -98,7 +127,10 @@ python scripts/rollout.py --image data/syn/traj_0000/frames/000000.jpg \
 ```
 
 动作 DSL：`forward / back / turn_left / turn_right / look_up / look_down / idle` + 帧数。
-Euler 8 步 + CFG 4.0。产出逐帧 JPEG + `rollout.gif`。
+每个 DSL 名称经 `action_codec.dsl_action` 展开成与训练标签同构的 7 维动作；
+幅度和速度归一化可用 `parse_actions(..., speed=, move_step=, yaw_step=, pitch_step=)` 覆盖，
+以匹配具体数据集。Euler 8 步（**中点** `t=(s+0.5)dt`）+ CFG 4.0，
+无条件分支走 `uncond=True`。产出逐帧 JPEG + `rollout.gif`。
 
 ## 六、评测
 
@@ -122,6 +154,10 @@ python scripts/eval.py --ckpt runs/s1_3000/last.pt --out eval --n 8 --dir-steps 
 | 注意力吃掉 12.5GB | 手写 matmul+softmax | 换 `scaled_dot_product_attention`，B=2 降到 4.56GB |
 | 数据加载每样本重开 tar | `extractfile(名字)` 是线性扫描 | TarInfo 索引，O(1) |
 | 训练前 100 步极慢 | HF 镜像 429 限流，每次联网校验 VAE 白等 100s+ | `local_files_only=True` |
+| 动作完全不可控 | 训练标签 7 维 6DoF，推理 DSL 只填 `a[1]/a[3]/a[5]` 三个标量，维度与符号都错 | 共用 `action_codec.dsl_action` |
+| 位置编码等变性被破坏 | 三轴频率拼成 60 维再补零，与 half-split 旋转的前后半不配对（单测误差 0.984） | 频率表拆到 d/2 通道后复制，误差降到 8.9e-16 |
+| 开训最初若干步 block 不学 | 输出头零初始化使 `dL/dx = W_headᵀ·grad = 0` | gate 零初始化 + head 常规初始化 |
+| CFG 引导方向不对 | 训练 drop 动作/初始帧/域，推理只把 action 置零（`act_embed` 还有 bias） | 统一 `uncond` 路径 |
 
 ## 八、已知局限
 

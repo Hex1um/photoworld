@@ -57,6 +57,17 @@ def make_model(cfg: dict, device: str) -> CausalWorldDiT:
     return CausalWorldDiT(mcfg).to(device)
 
 
+@torch.no_grad()
+def _augment_hist(z_hist: torch.Tensor, B: int, device: str,
+                  p: float, sigma: float) -> torch.Tensor:
+    """历史帧噪声增强（对抗自回归漂移）。z_hist 只是输入，不参与梯度。"""
+    if p <= 0:
+        return z_hist
+    sig = torch.rand(B, 1, 1, 1, 1, device=device) * sigma
+    mask = (torch.rand(B, 1, 1, 1, 1, device=device) < p).float()
+    return z_hist + mask * sig * torch.randn_like(z_hist)
+
+
 def enable_fast_math() -> None:
     """TF32 + cuDNN benchmark：不开的话 fp32 conv 在 sm_120 上会走极慢的回退路径
     （实测 VAE 编码 6 帧从 10.4s 降到 0.3s，200 倍差距）。"""
@@ -84,7 +95,15 @@ def train(cfg: dict) -> None:
                     collate_fn=collate, drop_last=True)
     dl_va = DataLoader(va, batch_size=bs, shuffle=False, num_workers=0, collate_fn=collate)
 
-    tok = Tokenizer(cfg["data"]["vae"], device=device)
+    # VAE 惰性加载：全量使用 .latent 预编码分片时，训练机完全不需要 VAE 权重
+    tok = None
+
+    def get_tok():
+        nonlocal tok
+        if tok is None:
+            tok = Tokenizer(cfg["data"]["vae"], device=device)
+        return tok
+
     model = make_model(cfg, device)
     print("参数量 %.1fM  训练样本 %d  验证 %d" % (count_params(model) / 1e6, len(tr), len(va)))
 
@@ -98,8 +117,10 @@ def train(cfg: dict) -> None:
     ema = EMA(model, cfg["train"].get("ema", 0.999))
     scaler_dtype = torch.bfloat16
 
-    p_act = cfg["train"].get("drop_action", 0.1)
-    p_init = cfg["train"].get("drop_init", 0.1)
+    # 联合条件 dropout：训练与 CFG 的无条件分支共用同一条前向路径。
+    # 旧的 drop_action / drop_init 是两次独立 10% dropout，而推理只把 action
+    # 置零，三条路径互不等价（act_embed 有 bias，且 init/domain 没被丢）。
+    p_uncond = cfg["train"].get("drop_cond", cfg["train"].get("drop_action", 0.1))
     p_hist_noise = cfg["train"].get("hist_noise_prob", 0.5)
     hist_sigma = cfg["train"].get("hist_noise_sigma", 0.3)
     accum = cfg["train"].get("grad_accum", 1)
@@ -134,22 +155,23 @@ def train(cfg: dict) -> None:
                 batch = next(it)
 
             _t1 = time.time()
-            init = batch["init"].to(device, non_blocking=True)
-            hist = batch["hist"].to(device, non_blocking=True)
-            target = batch["target"].to(device, non_blocking=True)
             act = batch["action"].to(device, non_blocking=True)
-            B = init.shape[0]
-
-            with torch.no_grad():
-                z_init = tok.encode(init)
-                z_hist = tok.encode(hist.reshape(-1, *hist.shape[2:])).reshape(
-                    B, hist.shape[1], -1, *z_init.shape[2:])
-                z1 = tok.encode(target)
-                # 历史帧噪声增强（对抗自回归漂移）
-                if p_hist_noise > 0:
-                    sig = torch.rand(B, 1, 1, 1, 1, device=device) * hist_sigma
-                    mask = (torch.rand(B, 1, 1, 1, 1, device=device) < p_hist_noise).float()
-                    z_hist = z_hist + mask * sig * torch.randn_like(z_hist)
+            if "z_init" in batch:
+                # 预编码分片：VAE 编码在离线阶段完成，训练时不再每步重复编码
+                z_init = batch["z_init"].to(device, non_blocking=True)
+                z_hist = batch["z_hist"].to(device, non_blocking=True)
+                z1 = batch["z_target"].to(device, non_blocking=True)
+            else:
+                init = batch["init"].to(device, non_blocking=True)
+                hist = batch["hist"].to(device, non_blocking=True)
+                target = batch["target"].to(device, non_blocking=True)
+                with torch.no_grad():
+                    z_init = get_tok().encode(init)
+                    z_hist = get_tok().encode(hist.reshape(-1, *hist.shape[2:])).reshape(
+                        init.shape[0], hist.shape[1], -1, *z_init.shape[2:])
+                    z1 = get_tok().encode(target)
+            B = z1.shape[0]
+            z_hist = _augment_hist(z_hist, B, device, p_hist_noise, hist_sigma)
 
             _t2 = time.time()
             z0 = torch.randn_like(z1)
@@ -157,12 +179,11 @@ def train(cfg: dict) -> None:
             zt = (1 - t.view(B, 1, 1, 1)) * z0 + t.view(B, 1, 1, 1) * z1
             v_target = z1 - z0
 
-            drop_act = torch.rand(B, device=device) < p_act
-            drop_init = torch.rand(B, device=device) < p_init
+            uncond = torch.rand(B, device=device) < p_uncond
             domain = torch.zeros(B, dtype=torch.long, device=device)
 
             with torch.autocast("cuda", dtype=scaler_dtype, enabled=(device == "cuda")):
-                v = model(z_init, z_hist, zt, t, act, domain, drop_act=drop_act, drop_init=drop_init)
+                v = model(z_init, z_hist, zt, t, act, domain, uncond=uncond)
                 loss = F.mse_loss(v.float(), v_target.float()) / accum
             _t3 = time.time()
             loss.backward()
@@ -184,22 +205,37 @@ def train(cfg: dict) -> None:
 
         if step % cfg["train"]["val_every"] == 0 or step == total:
             model.eval()
-            with torch.no_grad():
-                vl = []
-                for vb in dl_va:
-                    vi = vb["init"].to(device); vh = vb["hist"].to(device)
-                    vt = vb["target"].to(device); va_ = vb["action"].to(device)
-                    zi = tok.encode(vi)
-                    zh = tok.encode(vh.reshape(-1, *vh.shape[2:])).reshape(
-                        vi.shape[0], vh.shape[1], -1, *zi.shape[2:])
-                    z1 = tok.encode(vt)
-                    z0 = torch.randn_like(z1)
-                    tt = torch.rand(vi.shape[0], device=device)
-                    zt = (1 - tt.view(-1, 1, 1, 1)) * z0 + tt.view(-1, 1, 1, 1) * z1
-                    with torch.autocast("cuda", dtype=scaler_dtype, enabled=(device == "cuda")):
-                        vv = model(zi, zh, zt, tt, va_, torch.zeros(vi.shape[0], dtype=torch.long, device=device))
-                    vl.append(F.mse_loss(vv.float(), (z1 - z0).float()).item())
-                print("  val loss %.4f" % (sum(vl) / max(1, len(vl))), flush=True)
+            # val loss 必须与 rollout 同源：临时换上 EMA 权重，评估完恢复训练权重。
+            # 旧代码用非 EMA 模型算 val，而 rollout 默认加载 EMA，指标不同源。
+            train_sd = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            try:
+                ema.copy_to(model)
+                with torch.no_grad():
+                    vl = []
+                    for vb in dl_va:
+                        va_ = vb["action"].to(device)
+                        if "z_init" in vb:
+                            zi = vb["z_init"].to(device)
+                            zh = vb["z_hist"].to(device)
+                            z1 = vb["z_target"].to(device)
+                        else:
+                            vi = vb["init"].to(device); vh = vb["hist"].to(device)
+                            vt = vb["target"].to(device)
+                            zi = get_tok().encode(vi)
+                            zh = get_tok().encode(vh.reshape(-1, *vh.shape[2:])).reshape(
+                                vi.shape[0], vh.shape[1], -1, *zi.shape[2:])
+                            z1 = get_tok().encode(vt)
+                        Bv = z1.shape[0]
+                        z0 = torch.randn_like(z1)
+                        tt = torch.rand(Bv, device=device)
+                        zt = (1 - tt.view(-1, 1, 1, 1)) * z0 + tt.view(-1, 1, 1, 1) * z1
+                        with torch.autocast("cuda", dtype=scaler_dtype, enabled=(device == "cuda")):
+                            vv = model(zi, zh, zt, tt, va_,
+                                       torch.zeros(Bv, dtype=torch.long, device=device))
+                        vl.append(F.mse_loss(vv.float(), (z1 - z0).float()).item())
+                    print("  val loss %.4f (EMA)" % (sum(vl) / max(1, len(vl))), flush=True)
+            finally:
+                model.load_state_dict(train_sd)
             ck = {"model": model.state_dict(), "ema": ema.shadow, "cfg": cfg, "step": step}
             torch.save(ck, os.path.join(out_dir, "last.pt"))
             torch.save(ck, os.path.join(out_dir, "step-%06d.pt" % step))

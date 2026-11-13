@@ -23,56 +23,22 @@ import io
 import json
 import math
 import os
+import sys
 import tarfile
 import time
 
 import numpy as np
 from PIL import Image
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from worldmodel.action_codec import (  # noqa: E402
+    mat4_from_rowmajor, rel_action, rot_to_axis_angle,
+)
+
 N_HIST = 4
 
-
-def mat4_from_rowmajor(v) -> np.ndarray:
-    """poses.json 里的 camToWorld 是**列主序**（平移放在最后 4 个元素，与 WebGL 一致）。
-
-    必须先 reshape 再转置，否则 T[:3,3] 取到的是齐次列 [0,0,0]，
-    平移恒为零 —— 这个 bug 会让模型完全收不到"前进/后退"信号。
-    """
-    return np.array(v, dtype=np.float64).reshape(4, 4).T
-
-
-def rot_to_axis_angle(R: np.ndarray) -> np.ndarray:
-    """旋转矩阵 → 轴角（Rodrigues），数值稳健版。"""
-    tr = float(np.clip((np.trace(R) - 1.0) * 0.5, -1.0, 1.0))
-    ang = math.acos(tr)
-    if ang < 1e-6:
-        return np.zeros(3, dtype=np.float32)
-    if abs(math.pi - ang) < 1e-4:
-        # 180°：取对角线上最大的列
-        A = (R + np.eye(3)) * 0.5
-        axis = np.sqrt(np.maximum(np.diag(A), 0.0))
-        k = int(np.argmax(axis))
-        if axis[k] < 1e-8:
-            return np.zeros(3, dtype=np.float32)
-        axis = A[:, k] / axis[k]
-        return (axis / np.linalg.norm(axis) * ang).astype(np.float32)
-    axis = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]], dtype=np.float64)
-    n = np.linalg.norm(axis)
-    if n < 1e-9:
-        return np.zeros(3, dtype=np.float32)
-    return (axis / n * ang).astype(np.float32)
-
-
-def rel_action(T0: np.ndarray, T1: np.ndarray, fov0: float, fov1: float, speed: float) -> np.ndarray:
-    """相邻帧的相对动作：相机系下的旋转 + 平移 + log FOV 变化。"""
-    R0, R1 = T0[:3, :3], T1[:3, :3]
-    t0, t1 = T0[:3, 3], T1[:3, 3]
-    Rrel = R0.T @ R1
-    trel = R0.T @ (t1 - t0)
-    aa = rot_to_axis_angle(Rrel)
-    scale = max(speed, 1e-6)
-    return np.concatenate([aa, (trel / scale).astype(np.float32),
-                           np.array([math.log(max(fov1, 1e-3) / max(fov0, 1e-3))], dtype=np.float32)])
+# 三个函数改由 worldmodel/action_codec.py 提供：推理侧的 DSL 也调用同一个
+# rel_action，避免训练标签与 rollout 动作再次漂移（见 action_codec 模块注释）。
 
 
 def load_traj(tdir: str) -> dict | None:

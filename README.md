@@ -89,11 +89,13 @@ node tools/smoke.mjs --base … --shots /tmp/smoke --only alpine
 判据是硬的：`body[data-ready] === '1'` 且 `window.__errs` 为空、无 `data-err`，任何一例失败退出码 1。
 一行改名（例如 `opts`→`opt`）就能让主路径 100% 进不去世界，这个脚本 20 秒能抓到。
 
-不开浏览器也能跑算法回归（地面平面 / 断崖补洞 / 深度预处理 / 验收门 / 训练数据层 / 缓存串）：
+不开浏览器也能跑算法回归（地面平面 / 断崖补洞 / 深度预处理 / 验收门 / 训练数据层 /
+动作编码 / RoPE 等变性 / 预编码 latent / 缓存串）：
 
 ```bash
 node tools/test_regression.mjs
-python tools/test_regression.py
+python tools/test_regression.py            # 末尾会自动跑 P2 回归
+python tools/test_regression_p2.py         # 也可单独跑世界模型部分
 node tools/bump_cache.mjs --check
 ```
 
@@ -133,7 +135,7 @@ models/            Depth-Anything-V2-Small 量化 ONNX（27MB）
 vendor/ort/        onnxruntime-web（WASM 单线程）
 worlds/            内置场景图
 tools/             语料采集 / 归一化 / 批量评测 / CDP 截图 / 算法回归 / 缓存升版
-worldmodel/        Causal World DiT（data/ 是 tar 分片读取层，train/ 依赖它）
+worldmodel/        Causal World DiT（action_codec 统一训练/推理动作，data/ 读 tar 与 .latent）
 CHANGELOG.md       面向使用者的更新日志
 ```
 
