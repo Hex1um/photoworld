@@ -691,7 +691,7 @@
         // 硬边剪影：只在天际线"上方"渐隐，下方必须实心，否则会出现亮缝
         const aSky = smoothstep(skyV - 0.012, skyV, v);
         // 画面下缘几行渐隐，交给程序化地面兜底（避免近处被放大成黑带）
-        const aBot = 1.0;
+        const aBot = 1 - smoothstep(0.985, 1.0, v);
         const alpha = Math.min(aSky, aBot);
         col.push(shade, shade, shade, alpha);
         nrm.push(nx, ny, nz);
@@ -814,7 +814,7 @@
     const worldInfo = {
       mode: relief ? 'depth' : 'legacy',
       eyeHeight: 1.7,
-      walkRadius: relief ? 1.6 : 116
+      walkRadius: relief ? 1.2 : 116
     };
 
     /* 光照与雾 */
