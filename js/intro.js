@@ -1,31 +1,43 @@
-/* 开屏字标：PHOTOWORLD 从"扁平"立成"立体"，自动循环演示
+/* 开屏：一张照片 → 一个有纵深的世界（产品隐喻）
  *
- * 字母内部填充当前照片；厚度是一叠沿视线方向错开的切片，配合偏航角摆动，
- * 看起来就是一块有厚度的实体被转过来。这正是产品的隐喻：
- * 一张平面的照片 → 一个有纵深的世界。
+ * 两层画布：
+ *   1) #introBg   —— 全屏底噪：照片被"解析"成竖向切片，按深度上下错动 + 一条扫描线扫过，
+ *                    看起来像机器正在测量这张照片的纵深（弱化、模糊、压暗，只做氛围）
+ *   2) #introCanvas —— 字标：字母内部填充当前照片，厚度是一叠沿视线错开的切片，
+ *                    自动循环演示"扁平的方块立成有厚度的实体"
+ *
+ * 两者都用同一张照片（画廊悬停会换图），所以用户在开屏就能看出"照片决定世界"。
  */
 (function (global) {
   'use strict';
 
   const WORD = 'PHOTOWORLD';
   const SIDE_DARK = '#0a0e11';
+  const BG_COLS = 16;          // 底噪切片列数
+  const BG_DEPTH = 0.55;       // 底噪错动幅度（相对画布高度）
 
   function fontStack() {
     return '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif';
   }
 
-  function createIntro(canvas) {
+  function createIntro(canvas, bgCanvas) {
     const ctx = canvas.getContext('2d');
+    const bg = bgCanvas ? bgCanvas.getContext('2d') : null;
     let photo = null;
     let faceCv = null;
     let sideCv = null;
+    let srcCv = null;                 // 底噪用的压暗模糊源
+    let sharpCv = null;               // 锐利源：切片与等高线在上面画，才看得出"结构"
+    let colDepth = null;              // 每列的相对深度 0..1（1=近）
     let W = 2, H = 2, dpr = 1;
+    let BW = 2, BH = 2;
     let dissolve = 0;
     let raf = 0, t0 = 0, looping = false;
+    let bgRaf = 0, bgT0 = 0;
     const reduced = global.matchMedia && global.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+    /* ---------------- 字标 ---------------- */
     function fs() {
-      // 双约束：高度上限 + 宽度上限（10 个字母，粗体宽度约 1.05em）
       return Math.max(10, Math.round(Math.min(H * 0.52, W / 10.5)));
     }
 
@@ -85,7 +97,6 @@
       ctx.clearRect(0, 0, W, H);
       if (!faceCv) return;
 
-      // 兜底缩放：无论字号怎么算，都保证字标完整落在画布内（窄屏尤其重要）
       const m = metrics(ctx);
       const fit = Math.min(1, (W * 0.9) / Math.max(1, m.width));
       ctx.save();
@@ -129,6 +140,130 @@
       ctx.restore();
     }
 
+    /* ---------------- 全屏底噪：照片切片 + 扫描线 ---------------- */
+    function buildBg() {
+      if (!bg || !photo) { srcCv = null; colDepth = null; return; }
+      const sw = 480;
+      const sh = Math.max(2, Math.round(sw * (BH / Math.max(1, BW))));
+      srcCv = document.createElement('canvas');
+      srcCv.width = sw; srcCv.height = sh;
+      const sc = srcCv.getContext('2d');
+      sharpCv = document.createElement('canvas');
+      sharpCv.width = sw; sharpCv.height = sh;
+      const hc = sharpCv.getContext('2d');
+      try {
+        const s = Math.max(sw / photo.width, sh / photo.height);
+        const dw = photo.width * s, dh = photo.height * s;
+        if ('filter' in sc) sc.filter = 'blur(8px) brightness(0.56) saturate(0.9)';
+        sc.drawImage(photo, (sw - dw) / 2, (sh - dh) / 2, dw, dh);
+        if ('filter' in sc) sc.filter = 'none';
+        if ('filter' in hc) hc.filter = 'brightness(0.62) saturate(0.95)';
+        hc.drawImage(photo, (sw - dw) / 2, (sh - dh) / 2, dw, dh);
+        if ('filter' in hc) hc.filter = 'none';
+      } catch (e) { srcCv = null; sharpCv = null; return; }
+
+      // 每列深度：越暗 + 越靠上 → 越远（风景照的通用先验，够用且便宜）
+      const probe = document.createElement('canvas');
+      probe.width = BG_COLS; probe.height = 24;
+      const pc = probe.getContext('2d', { willReadFrequently: true });
+      let data = null;
+      try {
+        pc.drawImage(sharpCv, 0, 0, BG_COLS, 24);
+        data = pc.getImageData(0, 0, BG_COLS, 24).data;
+      } catch (e) { data = null; }
+      colDepth = new Float32Array(BG_COLS);
+      for (let i = 0; i < BG_COLS; i++) {
+        if (!data) { colDepth[i] = 0.5; continue; }
+        let lum = 0, n = 0;
+        for (let y = 0; y < 24; y++) {
+          const o = (y * BG_COLS + i) * 4;
+          lum += (0.2126 * data[o] + 0.7152 * data[o + 1] + 0.0722 * data[o + 2]) / 255;
+          n++;
+        }
+        lum /= Math.max(1, n);
+        colDepth[i] = Math.min(1, Math.max(0, 0.85 * (1 - lum)));
+      }
+    }
+
+    let scanGrad = null, lastScanH = 0;
+
+    function drawBg(t) {
+      if (!bg) return;
+      bg.clearRect(0, 0, BW, BH);
+      if (!srcCv || !colDepth) return;
+
+      const ph = reduced ? 0.4 : Math.sin(t * 0.55) * 0.5 + 0.5;
+      const amp = BH * 0.03 * (0.35 + 0.65 * ph);
+
+      // 底图：轻微过扫，避免错动后露边
+      bg.save();
+      bg.globalAlpha = 1.0;
+      const ox = -BW * 0.02, oy = -BH * 0.02;
+      bg.drawImage(srcCv, ox, oy, BW * 1.04, BH * 1.04);
+      bg.restore();
+
+      // 切片错动：越近的列上下位移越大 → 读起来像"照片被解析出厚度"
+      const colW = BW / BG_COLS;
+      const m = BH * 0.02;
+      const srcW = sharpCv.width / BG_COLS;
+      for (let i = 0; i < BG_COLS; i++) {
+        const d = colDepth[i];
+        const dy = Math.sin(t * 0.9 + i * 0.24) * amp * d;
+        bg.globalAlpha = 0.26;
+        bg.drawImage(sharpCv, i * srcW, 0, srcW, sharpCv.height,
+          i * colW - 0.6, dy - m, colW + 1.2, BH + m * 2);
+      }
+      bg.globalAlpha = 1;
+
+      // 等高线：把深度场"画出来"，一眼看出这是被测量过的照片
+      bg.strokeStyle = 'rgba(224,207,169,0.11)';
+      bg.lineWidth = Math.max(1, BH / 900);
+      for (let k = 0; k < 9; k++) {
+        const base = BH * (0.16 + 0.72 * (k / 8));
+        bg.beginPath();
+        for (let i = 0; i <= BG_COLS; i++) {
+          const ci = Math.min(BG_COLS - 1, i);
+          const yy = base + Math.sin(t * 0.6 + ci * 0.7) * amp * 1.6 * colDepth[ci];
+          if (i === 0) bg.moveTo(0, yy);
+          else bg.lineTo((i / BG_COLS) * BW, yy);
+        }
+        bg.stroke();
+      }
+
+      // 扫描线：一条暖色细线 + 前方渐亮的拖尾，像机器正逐行测量
+      const sy = ((t * 0.11) % 1.2 - 0.1) * BH;
+      if (!scanGrad || lastScanH !== BH) {
+        scanGrad = bg.createLinearGradient(0, -BH * 0.16, 0, 0);
+        scanGrad.addColorStop(0, 'rgba(224,207,169,0)');
+        scanGrad.addColorStop(0.86, 'rgba(224,207,169,0.07)');
+        scanGrad.addColorStop(1, 'rgba(240,226,192,0.20)');
+        lastScanH = BH;
+      }
+      bg.save();
+      bg.translate(0, sy);
+      bg.fillStyle = scanGrad;
+      bg.fillRect(0, -BH * 0.16, BW, BH * 0.16);
+      bg.fillStyle = 'rgba(240,226,192,0.26)';
+      bg.fillRect(0, -1, BW, 1.6);
+      bg.restore();
+
+      // 暗角：把注意力推回中央字标
+      const vg = bg.createRadialGradient(BW * 0.5, BH * 0.46, Math.min(BW, BH) * 0.12,
+        BW * 0.5, BH * 0.46, Math.max(BW, BH) * 0.78);
+      vg.addColorStop(0, 'rgba(8,9,11,0)');
+      vg.addColorStop(0.62, 'rgba(8,9,11,0.34)');
+      vg.addColorStop(1, 'rgba(8,9,11,0.84)');
+      bg.fillStyle = vg;
+      bg.fillRect(0, 0, BW, BH);
+    }
+
+    function bgLoop(now) {
+      if (!looping) return;
+      drawBg((now - bgT0) / 1000);
+      bgRaf = requestAnimationFrame(bgLoop);
+    }
+
+    /* ---------------- 字标循环 ---------------- */
     function loop(now) {
       if (!looping) return;
       const p = (((now - t0) / 1000) % 7.0) / 7.0;
@@ -159,14 +294,21 @@
       if (looping) return;
       looping = true;
       t0 = performance.now();
-      if (reduced) { drawFrame(0.85, 0.34); return; }
+      bgT0 = performance.now();
+      if (reduced) {
+        drawFrame(0.85, 0.34);
+        drawBg(0.4);
+        return;
+      }
       raf = requestAnimationFrame(loop);
+      bgRaf = requestAnimationFrame(bgLoop);
     }
 
     function stopLoop() {
       looping = false;
       if (raf) cancelAnimationFrame(raf);
-      raf = 0;
+      if (bgRaf) cancelAnimationFrame(bgRaf);
+      raf = 0; bgRaf = 0;
     }
 
     function play(onMid) {
@@ -195,6 +337,20 @@
       });
     }
 
+    /* ---------------- 尺寸 ---------------- */
+    function measureBg() {
+      if (!bgCanvas) return;
+      const w = Math.max(2, Math.round(bgCanvas.clientWidth * dpr));
+      const h = Math.max(2, Math.round(bgCanvas.clientHeight * dpr));
+      if (bgCanvas.width !== w || bgCanvas.height !== h) {
+        bgCanvas.width = w; bgCanvas.height = h;
+      }
+      BW = w; BH = h;
+      scanGrad = null;
+      buildBg();
+      if (!looping) drawBg(0.4);
+    }
+
     function measure() {
       const rect = canvas.getBoundingClientRect();
       dpr = Math.min(global.devicePixelRatio || 1, 2);
@@ -205,6 +361,7 @@
       }
       W = w; H = h;
       build();
+      measureBg();
       if (!looping) drawFrame(0, 0);
     }
 
@@ -212,7 +369,8 @@
       if (!img || !img.width || photo === img) return;
       photo = img;
       build();
-      if (!looping) drawFrame(0, 0);
+      buildBg();
+      if (!looping) { drawFrame(0, 0); drawBg(0.4); }
     }
 
     measure();

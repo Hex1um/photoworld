@@ -42,7 +42,7 @@
   function initIntro() {
     const cv = el('introCanvas');
     if (!cv || !window.PW.createIntro) return;
-    intro = window.PW.createIntro(cv);
+    intro = window.PW.createIntro(cv, el('introBg'));
     setIntroPhoto(WORLDS[0].thumb);
     if (!instant) intro.autoPlay();
   }
@@ -631,6 +631,16 @@
   function wireUI() {
     el('btnAbout').addEventListener('click', () => el('modal').classList.remove('hidden'));
     el('btnCloseModal').addEventListener('click', () => el('modal').classList.add('hidden'));
+
+    // 开屏 CTA：随便走走 = 随机进一个内置世界；用我的照片 = 同一个上传入口
+    const btnStart = el('btnStart');
+    if (btnStart) btnStart.addEventListener('click', () => {
+      const pick = WORLDS[Math.floor(Math.random() * WORLDS.length)];
+      const card = document.querySelector('.card[data-id="' + pick.id + '"]');
+      startWorld(pick, card);
+    });
+    const btnUp = el('btnUploadTop');
+    if (btnUp) btnUp.addEventListener('click', () => el('fileInput').click());
 
     canvas.addEventListener('click', () => {
       if (player && !document.pointerLockElement) player.requestLock();
