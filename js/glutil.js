@@ -10,18 +10,22 @@ in vec2 aUV;
 in vec4 aColor;
 uniform mat4 uVP;
 uniform vec3 uEye;
+uniform vec2 uBackdrop;   // 远景跟随相机的水平位移（近景不跟随，保证走动真实）
 out vec3 vN;
 out vec2 vUV;
 out vec4 vC;
 out float vDist;
 out vec3 vWorld;
 void main() {
-  gl_Position = uVP * vec4(aPos, 1.0);
-  vWorld = aPos;
+  vec3 wp = aPos;
+  // 18m 内严格世界坐标（走动真实）；42m 外整体跟随相机（远景视差可忽略，避免穿帮）
+  wp.xz += uBackdrop * smoothstep(18.0, 42.0, length(aPos.xz));
+  gl_Position = uVP * vec4(wp, 1.0);
+  vWorld = wp;
   vN = aNormal;
   vUV = aUV;
   vC = aColor;
-  vDist = length(aPos - uEye);
+  vDist = length(wp - uEye);
 }`;
 
   const FS_MAIN = `#version 300 es

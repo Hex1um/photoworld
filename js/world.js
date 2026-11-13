@@ -622,8 +622,30 @@
       }
     }
 
+    /* 1.8) 接缝带：强制按远景处理，避免近景与对侧远景在缝合处对撞成扇形条纹 */
+    {
+      const band = Math.max(2, Math.round(NC * 0.035));
+      for (let j = 0; j <= NR; j++) {
+        for (let i = 0; i <= NC; i++) {
+          const dSeam = Math.min(i, NC - i);
+          if (dSeam >= band) continue;
+          const k = j * W1 + i;
+          const need = 30 + (1 - dSeam / band) * 40;
+          if (gT[k] < need) {
+            const t = need;
+            gT[k] = t;
+            const a = (i / NC) * Math.PI * 2;
+            const phi = (0.5 - gV[j]) * vfov;
+            gx[k] = Math.sin(a) * Math.cos(phi) * t;
+            gz[k] = Math.cos(a) * Math.cos(phi) * t;
+            gy[k] = Math.sin(phi) * t + eye;
+          }
+        }
+      }
+    }
+
     /* 2) 前拉约束：相邻格距离不允许突变（深度断崖 -> 陡坡而不是"鳍"） */
-    for (let pass = 0; pass < 2; pass++) {
+    for (let pass = 0; pass < 3; pass++) {
       const src = gT.slice();
       for (let j = 0; j <= NR; j++) {
         for (let i = 0; i <= NC; i++) {
@@ -633,8 +655,10 @@
           const jD = Math.max(0, j - 1) * W1 + i;
           const jU2 = Math.min(NR, j + 1) * W1 + i;
           const mn = Math.min(src[iL], src[iR], src[jD], src[jU2]);
-          if (src[k] > mn * 1.9) {
-            const t = mn * 1.9;
+          if (src[k] > mn * 1.25) {
+            // 深度断崖：直接吸附到前景深度（标准 DIBR 补洞），
+            // 桥接面片因此贴在物体前面被遮住，而不是横拉成条纹
+            const t = mn;
             gT[k] = t;
             const a = (i / NC) * Math.PI * 2;
             const phi = (0.5 - gV[j]) * vfov;
@@ -803,7 +827,7 @@
     const worldInfo = {
       mode: relief ? 'depth' : 'legacy',
       eyeHeight: 1.7,
-      walkRadius: relief ? 40 : 116
+      walkRadius: relief ? 1.6 : 116
     };
 
     /* 光照与雾 */

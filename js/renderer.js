@@ -146,6 +146,7 @@
       PWGL.setUniforms(gl, p, {
         uVP: vp,
         uEye: camera.eye,
+        uBackdrop: opt.backdrop || [0, 0],
         uSunDir: world.sunDir,
         uSunColor: opt.sunCol || world.sunColor,
         uSkyAmb: opt.skyAmb || world.ambient,
@@ -196,7 +197,8 @@
         gl.depthMask(true);
         gl.disable(gl.CULL_FACE);
         drawMesh(world, world.meshes.relief, {
-          tex: world.tex.photo, mode: 4, fog: 0.26, mipBias: 0
+          tex: world.tex.photo, mode: 4, fog: 0.26, mipBias: 0,
+          backdrop: [0, 0]
         });
         gl.disable(gl.BLEND);
         gl.enable(gl.CULL_FACE);
