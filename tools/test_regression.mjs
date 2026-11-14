@@ -245,6 +245,77 @@ if (args.depth && fs.existsSync(args.depth)) {
   assert.equal(badIdx, 0, '索引引用了有限直角区域外的顶点');
   console.log(`PASS  P1  直角重建：${r.tris} 三角 / ${GWt}×${GHt} 顶点全有限、法线归一化，`
     + `索引全部落在 ±${r.bbox.A}m × −${r.bbox.B}m 的直角区域内，跳面 ${r.skipped}`);
+
+  /* v1.16.1：延伸地面颜色必须来自照片地面（线性 RGB 颜色场），
+     并且矩形外要钳到边界值 —— 否则扇环外会退回 analysis.ground 的平均色，
+     出现「照片一块亮、外面一片深蓝」的明信片感。 */
+  assert.equal(typeof r.groundColorAt, 'function', '未暴露 groundColorAt 颜色场');
+  const cIn = r.groundColorAt(0, -5);
+  assert.equal(cIn.length, 3, '颜色场不是三元组');
+  assert.ok(cIn.every((v) => Number.isFinite(v) && v >= 0), '颜色场含 NaN/负值');
+  assert.ok(cIn.every((v) => v <= 1.2), '线性颜色场超出合理范围');
+  const cEdge = r.groundColorAt(-r.bbox.A + 0.01, -5);
+  const cFar = r.groundColorAt(-400, -5);
+  for (let i = 0; i < 3; i++) {
+    assert.ok(Math.abs(cEdge[i] - cFar[i]) < 1e-6, '矩形外没有钳到边界颜色（外推不连续）');
+  }
+  let maxJump = 0;
+  for (let x = -r.bbox.A + 1; x <= r.bbox.A - 1; x += 1) {
+    const a = r.groundColorAt(x - 0.5, -20), b = r.groundColorAt(x + 0.5, -20);
+    const dj = Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+    if (dj > maxJump) maxJump = dj;
+  }
+  assert.ok(maxJump < 0.2, `颜色场相邻采样跳变过大 ${maxJump.toFixed(3)}`);
+  assert.equal(typeof r.stats.skippedWall, 'number', 'stats 缺少 skippedWall');
+  console.log(`PASS  P1  延伸颜色场：矩形内连续（相邻跳变 ${maxJump.toFixed(3)}）、`
+    + `矩形外钳到边界，竖直墙剔除 ${r.stats.skippedWall} 面`);
+}
+
+/* ---- 2b) v1.16.1：扇环延伸的边界必须无缝（高度场在矩形边界连续） ----
+   extend.js 接管 world.heightAt 后，矩形内用重建高度、矩形外用
+   「边界高度 + 全局 fBm」。如果 ramp 没从 0 开始，跨过边界会有一道坎。 */
+const extWorld = {
+  bbox: { A: 55, B: 100 },
+  heightAt: (x, z) => 0.5 * Math.sin(x * 0.05) + 0.02 * z,
+  tex: { ground: {} },
+  meshes: {},
+  groundBaseLin: [0.1, 0.2, 0.3],
+  groundColorAt: () => [0.2, 0.3, 0.4],
+  fogColor: [0.1, 0.1, 0.1],
+};
+vm.runInContext(read('js/extend.js'), ctx, { filename: 'extend.js' });
+assert.equal(typeof ctx.PW.createExtender, 'function', 'extend.js 未导出 createExtender');
+{
+  const ext = ctx.PW.createExtender({ gl: ctx.PW.GL, world: extWorld, seed: 7 });
+  assert.equal(typeof extWorld.heightAt, 'function', '延伸器没有接管 heightAt');
+  // 前后边界（z=0 与 z=-B）和左右边界（x=±A）跨一步，高差必须趋近 0
+  const pairs = [[0, -0.5, 0, 0.5], [0, -100.5, 0, -99.5],
+    [-55.5, -30, -54.5, -30], [54.5, -30, 55.5, -30]];
+  for (const [x1, z1, x2, z2] of pairs) {
+    const h1 = extWorld.heightAt(x1, z1), h2 = extWorld.heightAt(x2, z2);
+    assert.ok(Math.abs(h1 - h2) < 0.35,
+      `边界高度不连续 (${x1},${z1})=${h1.toFixed(2)} → (${x2},${z2})=${h2.toFixed(2)}`);
+  }
+  // 同一种子必须产出同一高度场：另起一个平行世界，逐点比较矩形外的取值
+  const probePts = [[70, -30], [-90, 20], [0, 60], [120, -140]];
+  const extWorld2 = Object.assign({}, extWorld, {
+    heightAt: (x, z) => 0.5 * Math.sin(x * 0.05) + 0.02 * z,
+  });
+  ctx.PW.createExtender({ gl: ctx.PW.GL, world: extWorld2, seed: 7 });
+  for (const [x, z] of probePts) {
+    assert.ok(Math.abs(extWorld.heightAt(x, z) - extWorld2.heightAt(x, z)) < 1e-9,
+      `同种子高度场不确定 (${x},${z})`);
+  }
+  // 矩形外必须有起伏（不是把边界高度原样铺平）
+  let mn = Infinity, mx = -Infinity;
+  for (let x = 60; x <= 150; x += 5) {
+    const h = extWorld.heightAt(x, -20);
+    if (h < mn) mn = h;
+    if (h > mx) mx = h;
+  }
+  assert.ok(mx - mn > 0.2, `扇环外高度过于平坦（起伏 ${(mx - mn).toFixed(3)}m）`);
+  console.log('PASS  P1  扇环延伸：矩形四边高度连续（跨边界高差 < 0.35m）、'
+    + `同种子确定、外部有起伏 ${(mx - mn).toFixed(2)}m`);
 }
 
 // ---- 3) 深度预处理：等比 padding 规划与后处理 ----

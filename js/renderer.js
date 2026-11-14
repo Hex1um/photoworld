@@ -248,6 +248,17 @@
         gl.enable(gl.CULL_FACE);
       }
 
+      /* 区域内底板（v1.16.1）：铺在重建表面**之前**、y=-0.06。
+         重建网格在断崖/竖幕处被剪开时后面不再是天穹灰色，而是照片地面色。
+         正常几何会把它完全遮住，所以只在「洞」里可见，等于一层兜底。 */
+      if (world.meshes.floor && !skip('floor')) {
+        gl.disable(gl.CULL_FACE);
+        drawMesh(world, world.meshes.floor, {
+          tex: world.tex.ground, mode: 4, fog: 0.42, mipBias: 2.6
+        });
+        gl.enable(gl.CULL_FACE);
+      }
+
       // 深度重建的三维表面（照片即场景）
       if (world.meshes.relief && !skip('shell')) {
         gl.enable(gl.BLEND);
@@ -258,6 +269,35 @@
           tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.26, mipBias: 0,
           backdrop: [0, 0]
         });
+        gl.disable(gl.BLEND);
+        gl.enable(gl.CULL_FACE);
+      }
+
+      // 单体十字账单牌（v1.16）：照片贴图，双面渲染，替代被拉成鳍的对象四边形
+      if (world.meshes.objectCards && !skip('cards')) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.depthMask(true);
+        gl.disable(gl.CULL_FACE);
+        drawMesh(world, world.meshes.objectCards, {
+          tex: world.tex.photo, mode: 4, fog: 0.26, mipBias: 0
+        });
+        gl.disable(gl.BLEND);
+        gl.enable(gl.CULL_FACE);
+      }
+
+      // 扇环延伸 tile（js/extend.js）：真实几何，随玩家前进逐块生成
+      if (world.extraMeshes && world.extraMeshes.length) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.disable(gl.CULL_FACE);
+        for (const t of world.extraMeshes) {
+          if (!t.mesh) continue;
+          drawMesh(world, t.mesh, {
+            tex: t.tex || world.tex.ground, mode: 4,
+            fog: t.fog === undefined ? 0.32 : t.fog, mipBias: 0.4
+          });
+        }
         gl.disable(gl.BLEND);
         gl.enable(gl.CULL_FACE);
       }

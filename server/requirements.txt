@@ -1,0 +1,20 @@
+# 本地生成服务（可选，仅在你需要服务端生成时安装）
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.5
+numpy>=1.26
+pillow>=10.0
+
+# --- 以下为可选的高质量生成后端，按需取消注释并装对应仓库 ---
+
+# 1) 无限地形（SIGGRAPH'26，learned 程序化）：
+#    git clone https://github.com/xandergos/terrain-diffusion
+#    cd terrain-diffusion && pip install -r requirements.txt
+#    需要 CUDA 版 PyTorch
+# torch>=2.1
+# terrain-diffusion  # 以仓库本地安装为准
+
+# 2) 单体单图转 3D：
+#    InstantMesh: https://github.com/TencentARC/InstantMesh
+#    TripoSR:     https://github.com/VAST-AI-Research/TripoSR
+# trimesh

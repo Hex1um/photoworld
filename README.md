@@ -16,6 +16,12 @@ python -m http.server 8099 --bind 127.0.0.1
 - `?ring=1` 打开"视锥外程序化地平雾带"实验（**观感仍不达标，默认关闭，不建议实际开启**）
 - `?x=6&z=0&yaw=0` 指定出生位置，用来对比走动视差（截图/评测用）
 - 重建 A/B：`?v1=1` 回到 v1.10 的经验曲线 + 死平地面，`?flat=1` 只关近景挤出，`?vg=1.35` 调竖直夸张
+- 语义分组（v1.16）：默认开，`?sem=0` 关闭；结果写到 `body.dataset.semstats`
+- 扇环延伸（v1.16）：默认开，`?ext=0` 关闭，`?extr=3..8` 调保留半径（默认 5 块 × 32m），
+  `?api=http://127.0.0.1:8100` 指向本地 GPU 生成服务（不填则纯程序化）
+- 单体真网格（v1.16，可选）：`?obj3d=1&api=http://127.0.0.1:8100`，服务端 InstantMesh/TripoSR
+- 质检：`?dbgpos=1` 把重建网格挂到 `world.dbgPos`；`?skip=floor,cards,shell,ground` 分层关；
+  `node tools/probe.mjs --url ... --exprfile tools/diag_jumps.js` 查竖直跳变
 
 操作：`WASD` 行走 · 鼠标环视（点击画面锁定指针，或按住左键拖动）· `Shift` 奔跑 · 滚轮调视野 · `Esc` 暂停 · `H` 隐藏 HUD。触屏为左半屏摇杆 + 右半屏拖动视角。
 
@@ -52,6 +58,21 @@ python -m http.server 8099 --bind 127.0.0.1
 模型不可用时自动回退到早期的"天际线 + 分层贴片"方案（`buildCurtain`），离线或加载失败也能进世界。
 
 ![v1.10 平铺卡片 → v1.11 标定纵深 + 融色边缘](shot_v111_compare.png)
+
+4. **语义分组**（`js/semantics.js`，v1.16）
+   SegFormer-B0 / ADE20K 150 类（int8 ONNX，4.4MB），映射到 12 个几何分组
+   （天空/天花板/墙/地面/水面/植被/建筑/人/车/器物/山体/未知）。职责边界是 A/B 试出来的：
+   **语义只负责天空 alpha、天花板几何、单体实例切分**；地面/水面几何仍由深度 + 地平线决定
+   —— 语义地面是斑块状的，参与几何会在斑块边界立起无数薄墙。模型失败自动回退启发式
+   （深度 + 地平线 + 前景框），只能分天空/地面/天花板。
+
+5. **扇环外延伸**（`js/extend.js`，v1.16）
+   重建只覆盖相机前方 `x∈[-55,55]m, z∈[-100,0]m`。走出这块之后由 tile 流式接管：
+   **全局连续 fBm**（同一函数、同一坐标 → 相邻 tile 天然无缝，不需要接缝求解，
+   可以 O(1) 随机访问任意 tile）+ 四边高度硬约束（边界继承重建高度）。
+   延伸地面的**颜色**来自重建时烘的 48×32 照片地面颜色场，所以雪地外面还是雪。
+   接管 `world.heightAt` 后玩家真的站在延伸地形上，不再"一步踏进雾里"。
+   可选 `POST /api/extend` 换成 Terrain Diffusion / InfiniteDiffusion 的 learned 后端。
 
 ## 参考方案（v1.11 在 GitHub 上检索的结论）
 
@@ -154,16 +175,22 @@ js/glutil.js       着色器与 WebGL 封装
 js/reconstruct.js  照片分析（analyzePixels 纯函数，浏览器与 Node 共用）
 js/depth.js        深度模型推理
 js/world.js        几何：深度表面重建 / 分层回退 / 程序化道具
+js/semantics.js    语义分组（SegFormer-B0 / ADE20K 150 类 → 12 个几何分组）
+js/extend.js       扇环外延伸（全局 fBm tile + 边界无缝 + 区域底板）
+js/object3d.js     单体真网格升级（可选，需服务端 InstantMesh/TripoSR）
 js/renderer.js     渲染管线 + 后期 + 曝光探针
 js/player.js       第一人称控制
 js/audio.js        程序化风声
 js/app.js          画廊 / 载入 / 主循环 / HUD
 models/            Depth-Anything-V2-Small 量化 ONNX（27MB）
+                   + segformer_b0_ade20k.onnx（int8，4.4MB，python tools/fetch_models.py --semantics）
 vendor/ort/        onnxruntime-web（WASM 单线程）
 worlds/            内置场景图
 train/             历史实验：早期本地小网络（deprecated，运行时无引用，见 train/README.md）
 tools/             语料采集 / 归一化 / 批量评测 / CDP 截图 / 算法回归 / 缓存升版
 worldmodel/        Causal World DiT（action_codec 统一训练/推理动作，data/ 读 tar 与 .latent）
+server/            本地 GPU 生成服务（FastAPI）：/api/extend、/api/object3d，见 server/README.md
+training/          数据集整理与训练脚本（四条能力对应四个可训练模型），见 training/README.md
 CHANGELOG.md       面向使用者的更新日志
 ```
 
@@ -179,16 +206,22 @@ CHANGELOG.md       面向使用者的更新日志
   不再用镜像平铺，所以不会出现重复山形，但也没有 360° 内容。
 - 深度图缓存只在内存（最多 4 张）：同一会话内返回已进过的世界免推理，刷新页面后仍需重算；
   跨刷新持久化（IndexedDB）与降分辨率推理尚未做，两者都需要先按截图 A/B 确认画质损失。
-- 在线重建模式的世界是**有限直角区域**（默认 `x∈[-55,55]m、z∈[-100,0]m`），
-  **玩家移动不限制**（`walkRadius=0`）；区域外是程序化地面 + 雾，走远不会一步踏空，
-  但会看到世界收进雾里。要让边界消失必须做 inpainting 或 360° 生成（需生成模型）。
-- 侧面/背面由 `buildSurround` 的 5 份镜像副本补齐（每 60° 一份，+ 正面 = 360°），
-  是**几何外推**：转身有连续景色，但内容仍是照片的镜像，不是真实另一侧。
+- 在线重建模式的照片区域是**有限直角区域**（默认 `x∈[-55,55]m、z∈[-100,0]m`），
+  **玩家移动不限制**（`walkRadius=0`）。区域外由 `js/extend.js` 的 tile 流式接管
+  （v1.16）：高度用全局 fBm + 边界硬约束，颜色用照片地面色场，所以走出去地形连续、
+  颜色接得上；但延伸内容是**统计性推断**，不是照片里的真实地貌。
+  要做到"地貌按已有景观继续长"必须接 learned 后端（`server/` 已留接口）。
+- 相机视场与重建视场对齐（v1.16.1）：相机视场由 `world.reliefMeta.vfov` 决定，
+  不再是固定的 66°。改这条之前，任何图片重建出来都只占屏幕中间 ~80%，四周是天穹的灰。
 - 地平线以上做 1.35× 竖直夸张（`?yg=` 可调）；室内/俯拍（地平线 <0.42 或 >0.72）
   自动改用短基线测距（0.6~18m）并关闭夸张。
 - 资产模式（`?glb=`）的行走范围是 55m。
 - **只生成正面一个扇环**（v1.15）：`buildSurround` 的 5 份镜像副本默认关闭，
-  需要时用 `?surround=1` 打开；扇环外是程序化地面 + 雾。
+  需要时用 `?surround=1` 打开；扇环外是延伸 tile（v1.16）+ 雾。
+- 远山与水面之间可能有一条横向的"推断岸线"：山脚像素深度顶在 220m 上限、
+  水面的 y=0，两者之间是近乎垂直的面片，贴图会被竖直拉花。v1.16.1 用
+  「竖直跨度 / 水平跨度 > 2.5 视为墙」把这些面剪掉，再用区域内底板（照片地面色混雾色）
+  兜住洞，读作雾里的远岸——**是兜底，不是真的补出了岸线几何**。
 - **近景物体语义识别**：`js/objects.js` 跑 YOLOv8n-seg（EdgeFirst Model Zoo，
   COCO 80 类，14MB，`models/yolov8n-seg.onnx`），识别结果写到 `body.dataset.objects`
   （如 `person,backpack`）；模型失败自动回退纯深度分层。

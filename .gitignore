@@ -4,3 +4,6 @@ runs/
 out/
 __pycache__/
 *.pyc
+
+# 质检截图（tools/shot.mjs / probe.mjs / orbit_shot.mjs 产物）
+/shots/

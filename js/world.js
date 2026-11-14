@@ -1058,6 +1058,21 @@
     const yGain = opt.yGain || 1.35;     // 只作用于地平线以上：把山体/树木的高度立起来
     const prog = opt.onProgress || function () {};
     const eye = 1.7;
+
+    /* 语义分组（js/semantics.js）：几何策略按「组」而不是按具体类别走。
+       没有语义图时全部退化为 UNKNOWN，行为与 v1.15 完全一致。 */
+    const SGRP = { UNKNOWN: 0, SKY: 1, CEILING: 2, WALL: 3, GROUND: 4, WATER: 5,
+      VEG: 6, BUILDING: 7, PERSON: 8, VEHICLE: 9, OBJECT: 10, TERRAIN: 11 };
+    const OBJ_GROUP = new Uint8Array(12);
+    OBJ_GROUP[SGRP.VEG] = 1; OBJ_GROUP[SGRP.BUILDING] = 1; OBJ_GROUP[SGRP.PERSON] = 1;
+    OBJ_GROUP[SGRP.VEHICLE] = 1; OBJ_GROUP[SGRP.OBJECT] = 1;
+    const sem = (opt.sem && opt.sem.groups && opt.sem.width > 1) ? opt.sem : null;
+    const semGroup = (u, v) => {
+      if (!sem) return SGRP.UNKNOWN;
+      const x = Math.max(0, Math.min(sem.width - 1, Math.round(u * (sem.width - 1))));
+      const y = Math.max(0, Math.min(sem.height - 1, Math.round(v * (sem.height - 1))));
+      return sem.groups[y * sem.width + x];
+    };
     const aspect = analysis.W / Math.max(1, analysis.H);
     const tanH = Math.tan(HFOV / 2);
     const tanV = tanH / aspect;
@@ -1231,8 +1246,12 @@
     const col = new Float32Array(GW * GH * 4);
     const edge = new Float32Array(GW * GH * 2);
     const gT = new Float32Array(GW * GH);
+    const gGrp = new Uint8Array(GW * GH);  // 语义分组（0=未知）
+    const gGround = new Uint8Array(GW * GH); // 1 = 已按地面/水面贴到水平面
+    const gNear = new Uint8Array(GW * GH);   // 1 = 比同行基线明显更近（单体候选）
     const gFg = new Uint8Array(GW * GH);   // 1 = 比同排地面基线明显更近（近处物体）
     const gDirX = new Float32Array(GW * GH);
+    const gDirY = new Float32Array(GW * GH);
     const gDirZ = new Float32Array(GW * GH);
     const gTW = new Float32Array(9);
     for (let j = 0; j < GH; j++) {
@@ -1240,6 +1259,9 @@
       for (let i = 0; i < GW; i++) {
         const u = i / (GW - 1);
         const k = j * GW + i;
+        // 语义分组：天空 / 天花板 / 地面 / 水面 / 植被 / 建筑 / 人车 / 山体
+        const grp = semGroup(u, v);
+        gGrp[k] = grp;
         // 天空也压到同一个有限半径 B（不能放到 1.6B，否则会被区域裁剪整片切掉，
         // 天际线处出现一条水平分界线）。
         const d0 = dSample(u, v);
@@ -1262,6 +1284,9 @@
         // 「近处物体距离限幅」。把模型 mask 拿去限幅会把 96×96 量化的边界
         // 连带一整片背景压到近处，画面被咬出缺口（楼梯图 A/B 实测）。
         const isFgDepth = (gS[k] - rowBaseD) > 0.10;
+        // 「真正靠近的对象」用更严的阈值：雪坡/水面的深度噪声常超过 0.10，
+        // 会把整片地面误判成近景对象，进而按逐像素深度拉成长条。
+        const isNearObj = (gS[k] - rowBaseD) > 0.20;
         const isFg = modelFg > 0 || isFgDepth;
         gFg[k] = modelFg > 0 ? 1 : 0;
 
@@ -1270,15 +1295,29 @@
              **不会被深度噪声拉成横向长条**（用户反馈的核心问题）；
            - 山体/树/建筑/近景物体：按深度反投影，远处可以放到 220m；
            - 近处物体：限制在自身行基线深度附近，**不向远处延伸**。 */
+        const isCeilGrp = grp === SGRP.CEILING;
+
         let t, y;
         if (indoor) {
           // 室内用「行距离」而不是逐像素深度：同一行 t 相同 → 网格规则、
           // 不会自交遮挡（逐像素反投影在墙面/天花板之间穿插，会把画面咬出空洞）。
           t = clamp(metric(rowBaseD), 0.6, 18);
           y = eye + dirY * t;
+          // 天花板必须在头顶以上：室内最常见的误判就是把天花板当地面压到脚下
+          if (isCeilGrp) y = Math.max(y, eye + 0.45);
+        } else if (isCeilGrp) {
+          // 天花板：按深度反投影但夹在头顶以上，绝不进入「地平线以下=地面」逻辑。
+          // 这是「天花板被当成天空/地面」的直接修复。
+          t = clamp(metric(d0), 0.6, 220);
+          y = Math.max(eye + dirY * t, eye + 0.45);
         } else if (v > analysis.horizon + 0.005 && !isFg) {
+          // 地面：按「平地 + 眼高」反解，严格落在 y=0。
+          // 这里**只用几何判据**（地平线以下 + 不比同行基线更近），不用语义的
+          // 地面 mask：语义地面是斑块状的，把散点强压到 y=0 会在斑块边界立起
+          // 无数薄墙，整片雪坡变成竖条（A/B 实测）。语义只负责天空/天花板/单体。
           t = Math.min(eye / Math.max(0.06, -dirY), 220);
           y = 0;
+          gGround[k] = 1;
         } else {
           t = clamp(metric(d0), 0.6, 220);
           y = eye + dirY * t * ((hasSky && dirY > 0) ? yGain : 1);
@@ -1290,7 +1329,9 @@
             y = clamp(y, -0.5, 12);   // 近景物体（树/石头/人）不会长成几十米的尖塔
           }
         }
-        gDirX[k] = dirX; gDirZ[k] = dirZ;
+        // 只给「确实更近」的单体做卡片候选；远处的森林/山脉不切
+        if (isNearObj) gNear[k] = 1;
+        gDirX[k] = dirX; gDirY[k] = dirY; gDirZ[k] = dirZ;
         pos[k * 3] = dirX * t;
         pos[k * 3 + 1] = y;
         pos[k * 3 + 2] = dirZ * t;
@@ -1303,7 +1344,15 @@
            比天空基线明显更近的像素才保留（地面/山体/树木/建筑），
            天空 alpha=0 交给程序化天穹。深度图是连续的，所以树冠边缘
            不会出现锯齿状青边或一条水平切线。 */
-        const aSky = (indoor || !hasSky) ? 1 : smoothstep(skyD + 0.03, skyD + 0.14, d0);
+        let aSky = (indoor || !hasSky) ? 1 : smoothstep(skyD + 0.03, skyD + 0.14, d0);
+        // 语义天空直接清零交给天穹；天花板（CEILING）保持 alpha=1，
+        // 不再被深度判据误当成天空切掉——「天空/地面/天花板混淆」的关键修复。
+        /* 但语义天空只在**地平线以上**才清零（v1.16.1）：
+           地平线附近的雾带/远岸/水面反光经常被 ADE20K 判成 sky，
+           一刀清零会在画面中间咬出一条贯穿左右的灰带——洞后面就是天穹，
+           读起来像「风景和地面混淆」（alpine 湖岸实测，24k 面被这样清掉）。
+           地平线以下的像素交给深度判据，它只认「比天空更近」。 */
+        if (sem && grp === SGRP.SKY && v < analysis.horizon - 0.004) aSky = 0;
         const aU = smoothstep(0, 0.02, u) * (1 - smoothstep(0.98, 1, u));
         const aV = smoothstep(0, 0.015, v) * (1 - smoothstep(0.985, 1, v));
         // 室外按深度裁掉天空（否则照片天空会被压到 100m 处，和地面分成两块）；
@@ -1315,6 +1364,91 @@
         edge[k * 2] = 0;
         edge[k * 2 + 1] = 0;
       }
+    }
+
+    /* 1a-bis) 地面颜色场：把照片里「真正地面」的像素颜色烘成一张覆盖重建矩形的
+       粗网格（线性 RGB）。js/extend.js 生成的扇环外 tile 拿它就当顶点色基准，
+       于是雪地外面还是雪、沙地外面还是沙、森林地面外面还是暗绿——
+       这是「照片一块亮、外面一片深蓝」那种明信片感（v1.16 实测）的根因修复：
+       延伸地面的颜色曾经只能取 analysis.ground（全图下半带的平均值，
+       蓝调雪林里被深色林带拖到 #30595c），与近处亮雪差 2~3 倍。 */
+    const CGW = 48, CGH = 32;
+    const cgrid = new Float32Array(CGW * CGH * 3);
+    const ccnt = new Float32Array(CGW * CGH);
+    let pix = null;
+    try {
+      pix = analysis.canvas.getContext('2d').getImageData(0, 0, analysis.W, analysis.H).data;
+    } catch (e) { pix = null; }              // 画布被污染时退回 analysis.ground
+    for (let k = 0; k < GW * GH; k++) {
+      if (gGround[k] !== 1) continue;        // 只要已贴到水平面的地面/水面点
+      if (col[k * 4 + 3] < 0.5) continue;    // 与 alpha 剔除保持一致
+      const x = pos[k * 3], z = pos[k * 3 + 2];
+      if (Math.abs(x) > A || z < -B || z > 0) continue;
+      const gi = clamp(Math.floor((x + A) / (2 * A) * CGW), 0, CGW - 1);
+      const gj = clamp(Math.floor((-z) / B * CGH), 0, CGH - 1);
+      let r = analysis.ground[0], g = analysis.ground[1], b = analysis.ground[2];
+      if (pix) {
+        const px = clamp(Math.round(uv[k * 2] * (analysis.W - 1)), 0, analysis.W - 1);
+        const py = clamp(Math.round(uv[k * 2 + 1] * (analysis.H - 1)), 0, analysis.H - 1);
+        const q = (py * analysis.W + px) * 4;
+        r = pix[q] / 255; g = pix[q + 1] / 255; b = pix[q + 2] / 255;
+      }
+      const ci = gj * CGW + gi;
+      cgrid[ci * 3] += lin(clamp(r, 0, 1));
+      cgrid[ci * 3 + 1] += lin(clamp(g, 0, 1));
+      cgrid[ci * 3 + 2] += lin(clamp(b, 0, 1));
+      ccnt[ci] += 1;
+    }
+    // 空格（远景没有地面像素的格子）用 3×3 邻域补几轮，保证整张场连续
+    for (let pass = 0; pass < 4; pass++) {
+      let filled = 0;
+      for (let gj = 0; gj < CGH; gj++) {
+        for (let gi = 0; gi < CGW; gi++) {
+          const ci = gj * CGW + gi;
+          if (ccnt[ci] > 0) continue;
+          let r = 0, g = 0, b = 0, n = 0;
+          for (let dj = -1; dj <= 1; dj++) {
+            for (let di = -1; di <= 1; di++) {
+              const jj = gj + dj, ii = gi + di;
+              if (jj < 0 || jj >= CGH || ii < 0 || ii >= CGW) continue;
+              const q = jj * CGW + ii;
+              if (ccnt[q] <= 0) continue;
+              r += cgrid[q * 3] / ccnt[q]; g += cgrid[q * 3 + 1] / ccnt[q]; b += cgrid[q * 3 + 2] / ccnt[q];
+              n++;
+            }
+          }
+          if (!n) continue;
+          cgrid[ci * 3] = r / n; cgrid[ci * 3 + 1] = g / n; cgrid[ci * 3 + 2] = b / n;
+          ccnt[ci] = -1;                     // 标记「已填补」，参与下一轮扩散
+          filled++;
+        }
+      }
+      if (!filled) break;
+    }
+    for (let ci = 0; ci < CGW * CGH; ci++) {
+      if (ccnt[ci] > 0) {
+        cgrid[ci * 3] /= ccnt[ci]; cgrid[ci * 3 + 1] /= ccnt[ci]; cgrid[ci * 3 + 2] /= ccnt[ci];
+      } else if (ccnt[ci] === 0) {
+        cgrid[ci * 3] = lin(analysis.ground[0]);
+        cgrid[ci * 3 + 1] = lin(analysis.ground[1]);
+        cgrid[ci * 3 + 2] = lin(analysis.ground[2]);
+      }
+      ccnt[ci] = 1;
+    }
+    /* 采样：双线性 + 钳到重建矩形内（矩形外就是边界值，正是延伸的起点）。 */
+    function groundColorAt(x, z) {
+      const fx = clamp((x + A) / (2 * A), 0, 1) * (CGW - 1);
+      const fz = clamp(-z / B, 0, 1) * (CGH - 1);
+      const i0 = Math.floor(fx), j0 = Math.floor(fz);
+      const i1 = Math.min(CGW - 1, i0 + 1), j1 = Math.min(CGH - 1, j0 + 1);
+      const tx = fx - i0, tz = fz - j0;
+      const out = [0, 0, 0];
+      for (let c = 0; c < 3; c++) {
+        const a = cgrid[(j0 * CGW + i0) * 3 + c], b = cgrid[(j0 * CGW + i1) * 3 + c];
+        const e = cgrid[(j1 * CGW + i0) * 3 + c], f = cgrid[(j1 * CGW + i1) * 3 + c];
+        out[c] = lerp(lerp(a, b, tx), lerp(e, f, tx), tz);
+      }
+      return out;
     }
 
     /* 1b) 竖直尖刺抑制：树梢/细杆/电线这类 1~2 像素宽的远景，深度稍有误差
@@ -1361,6 +1495,57 @@
         pos[k * 3 + 2] = gDirZ[k] * tLim;
       }
     }
+
+    /* 1b-bis) 远景横向中值（v1.16.1）：60m 以外的几何几乎没有视差，
+       但网格列在 190m 处只相隔约 0.4m —— 深度图里一条崖边就让相邻列差出
+       70m，渲染成一排沿视线拉的竖幕（alpine 崖脚实测：458 处 >6m 的竖直
+       跳变，最大 72m）。把中值窗口从 3 列加宽到 7 列，可以去掉 1~3 列宽的
+       假崖，真实的山脊/宽崖（占多数列）不受影响。 */
+    const farWin = new Float32Array(7);
+    for (let j = 0; j < GH; j++) {
+      for (let i = 0; i < GW; i++) {
+        const k = j * GW + i;
+        if (gT[k] < 60) continue;
+        let n = 0;
+        for (let di = -3; di <= 3; di++) {
+          const q = j * GW + clamp(i + di, 0, GW - 1);
+          if (col[q * 4 + 3] < 0.06) continue;   // 天空不参与
+          farWin[n++] = pos[q * 3 + 1];
+        }
+        if (n < 4) continue;
+        for (let a = 1; a < n; a++) {
+          const v = farWin[a]; let b = a - 1;
+          while (b >= 0 && farWin[b] > v) { farWin[b + 1] = farWin[b]; b--; }
+          farWin[b + 1] = v;
+        }
+        const med = farWin[(n - 1) >> 1];
+        const y0 = pos[k * 3 + 1];
+        if (Math.abs(y0 - med) > 4) pos[k * 3 + 1] = med + (y0 > med ? 1 : -1) * 4;
+      }
+    }
+
+    /* 1c) 单体实例：只把「比同行明显更近」的紧凑对象切成十字账单牌。
+       大面积植被（森林/灌木带）不做逐像素抬升——A/B 实测那会把整片雪坡
+       变成竖条；它们走地面规则与深度基线。 */
+    const instInfo = sem
+      ? labelObjectCards(gGrp, gT, pos, uv, GW, GH, tanH, tanV, gNear)
+      : { gCardId: null, instances: [], cards: null };
+    const gCardId = instInfo.gCardId;
+    /* 1c-bis) 实例深度平坦化：把每个单体压到自身中位深度，保持竖直与落地。
+       相邻像素共享 t，反投影面片不再沿视线拉成鳍；因为仍在同一张网格里，
+       底部自然与地面相连，不会出现悬空的矩形卡片。 */
+    if (sem && instInfo.instances.length) {
+      for (const it of instInfo.instances) {
+        const t = clamp(it.t, 0.6, 200);
+        for (const q of it.cells) {
+          gT[q] = t;
+          pos[q * 3] = gDirX[q] * t;
+          pos[q * 3 + 1] = clamp(eye + gDirY[q] * t * ((hasSky && gDirY[q] > 0) ? yGain : 1), -0.5, 18);
+          pos[q * 3 + 2] = gDirZ[q] * t;
+        }
+      }
+    }
+    prog(0.70);
 
     /* 2) 法线：世界坐标邻居坐标差分叉积 + 3×3 平滑（尖刺的第二道防线） */
     const nrm = new Float32Array(GW * GH * 3);
@@ -1420,13 +1605,30 @@
        区域裁剪是「有限直角坐标世界」的边界：照片投影成梯形后自然收边，
        不再需要视锥掩码或镜像平铺。 */
     const idx = [];
-    let skipped = 0, culledAlpha = 0, culledArea = 0;
+    let skipped = 0, skippedCard = 0, skippedObjEdge = 0, skippedSteep = 0, skippedWall = 0,
+      culledAlpha = 0, culledArea = 0;
     for (let j = 0; j < GH - 1; j++) {
       for (let i = 0; i < GW - 1; i++) {
         const a0 = j * GW + i, a1 = a0 + 1;
         const b0 = (j + 1) * GW + i, b1 = b0 + 1;
         const alpha = Math.max(col[a0 * 4 + 3], col[a1 * 4 + 3], col[b0 * 4 + 3], col[b1 * 4 + 3]);
         if (alpha < 0.06) { culledAlpha++; continue; }
+        // 实例已就地压平（1c-bis），不再剔除四边形，避免露洞与「墓碑」卡片
+        void skippedCard;
+        /* 注：曾按「对象/非对象」断边，但 128×96 的语义边界会把地面/雪坡咬出
+           一块块露天的矩形洞（A/B 实测），已移除。鳍改由 1b-bis 的深度平坦化解决。 */
+        void skippedObjEdge;
+        /* 竖直跳变剪断（仅语义路径）：相邻网格顶点高差 >5m 的四边形跳过。
+           单目深度在树梢/栏杆/细杆上会突然给一个近距离，反投影后就沿视线
+           拉出几十米的长鳍；山脊的真实起伏在一个网格单元内只有几十厘米，
+           不会被误伤。这一条对没被卡片覆盖到的细高物体兜底。 */
+        if (sem) {
+          const dyV = Math.max(Math.abs(pos[a0 * 3 + 1] - pos[b0 * 3 + 1]),
+            Math.abs(pos[a1 * 3 + 1] - pos[b1 * 3 + 1]));
+          const dyH = Math.max(Math.abs(pos[a0 * 3 + 1] - pos[a1 * 3 + 1]),
+            Math.abs(pos[b0 * 3 + 1] - pos[b1 * 3 + 1]));
+          if (dyV > 5 || dyH > 5) { skippedSteep++; continue; }
+        }
         // 近处物体与背景的交界交给下面的深度比值判据（tMax/tMin）。
         // 曾按「模型 mask 的 fg 顶点数」跳面，但 96×96 的 mask 边界是块状的，
         // 会在画面里咬出一排方块缺口（楼梯图 A/B 实测），已移除。
@@ -1445,6 +1647,31 @@
         // 室内跳面阈值放宽：楼梯/窗/天花板的深度跳变本来就大，2.6 会把
         // 画面咬出一排锯齿缺口；室内范围只有 18m，不需要断崖处理。
         if (tMax / Math.max(tMin, 0.6) > (indoor ? 6 : edgeRatio)) { skipped++; continue; }
+        /* 近垂直面片剔除（v1.16.1）：竖直墙在照片里没有对应的水平位移，
+           贴图必然被拉成一根根竖条。远山脚下 → 水面这一段最典型：深度都顶在
+           220m 上限，水平位移每格只有几十厘米，y 却从 20m 平滑降到 0，
+           逐格高差 < 5m 躲过了上面的断崖判据，整片就成了「竖幕」
+           （alpine 崖脚实测，?v1=1 旧路径没有这个问题）。
+           判据：竖直跨度 / 水平跨度 > 2.5 视为墙，直接断开让水面/天穹透出来。
+           室内不适用——那里的墙/门框本来就是竖直的。 */
+        if (!indoor) {
+          let hMin = Infinity;
+          const pairs = [[a0, a1], [b0, b1], [a0, b0], [a1, b1]];
+          for (const pr of pairs) {
+            const dx2 = pos[pr[0] * 3] - pos[pr[1] * 3];
+            const dz2 = pos[pr[0] * 3 + 2] - pos[pr[1] * 3 + 2];
+            const dh = Math.hypot(dx2, dz2);
+            if (dh < hMin) hMin = dh;
+          }
+          let vSpan = 0;
+          for (const k of [a0, a1, b0, b1]) {
+            for (const k2 of [a0, a1, b0, b1]) {
+              const dy2 = Math.abs(pos[k * 3 + 1] - pos[k2 * 3 + 1]);
+              if (dy2 > vSpan) vSpan = dy2;
+            }
+          }
+          if (vSpan > 1.0 && vSpan > hMin * 2.5) { skippedWall++; continue; }
+        }
         idx.push(a0, b0, a1, a1, b0, b1);
       }
     }
@@ -1502,14 +1729,106 @@
       heightField,
       bbox: { A, B },
       grid: { GW, GH },
+      /* 单体补全：十字账单牌 + 实例元信息（供后续 InstantMesh/TripoSR 替换） */
+      cards: instInfo.cards,
+      instances: instInfo.instances,
+      /* 照片地面颜色场（线性 RGB）采样器：js/extend.js 给扇环外 tile 上色用 */
+      groundColorAt,
+      semGroups: sem ? sem.groups : null,
+      semSize: sem ? [sem.width, sem.height] : null,
       /* 信息保留率诊断：哪一步丢了多少面，直接决定「图片丢信息」的排查方向 */
       stats: {
         kept: idx.length / 6, total: quadTotal,
         keepRate: (idx.length / 6) / quadTotal,
-        culledAlpha, culledArea, skipped
+        culledAlpha, culledArea, skipped, skippedCard, skippedObjEdge, skippedSteep, skippedWall,
+        objectCards: instInfo.instances.length
       },
-      meta: { indoor, hasSky, skyD: +skyD.toFixed(3), culledAlpha, culledArea, skipped }
+      /* 质检用：把顶点位置暴露出来（?dbgpos=1），tools/probe.mjs 可以据此
+         统计「相邻网格竖直跳变」发生在画面的哪个位置，定位竖条/鳍的成因。 */
+      dbgPos: (opt && opt.dbgPos)
+        ? (function () { const a = new Float32Array(GW * GH); for (let q = 0; q < a.length; q++) a[q] = col[q * 4 + 3]; return { pos, uv, gT, GW, GH, gGrp, alpha: a, idx }; })()
+        : null,
+      meta: {
+        indoor, hasSky, skyD: +skyD.toFixed(3), culledAlpha, culledArea, skipped,
+        skippedCard, skippedObjEdge, skippedSteep, skippedWall,
+        objectCards: instInfo.instances.length,
+        sem: sem ? 'on' : 'off'
+      }
     };
+  }
+
+  /* ---------------- 单体实例 → 不拉伸（v1.16） ----------------
+   * 问题：树/房屋被反投影成连续网格时，树冠（远）与地面（近）被连成一个四边形，
+   * 沿视线方向拉成几十米的「鳍」。示例图里的针叶树就是这样变成三角尖刺的。
+   * 做法：
+   *   1) 语义对象（植被/建筑/人/车/器物）且「比同行基线明显更近」的像素，
+   *      按 4 邻域连通域切成实例；
+   *   2) 实例面积过小（噪点）或过大（森林/山脉整体）不处理，避免把地貌切碎；
+   *   3) 每个实例压到**自身中位深度**（保持竖直、仍与地面相连），
+   *      相邻像素共享深度，面片不再沿视线拉长。
+   * 真三维补全走 js/object3d.js + 服务端 InstantMesh/TripoSR（可选）。
+   */
+  function labelObjectCards(gGrp, gT, pos, uv, GW, GH, tanH, tanV, gNear) {
+    const N = GW * GH;
+    const OBJ = new Uint8Array(12);
+    OBJ[6] = OBJ[7] = OBJ[8] = OBJ[9] = OBJ[10] = 1;   // VEG/BUILDING/PERSON/VEHICLE/OBJECT
+    // 真正要卡片的像素：语义是对象 **且** 比同行基线明显更近。
+    // 不加后半个条件，整片森林/雪坡都会被当成一个巨型对象切出来。
+    const isCard = (k) => OBJ[gGrp[k]] && (!gNear || gNear[k]);
+    const gCardId = new Int32Array(N).fill(-1);
+    const insts = [];
+    const seen = new Uint8Array(N);
+    const stack = [];
+    const minArea = Math.max(16, Math.round(N * 0.0006));
+    const maxArea = Math.round(N * 0.30);   // 超过 30% 画面的当作地貌/森林，不切卡片
+    const MAX_INST = 120;
+
+    for (let seed = 0; seed < N; seed++) {
+      if (seen[seed] || !isCard(seed)) continue;
+      const cells = [];
+      let minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9, ymin = 1e9;
+      let sx = 0, sy = 0, sz = 0;
+      stack.length = 0; stack.push(seed); seen[seed] = 1;
+      while (stack.length) {
+        const q = stack.pop();
+        cells.push(q);
+        const qi = q % GW, qj = (q / GW) | 0;
+        const u = qi / (GW - 1), v = qj / (GH - 1);
+        if (u < minx) minx = u; if (u > maxx) maxx = u;
+        if (v < miny) miny = v; if (v > maxy) maxy = v;
+        const y = pos[q * 3 + 1];
+        if (y < ymin) ymin = y;
+        sx += pos[q * 3]; sy += y; sz += pos[q * 3 + 2];
+        const nb = [qi > 0 ? q - 1 : -1, qi < GW - 1 ? q + 1 : -1,
+          qj > 0 ? q - GW : -1, qj < GH - 1 ? q + GW : -1];
+        for (const n of nb) {
+          if (n < 0 || seen[n] || !isCard(n)) continue;
+          seen[n] = 1; stack.push(n);
+        }
+        if (cells.length > maxArea * 1.6) break;   // 超大实例提前收手
+      }
+      const area = cells.length;
+      if (area < minArea || area > maxArea) continue;
+      const bw = maxx - minx, bh = maxy - miny;
+      if (bw < 0.02 || bh < 0.02 || bw > 0.9 || bh > 0.95) continue;
+      const id = insts.length;
+      if (id >= MAX_INST) break;
+      const ts = [];
+      for (const q of cells) ts.push(gT[q]);
+      ts.sort((a, b) => a - b);
+      const tMed = ts[ts.length >> 1];
+      if (!(tMed > 0.3 && tMed < 240)) continue;
+      for (const q of cells) gCardId[q] = id;
+      insts.push({
+        id, area, uv: [minx, miny, maxx, maxy], t: tMed,
+        cx: sx / area, cz: sz / area, ymin, group: gGrp[seed], cells
+      });
+    }
+
+    /* 不再生成独立的矩形卡片：A/B 实测矩形裁片会在场景里变成「墓碑」
+       （裁片带背景、且与地面脱开）。改为把实例压到自身中位深度后**就地保留**，
+       由 buildCartesianWorld 统一重算顶点，见 1c-bis。 */
+    return { gCardId, instances: insts, cards: null };
   }
 
   /* ---------------- 侧面 / 背面（v1.14） ----------------
@@ -1651,6 +1970,8 @@
               gw: opts && opts.gw, gh: opts && opts.gh,
               yGain: opts && opts.yGain,
               fgMask: opts && opts.fgMask,
+              sem: opts && opts.sem,
+              dbgPos: opts && opts.dbgPos,
               onProgress: opts && opts.onProgress
             })
           : buildRelief(analysis, depthMap, {
@@ -1716,6 +2037,8 @@
 
     const m = {
       relief: relief ? PWGL.createMesh(gl, relief) : null,
+      // 单体十字账单牌（v1.16）：替代被拉成鳍的对象四边形
+      objectCards: (relief && relief.cards) ? PWGL.createMesh(gl, relief.cards) : null,
       // v1.15：默认只生成正面一个扇环，其他地方留空（用户明确要求）。
       // 镜像副本保留为实验（?surround=1），默认不建，避免假内容。
       reliefSurround: (relief && relief.grid && opts && opts.surround)
@@ -1795,16 +2118,58 @@
       exposure,
       targetLum: clamp(analysis.meanLum || analysis.brightness || 0.4, 0.06, 0.9),
       groundTint: lin3(analysis.ground).map((v) => v * 0.85),
+      /* 延伸地面用的照片颜色场（线性 RGB，覆盖整个重建矩形）。
+         extend.js 用它给扇环外的 tile 上色，接缝处颜色连续。 */
+      groundColorAt: (relief && relief.groundColorAt) ? relief.groundColorAt : null,
+      /* 质检用顶点数据（?dbgpos=1）：排查竖条/鳍时直接读网格 */
+      dbgPos: (relief && relief.dbgPos) ? relief.dbgPos : null,
+      groundColorMeta: (relief && relief.bbox)
+        ? { x0: -relief.bbox.A, z0: -relief.bbox.B, spanX: 2 * relief.bbox.A, spanZ: relief.bbox.B }
+        : { x0: -55, z0: -100, spanX: 110, spanZ: 100 },
+      /* 程序化地面贴图的基色（线性）：tile 的顶点色是「目标色 / 基色」的增益 */
+      groundBaseLin: lin3(analysis.ground),
       lights: { sunDir, sunColor: sunL, ambient: ambientL, fogColor: fogL, fogDensity: 0.0040 },
       meshes: m,
+      // 扇环延伸生成的动态 tile（js/extend.js 往里塞，渲染器逐块绘制）
+      extraMeshes: [],
+      extendMeta: null,
       tex,
       particles,
       seed,
+      // 照片重建设定覆盖的直角区域（延伸器据此判断扇环边界）
+      bbox: (relief && relief.bbox) ? relief.bbox : { A: 55, B: 100 },
       spawn: { x: 0, z: 0 },
       mode: worldInfo.mode,
       eyeHeight: worldInfo.eyeHeight,
       walkRadius: worldInfo.walkRadius,
-      reliefMeta: relief ? Object.assign({ vfov: relief.vfov }, relief.meta || {}) : null
+      reliefMeta: relief ? Object.assign({ vfov: relief.vfov }, relief.meta || {}) : null,
+      // 单体实例（bbox / 中位深度 / 世界中心），供 js/object3d.js 升级为真网格
+      objectInstances: (relief && relief.instances) ? relief.instances : [],
+      _cardsData: (relief && relief.cards) ? relief.cards : null,
+      /* 用真网格替换部分账单牌：把已升级实例的顶点从卡片网格里剔除并重建。
+         ids = 已升级为 3D mesh 的实例 id 列表（由 js/object3d.js 调用）。 */
+      hideObjectCards: function (ids) {
+        if (!relief || !relief.cards || !m.objectCards) return;
+        const ex = new Set(ids || []);
+        const keep = (relief.instances || []).filter(function (it) { return !ex.has(it.id); });
+        if (!keep.length) { m.objectCards = null; return; }
+        const src = relief.cards;
+        let nv = 0;
+        for (let i = 0; i < keep.length; i++) nv += keep[i].vCount;
+        const pos = new Float32Array(nv * 3), nrm = new Float32Array(nv * 3);
+        const uv = new Float32Array(nv * 2), col = new Float32Array(nv * 4);
+        const index = [];
+        let vo = 0;
+        for (const it of keep) {
+          pos.set(src.pos.subarray(it.vStart * 3, (it.vStart + it.vCount) * 3), vo * 3);
+          nrm.set(src.normal.subarray(it.vStart * 3, (it.vStart + it.vCount) * 3), vo * 3);
+          uv.set(src.uv.subarray(it.vStart * 2, (it.vStart + it.vCount) * 2), vo * 2);
+          col.set(src.color.subarray(it.vStart * 4, (it.vStart + it.vCount) * 4), vo * 4);
+          for (let k = 0; k < it.iCount; k++) index.push(src.index[it.iStart + k] - it.vStart + vo);
+          vo += it.vCount;
+        }
+        m.objectCards = PWGL.createMesh(gl, { pos, normal: nrm, uv, color: col, index });
+      }
     };
 
     return world;

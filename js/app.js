@@ -212,6 +212,24 @@
         }
       }
 
+      /* 语义分组（SegFormer ADE20K 150 类）：把 sky / ground / ceiling / tree /
+         building / person / vehicle 分开。没有模型时自动退化为启发式，不阻塞主流程。 */
+      let sem = null;
+      // ?sem=0 关闭语义分层，回到 v1.15 的纯深度路径（A/B 用）
+      if (depthMap && window.PW.semantics &&
+          new URLSearchParams(location.search).get('sem') !== '0') {
+        try {
+          setProgress(74, '语义分组：天空 / 地面 / 天花板 / 植被 / 建筑…');
+          sem = await Promise.race([
+            window.PW.semantics.estimate({ img, depth: depthMap, analysis, objInfo }),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('语义推理超时')), 20000))
+          ]);
+          setProgress(74, '语义分组完成（' + sem.source + '）');
+        } catch (e) {
+          console.warn('语义分组不可用，退化为纯深度分层：', e && e.message);
+        }
+      }
+
       setProgress(75, depthMap ? '反投影：像素 → 世界坐标…' : '构建分层地形…');
       await sleep(40);
       const params = new URLSearchParams(location.search);
@@ -229,6 +247,10 @@
         vg: params.has('vg') ? parseFloat(params.get('vg')) : undefined,
         yGain: params.has('yg') ? parseFloat(params.get('yg')) : undefined,
         fgMask: objInfo && objInfo.fgMask,
+        // 语义分组：天空/地面/天花板/植被/建筑/人车，决定几何策略与单体卡片
+        sem: sem,
+        // 质检：?dbgpos=1 时把 relief 顶点位置暴露到 world.dbgPos（排查竖条/鳍）
+        dbgPos: params.get('dbgpos') === '1',
         // 真实分阶段回调：中值 / 反投影 / 法线 / 索引 / 高度场各推进一格
         onProgress: (p) => setProgress(75 + p * 12,
           p < 0.35 ? '深度去噪：5×5 中值…'
@@ -256,12 +278,38 @@
       player = window.PW.createPlayer(canvas, world);
       if (window.__spawn) player.reset(window.__spawn.x, window.__spawn.z, window.__spawn.yaw);
       else if (def.start) player.reset(def.start.x || 0, def.start.z || 0, def.start.yaw || 0);
+      if (window.__spawn && typeof window.__spawn.pitch === 'number') player.state.pitch = window.__spawn.pitch;
+
+      /* 扇环外地貌延伸（v1.16）：玩家前进时按 tile 依已有地貌生成。
+         ?ext=0 关闭；?api=http://127.0.0.1:8100 指向本地 GPU 生成服务（否则纯程序化）。 */
+      if (params.get('ext') !== '0' && window.PW.createExtender) {
+        try {
+          const ext = window.PW.createExtender({
+            gl: renderer.gl, world,
+            seed: hashString(def.id + '|extend'),
+            server: params.get('api') || '',
+            radius: params.has('extr') ? Math.max(2, Math.min(8, parseInt(params.get('extr'), 10) || 5)) : 5
+          });
+          world.extender = ext;
+          ext.update(player.state.x, player.state.z);
+        } catch (e) {
+          console.warn('地貌延伸初始化失败：', e && e.message);
+        }
+      }
+
+      /* 单体真网格升级（可选）：?obj3d=1 且 ?api= 指向本地 GPU 服务时，
+         把近景显著单体的裁片交给 InstantMesh/TripoSR，替换账单牌。 */
+      if (params.get('obj3d') === '1' && params.get('api') && window.PW.object3d) {
+        window.PW.object3d.upgrade(world, img, {
+          server: params.get('api'), gl: renderer.gl, max: 4
+        }).then((r) => {
+          if (r && r.upgraded) console.log('单体真网格已替换 ' + r.upgraded + ' 个');
+        }).catch((e) => console.warn('单体补全跳过：', e && e.message));
+      }
 
       // 入景前先做一次曝光收敛：避免进入后画面亮度跳变
       try {
-        const aspect0 = Math.max(0.4, canvas.clientWidth / Math.max(1, canvas.clientHeight));
-        const hf = (66 * Math.PI / 180) * player.state.fovMul;
-        const vf = clamp(2 * Math.atan(Math.tan(hf / 2) / aspect0), 0.55, 1.42);
+        const vf = fovRad();
         let lastMeas = -1;
         for (let i = 0; i < 10; i++) {
           const m = renderer.render(world, {
@@ -311,6 +359,10 @@
         document.body.dataset.mode = world.mode;
         document.body.dataset.expo = (world.exposure || 0).toFixed(3);
         if (objInfo) document.body.dataset.objects = objInfo.labels.slice(0, 8).join(',');
+        if (sem) {
+          document.body.dataset.sem = sem.source;
+          document.body.dataset.semstats = JSON.stringify(sem.stats || {});
+        }
         if (world.reliefMeta) document.body.dataset.dbg = JSON.stringify(world.reliefMeta);
         document.body.dataset.horizon = (world.analysis.horizon || 0).toFixed(3);
         document.body.dataset.fog = world.fogColor.map((v) => v.toFixed(2)).join(',');
@@ -615,11 +667,25 @@
   }
 
   /* ---------------- 主循环 ---------------- */
+
+  /* 相机垂直 FOV（v1.16.1）：
+     重建是按「照片自己的视场」把像素反投影回三维的。如果渲染相机比这个视场更宽，
+     照片几何就只占屏幕中间一块，四周全是天穹的灰色——这就是用户反馈的
+     「一张明信片浮在空中」。这里让相机视场与重建视场对齐（取覆盖而非留边，
+     宁可裁掉照片边缘几个百分点，也不要露出灰边）。 */
   function fovRad() {
     const aspect = Math.max(0.4, canvas.clientWidth / Math.max(1, canvas.clientHeight));
-    const hfov = (66 * Math.PI / 180) * (player ? player.state.fovMul : 1);
-    const v = 2 * Math.atan(Math.tan(hfov / 2) / aspect);
-    return clamp(v, 0.55, 1.42);
+    const mul = player ? player.state.fovMul : 1;
+    const rm = world && world.reliefMeta;
+    if (rm && rm.vfov > 0.1 && world.analysis) {
+      const tanV = Math.tan(rm.vfov / 2);
+      const pa = world.analysis.W / Math.max(1, world.analysis.H);
+      // 竖直与水平都要盖住：取两者中更大的张角
+      const need = Math.max(tanV, tanV * pa / aspect);
+      return clamp(2 * Math.atan(need) * mul, 0.55, 1.42);
+    }
+    const hfov = (66 * Math.PI / 180) * mul;
+    return clamp(2 * Math.atan(Math.tan(hfov / 2) / aspect), 0.55, 1.42);
   }
 
   function updateParticles(dt) {
@@ -679,6 +745,7 @@
     time += dt;
 
     player.update(dt);
+    if (world.extender) world.extender.update(player.state.x, player.state.z, now);
     updateParticles(dt);
     fadeFrames++;
     if (instant) {
@@ -821,7 +888,24 @@
     instant = q.get('instant') === '1';
     const sx = parseFloat(q.get('x') || '0'), sz = parseFloat(q.get('z') || '0');
     const syaw = parseFloat(q.get('yaw') || '0');
-    window.__spawn = { x: isNaN(sx) ? 0 : sx, z: isNaN(sz) ? 0 : sz, yaw: isNaN(syaw) ? 0 : syaw };
+    const spitch = parseFloat(q.get('pitch') || '0');
+    window.__spawn = {
+      x: isNaN(sx) ? 0 : sx, z: isNaN(sz) ? 0 : sz,
+      yaw: isNaN(syaw) ? 0 : syaw, pitch: isNaN(spitch) ? 0 : spitch
+    };
+    // 侧拍 / 轨道截图用：直接设定相机（tools/orbit_shot.mjs 调用）
+    /* 质检用相机：x, z, yaw, pitch，可选 eyeY 覆盖眼高（看鸟瞰/侧拍用）。
+       tools/orbit_shot.mjs 与 tools/probe.mjs 都靠它把相机摆到任意角度。 */
+    window.__setCam = (x, z, yaw, pitch, eyeY) => {
+      if (!player || !world) return false;
+      player.state.x = x; player.state.z = z;
+      player.state.yaw = yaw || 0; player.state.pitch = pitch || 0;
+      const groundY = world.heightAt(x, z);
+      const useY = (typeof eyeY === 'number' && isFinite(eyeY)) ? eyeY : null;
+      player.state.eyeOverride = useY;
+      player.state.y = groundY + (useY === null ? (world.eyeHeight || 1.7) : useY);
+      return true;
+    };
     if (instant) document.body.classList.add('instant');
     const glbUrl = q.get('glb');
     if (glbUrl) { setTimeout(() => enterAsset(glbUrl), 100); }
@@ -830,7 +914,13 @@
       const def = WORLDS.find((w) => w.id === wid);
       if (def) setTimeout(() => enterWorld(def), 120);
     }
-    window.__pw = { enterWorld, WORLDS, get world() { return world; }, get renderer() { return renderer; } };
+    window.__pw = {
+      enterWorld, WORLDS,
+      get world() { return world; },
+      get renderer() { return renderer; },
+      get player() { return player; },
+      get extender() { return world && world.extender; }
+    };
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

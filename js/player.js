@@ -181,12 +181,14 @@
       state.bob = lerp(state.bob, bobTarget, 1 - Math.exp(-12 * dt));
 
       const groundY = world.heightAt(state.x, state.z);
-      state.y = groundY + EYE + state.bob;
+      // eyeOverride 供质检相机使用（鸟瞰/侧拍）：null 时就是正常眼高
+      state.y = groundY + (state.eyeOverride === null || state.eyeOverride === undefined ? EYE : state.eyeOverride) + state.bob;
 
       state.speed = speed;
     }
 
     function reset(x, z, yaw) {
+      state.eyeOverride = null;
       state.x = x || 0; state.z = z || 0;
       state.yaw = yaw || 0;
       state.pitch = -0.02;
