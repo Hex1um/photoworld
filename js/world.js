@@ -2122,9 +2122,15 @@
                注意这里不能用 `world.*`：buildCartesianWorld 里还没有 world 对象，
                第一版写了 world.baseLin 直接 ReferenceError → 整个世界建不出来。 */
             const gc = groundColorAt(x, z);
-            gcol[id * 4] = clamp(gc[0] / Math.max(1e-4, baseLinG[0]), 0.25, 6);
-            gcol[id * 4 + 1] = clamp(gc[1] / Math.max(1e-4, baseLinG[1]), 0.25, 6);
-            gcol[id * 4 + 2] = clamp(gc[2] / Math.max(1e-4, baseLinG[2]), 0.25, 6);
+            /* v1.23.1：低频宏观色差。草地/雪原/沙地这类"平铺一片"的照片，
+               地面网格原本是一块死色（复测里 void 0.29 的那张就是），
+               加两个不同尺度的低频起伏（±14%），大面积平地就有明暗结构了。 */
+            const m1 = Math.sin(x * 0.031 + z * 0.017) * Math.cos(z * 0.023 - x * 0.011);
+            const m2 = Math.sin(x * 0.11 - z * 0.09) * 0.5 + Math.cos(x * 0.07 + z * 0.13) * 0.5;
+            const macro = 1 + m1 * 0.10 + m2 * 0.04;
+            gcol[id * 4] = clamp(gc[0] / Math.max(1e-4, baseLinG[0]) * (1 + m1 * 0.04), 0.25, 6);
+            gcol[id * 4 + 1] = clamp(gc[1] / Math.max(1e-4, baseLinG[1]) * macro, 0.25, 6);
+            gcol[id * 4 + 2] = clamp(gc[2] / Math.max(1e-4, baseLinG[2]) * (1 - m1 * 0.04), 0.25, 6);
           }
           gcol[id * 4 + 3] = 1;
           gedge[id * 2 + 1] = smoothstep(8, 34, Math.hypot(x, z)) * 0.92;
