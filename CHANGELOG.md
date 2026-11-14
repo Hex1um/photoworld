@@ -108,7 +108,16 @@
 - **没做**：`flex_attention` 块稀疏（可跳过 41.7% 被掩码的注意力对，约 −14% MACs）。
   它替换 SDPA 的 math 路径，必须先在同一份分片上实测数值等价，本版没有真实分片可验。
 
-### 10) 工具链小修
+### 10) 超参读取：`lr: 1e-3` 不再在 AdamW 里炸
+
+PyYAML 1.1 只认带小数点的指数（`1.0e-3` / `1.5e-4`），写成 `1e-3` 会被读成**字符串**，
+然后在 `AdamW` 里抛 `TypeError: '<=' not supported between 'float' and 'str'`——
+报错位置离原因隔了半个训练脚本。`trainer.coerce_train_cfg()` 统一转一次数值，
+报错直接落在配置上。本机实测：`python -m worldmodel.train --config /tmp/emo.yaml`
+（latent 分片 24 样本、6 步、`ss_mode=noise_proxy` + `val_max_samples=4` + `ema_every=2`）
+跑通，日志 `[val] 固定子集 4 / 5 条`、`vae 0.00s`（无 VAE 编码）、loss 2.09 → 1.93。
+
+### 11) 工具链小修
 
 - `tools/normalize.py`：清单落后于磁盘时以磁盘为准补齐（采集中断不再导致整条评测链缺数据）。
 - `tools/eval.mjs`：目录里找不到 `manifest.json` 时回退读 `index.json`（归一化产物）。

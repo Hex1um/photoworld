@@ -101,7 +101,25 @@ def resolve_shard_dir(cfg: dict) -> str:
     return base
 
 
+def coerce_train_cfg(cfg: dict) -> dict:
+    """超参强制转数值：PyYAML 1.1 只认「带小数点的指数」，`lr: 1e-3` 会被读成字符串，
+    然后在 AdamW 里抛 `TypeError: '<=' not supported between float and str`——
+    错误位置离原因隔了半个训练脚本。这里统一转一次，报错就报在配置上。
+    """
+    T = cfg.get("train", {})
+    for k in ("lr", "clip", "ema", "drop_cond", "hist_noise_prob", "hist_noise_sigma",
+              "scheduled_sampling"):
+        if T.get(k) is not None:
+            T[k] = float(T[k])
+    for k in ("steps", "batch_size", "grad_accum", "warmup", "log_every", "val_every",
+              "val_max_samples", "ema_every"):
+        if T.get(k) is not None:
+            T[k] = int(T[k])
+    return cfg
+
+
 def train(cfg: dict) -> None:
+    cfg = coerce_train_cfg(cfg)
     enable_fast_math()
     seed = cfg.get("seed", 0)
     torch.manual_seed(seed)
