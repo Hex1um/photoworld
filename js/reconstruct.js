@@ -90,7 +90,10 @@
           if (ok >= 3) { found = y; break; }
         }
       }
-      rawTop[i] = found < 0 ? 1.0 : found / H;
+      // 找不到天际线（暗云/海面/雪地低对比度）时绝不能返回 1.0——
+      // 那会让整列在 alpha 阶段被裁掉，画面只剩零星像素（风暴海岸事故的根因）。
+      // 沿用前一列并封顶 0.62，保证至少保留下半张照片。
+      rawTop[i] = found < 0 ? (i > 0 ? Math.min(rawTop[i - 1], 0.62) : 0.45) : found / H;
     }
 
     /* --- 3. 环形中值 + 多轮均值平滑 --- */
@@ -218,7 +221,9 @@
 
     const isGreen = fgGreen > 0.028;
     const isCold = cold > 0.02 && meanL < 0.55;
-    const isSnow = meanL > 0.55 && sat < 0.16 && cold > 0.01;
+    // 雪地判定收严：阴天海景（低饱和 + 偏冷 + 草坡）曾被误判成雪，
+    // 结果给「风暴海岸」下了 1100 个雪粒、整体压成蓝调。
+    const isSnow = !isGreen && meanL > 0.58 && sat < 0.12 && cold > 0.03;
     const exposure = clamp(0.35 / Math.max(meanL, 0.12), 0.88, 1.4);
 
     /* --- 9. 天际线 -> 高度 --- */
@@ -290,7 +295,7 @@
       skyTop, skyHorizon,
       fog, ground, palette,
       horizon,
-      top, heights, colTint,
+      top, topRaw: rawTop, heights, colTint,
       sunAz, sunElev, sunLum, sunU,
       isGreen: isGreen || isSnow, isCold, isSnow,
       brightness: meanL,

@@ -153,39 +153,47 @@
     lastProgress = 0;
     el('loaderDepthLabel').textContent = '';
     el('loaderDepth').style.opacity = '0';
-    setProgress(4, '读取照片…');
+    setProgress(3, '读取照片…');
 
     try {
       const img = await loadImage(def.src);
-      setProgress(18, '分析天际线与光位…');
+      setProgress(8, '照片解码完成');
+      await sleep(80);
+      setProgress(12, '分析天空 / 地平线…');
       await sleep(60);
-
       const analysis = window.PW.reconstruct.analyze(img, def.name);
-      setProgress(30, '初始化重建器…');
-      await sleep(30);
+      setProgress(20, '提取天际线与太阳方位');
+      await sleep(60);
+      setProgress(24, '采样雾色 / 地面调色板');
+      await sleep(50);
+      setProgress(28, '初始化重建器…');
+      await sleep(40);
 
       ensureRenderer();
 
       // 用预训练深度模型把照片还原成三维表面（失败则回退到分层方案）
       let depthMap = null;
       try {
-        setProgress(34, '加载深度模型（27MB，仅首次）…');
+        setProgress(32, '加载深度模型（27MB，仅首次）…');
         await window.PW.depth.init((p) => {
-          setProgress(34 + p * 30, '下载深度模型 ' + Math.round(p * 100) + '%（27MB）');
+          setProgress(32 + p * 32, '下载深度模型 ' + Math.round(p * 100) + '%（27MB）');
         });
-        setProgress(66, '推理：估计每个像素的距离…');
+        setProgress(65, '模型就绪，准备推理');
+        await sleep(60);
+        setProgress(67, '推理：估计每个像素的距离…');
         await sleep(30);
         depthMap = await Promise.race([
           window.PW.depth.estimate(img),
           new Promise((_, rej) => setTimeout(() => rej(new Error('深度估计超时')), 60000))
         ]);
+        setProgress(72, '深度图后处理（分位归一化 / 极性）');
         drawDepthPreview(depthMap);
       } catch (e) {
         console.warn('深度模型不可用，回退到天际线方案：', e && e.message);
       }
 
-      setProgress(76, depthMap ? '重建三维表面（射线网格）…' : '构建分层地形…');
-      await sleep(30);
+      setProgress(75, depthMap ? '反投影：像素 → 世界坐标…' : '构建分层地形…');
+      await sleep(40);
       const params = new URLSearchParams(location.search);
       const w = window.PW.world.build(renderer.gl, analysis, {
         seed: hashString(def.id + '|' + def.name),
@@ -198,7 +206,14 @@
         cartesian: params.get('cart') !== '0', // ?cart=0 回到旧的视锥/球面参数化（A/B）
         ldi: params.get('ldi') === '1',      // ?ldi=1 实验：断崖跳面 + 背景补洞（A/B 未达标，默认关）
         proxy: params.get('proxy') === '1', // ?proxy=1 实验：360° 低频世界幕（默认关）
-        vg: params.has('vg') ? parseFloat(params.get('vg')) : undefined
+        vg: params.has('vg') ? parseFloat(params.get('vg')) : undefined,
+        yGain: params.has('yg') ? parseFloat(params.get('yg')) : undefined,
+        // 真实分阶段回调：中值 / 反投影 / 法线 / 索引 / 高度场各推进一格
+        onProgress: (p) => setProgress(75 + p * 12,
+          p < 0.35 ? '深度去噪：5×5 中值…'
+            : p < 0.60 ? '反投影 + 地面单调化…'
+              : p < 0.85 ? '法线 / 光照烘焙…'
+                : '索引裁剪 + 行走高度场…')
       });
       setProgress(88, '铺设地表与植被…');
       await sleep(50);

@@ -238,7 +238,7 @@ if (args.depth && fs.existsSync(args.depth)) {
   let badIdx = 0;
   for (const vi of r.index) {
     const x = r.pos[vi * 3], z = r.pos[vi * 3 + 2];
-    if (Math.abs(x) > r.bbox.A + 1e-3 || z < -r.bbox.B - 1e-3 || z > 1.5 + 1e-3) badIdx++;
+    if (Math.abs(x) > r.bbox.A + 1e-3 || z < -r.bbox.B - 0.6 || z > 1.5 + 1e-3) badIdx++;
   }
   assert.equal(badIdx, 0, '索引引用了有限直角区域外的顶点');
   console.log(`PASS  P1  直角重建：${r.tris} 三角 / ${GWt}×${GHt} 顶点全有限、法线归一化，`

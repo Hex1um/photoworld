@@ -221,6 +221,19 @@
         gl.enable(gl.CULL_FACE);
       }
 
+      // 侧面 / 背面：低分辨率镜像副本，±90° 与 180° 各一份（v1.14）
+      if (world.meshes.reliefSurround && !skip('shell') && !skip('surround')) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.depthMask(true);
+        gl.disable(gl.CULL_FACE);
+        drawMesh(world, world.meshes.reliefSurround, {
+          tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.65, mipBias: 1.4
+        });
+        gl.disable(gl.BLEND);
+        gl.enable(gl.CULL_FACE);
+      }
+
       // 背景补洞层：断崖跳面留下的洞由它填（低频模糊照片 = 零依赖 inpainting 替身），
       // 先于前景渲染，depth test 保证只在洞里露出来。
       if (world.meshes.reliefBg && !skip('shell')) {
@@ -295,7 +308,13 @@
       gl.enable(gl.CULL_FACE);
 
       // 地面
-      if (world.meshes.ground && !skip('ground')) drawMesh(world, world.meshes.ground, { tex: world.tex.ground, mode: world.mode === 'depth' ? 4 : 6, fog: 0.35, mipBias: -0.1 });
+      if (world.meshes.ground && !skip('ground')) {
+        // 有限扇环的边界：顶点 alpha 在区域边缘渐隐，融进雾里
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        drawMesh(world, world.meshes.ground, { tex: world.tex.ground, mode: world.mode === 'depth' ? 4 : 6, fog: 0.35, mipBias: -0.1 });
+        gl.disable(gl.BLEND);
+      }
 
       // 岩石
       gl.disable(gl.CULL_FACE);

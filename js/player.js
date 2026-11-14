@@ -6,7 +6,9 @@
 
   function createPlayer(canvas, world) {
     const EYE = (world && world.eyeHeight) || 1.68;
-    const MAX_R = (world && world.walkRadius) || 116;
+    // walkRadius === 0 表示不限制（深度重建模式）；undefined 才用默认值
+    const MAX_R = (world && world.walkRadius === 0) ? 0
+      : ((world && world.walkRadius) || 116);
 
     const state = {
       x: 0, z: 0, y: EYE,
@@ -165,7 +167,9 @@
 
       // 软边界
       const r = Math.hypot(state.x, state.z);
-      if (r > MAX_R) {
+      // v1.14：不再用圆形半径把玩家锁住（用户要求移动不受限制）。
+      // 世界边界交给几何与雾；heightField 在区域外会 clamp 到边缘高度。
+      if (MAX_R > 0 && r > MAX_R) {
         const k = MAX_R / r;
         state.x *= k; state.z *= k;
         state.vx *= 0.4; state.vz *= 0.4;
