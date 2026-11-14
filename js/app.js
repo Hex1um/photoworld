@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '1.22.0';
+  const VERSION = '1.23.0';
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -291,6 +291,8 @@
         skyFill: params.get('skyfill') !== '0',
         // 竖直夸张（只作用于地平线以上）：?ygain=2 做 A/B
         yGain: params.has('ygain') ? Math.max(0.6, Math.min(4, parseFloat(params.get('ygain')) || 1.35)) : undefined,
+        // 照片投影 UV 地面层（默认关，?groundphoto=1 打开；掠射角会拉丝）
+        groundPhoto: params.get('groundphoto') === '1',
         // 地面拓扑：默认世界坐标方格网；?gfan=1 回到旧的极坐标扇形地面（A/B）
         groundGrid: params.get('gfan') !== '1',
         // 地面渐隐区间可调（A/B 用）：?gfade=起始m,结束m,强度

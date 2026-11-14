@@ -168,7 +168,9 @@ void main() {
 
   // 太阳光晕
   float sd = max(dot(dir, uSunDir), 0.0);
-  col += uSunColor * (pow(sd, 8.0) * 0.25 + pow(sd, 220.0) * 2.0) * uSunPower;
+  /* v1.23：外层光晕收窄（8→20 次幂）并降到 0.16。
+     旧的 pow(sd,8)*0.25 是一圈直径约画面 45% 的大白雾，晴天照片也发灰。 */
+  col += uSunColor * (pow(sd, 20.0) * 0.16 + pow(sd, 220.0) * 2.0) * uSunPower;
   // 地平线附近轻微大气增亮
   col += uHorizon * 0.08 * exp(-abs(h) * 18.0);
   fragColor = vec4(col, 1.0);

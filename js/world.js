@@ -552,17 +552,35 @@
     cv.width = cv.height = S;
     const ctx = cv.getContext('2d');
     const src = analysis.canvas;
-    const sy = Math.floor(analysis.H * 0.66);
-    const sx = Math.floor(analysis.W * 0.18);
-    const sw = Math.floor(analysis.W * 0.64);
-    ctx.drawImage(src, sx, sy, sw, analysis.H - sy, 0, 0, S, S);
-
-    // 轻度模糊：抹掉过度拉伸的条纹，但保留一点细节
-    const tmp = document.createElement('canvas');
-    tmp.width = 64; tmp.height = 64;
-    tmp.getContext('2d').drawImage(cv, 0, 0, 64, 64);
-    ctx.globalAlpha = 0.42;
-    ctx.drawImage(tmp, 0, 0, S, S);
+    /* v1.23：不再「把下半张照片压成 512² + 64² 模糊」——
+       那样得到的是一块没有方向、也没有细节的平均色（前景看起来就是色板）。
+       改成：在地面带里**按对比度挑一块**（最"有东西"的那块：
+       砂砾/草/石滩而不是平滑沙面），**按原始分辨率裁 1:1**，
+       再轻微叠加自身做去噪。贴图本身是 mirror 平铺的，
+       所以小尺寸也不会露出接缝。 */
+    const bandTop = Math.floor(analysis.H * 0.62);
+    const bandH = analysis.H - bandTop;
+    const side = Math.max(96, Math.min(bandH, Math.floor(analysis.W * 0.42)));
+    let bestX = Math.floor(analysis.W * 0.18), bestScore = -1;
+    const probe = document.createElement('canvas');
+    probe.width = probe.height = 64;
+    const pctx = probe.getContext('2d');
+    for (let k = 0; k < 7; k++) {
+      const px = Math.floor((k / 6) * (analysis.W - side));
+      pctx.drawImage(src, px, bandTop, side, bandH, 0, 0, 64, 64);
+      const pd = pctx.getImageData(0, 0, 64, 64).data;
+      let score = 0;
+      for (let y = 1; y < 64; y++) {
+        for (let x = 1; x < 64; x++) {
+          const i = (y * 64 + x) * 4, iL = (y * 64 + x - 1) * 4, iU = ((y - 1) * 64 + x) * 4;
+          score += Math.abs(pd[i] - pd[iL]) + Math.abs(pd[i] - pd[iU]);
+        }
+      }
+      if (score > bestScore) { bestScore = score; bestX = px; }
+    }
+    ctx.drawImage(src, bestX, bandTop, side, bandH, 0, 0, S, S);
+    ctx.globalAlpha = 0.30;
+    ctx.drawImage(cv, 2, 2, S - 4, S - 4, 0, 0, S, S);   // 轻微自叠加：压一点噪点，保结构
     ctx.globalAlpha = 1;
 
     // 细节噪点 + 向地面基色靠拢
@@ -1065,6 +1083,7 @@
     /* 近场平面半径（米）：这个距离内一律当平地（用户要求"前面区域就是地面，
        地貌生成起点靠后"）。?near= 可调，0 = 关闭。 */
     const NEAR_PLANE = (opt.nearPlane === undefined) ? 8 : Math.max(0, opt.nearPlane);
+    let skyFillHits = 0;     // 逐列轮廓兜底实际补了多少个顶点（调试用）
 
     /* 语义分组（js/semantics.js）：几何策略按「组」而不是按具体类别走。
        没有语义图时全部退化为 UNKNOWN，行为与 v1.15 完全一致。 */
@@ -1463,7 +1482,7 @@
             const ci2 = Math.max(0, Math.min(tcol.length - 1,
               Math.round((i / (GW - 1)) * (tcol.length - 1))));
             const sk = tcol[ci2];
-            if (sk > 0.001 && v > sk + 0.012) aSky = 1;
+            if (sk > 0.001 && v > sk + 0.012) { if (aSky < 1) skyFillHits++; aSky = 1; }
           }
         }
         /* v1.21.2：**天空只可能出现在地形轮廓之上**。轮廓线以下（v 更大）的像素
@@ -1530,6 +1549,9 @@
         const aV = smoothstep(0, 0.015, v) * (1 - smoothstep(0.985, 1, v));
         // 室外按深度裁掉天空（否则照片天空会被压到 100m 处，和地面分成两块）；
         // 室内保留全部像素（室内没有天空，裁切会把墙咬出缺口）。
+        /* v1.23：在**写 alpha 的最后一刻**做逐列轮廓兜底。
+           前面那条 skyFill 会被后面的语义清零覆盖（我踩过这个坑），
+           这里直接以写出去的值为准：轮廓线以下一律不透明。 */
         col[k * 4 + 3] = aSky * aU * aV;
         col[k * 4] = 1; col[k * 4 + 1] = 1; col[k * 4 + 2] = 1;
         // 有限区域的边界就是照片投影的梯形，alpha 硬边比"融色灰带"干净；
@@ -2056,6 +2078,7 @@
       Math.max(1e-4, Math.pow(clamp(analysis.ground[2], 0, 1), 2.2))
     ];
     let groundGrid = null;
+    let groundGridPhoto = null;
     if (opt.groundGrid !== false) {
       const GS = 1.25;                        // 格子边长（米）
       const NX = Math.ceil((2 * A) / GS) + 1;
@@ -2117,6 +2140,45 @@
       groundGrid = {
         pos: gpos, normal: gnrm, uv: guv, color: gcol, edge: gedge, index: gidx
       };
+
+      /* v1.23 双 UV：再建一份**同几何、照片 UV** 的地面网格。
+         两张图叠着画：这张给"照片里的地面细节"（视锥内 alpha=1），
+         上面那张平铺贴图负责视锥外（alpha 反过来）。
+         之前只用平铺贴图，前景就成了一张没有细节的色板 —— 用户评价"根本不好"。 */
+      const puv = new Float32Array(NX * NZ * 2);
+      const pcol = new Float32Array(NX * NZ * 4);
+      for (let gj = 0; gj < NZ; gj++) {
+        for (let gi = 0; gi < NX; gi++) {
+          const id = gj * NX + gi;
+          const x = -A + gi * GS;
+          const z = -gj * GS;
+          const uvp = uvOfGround(x, z);
+          puv[id * 2] = uvp[0];
+          puv[id * 2 + 1] = uvp[1];
+          /* 视锥内权重：u/v 都在 [0,1] 且离开边缘 >0.02 才算"照片看过的地方"，
+             边缘 6% 做渐变，避免出现一条硬边。 */
+          const edgeU = Math.min(uvp[0], 1 - uvp[0]);
+          const edgeV = Math.min(uvp[1], 1 - uvp[1]);
+          /* 权重 = 视锥内 × **距离带**。照片投影 UV 在贴地掠射角下必然拉丝
+             （这就是最早那版"满屏放射条纹"的来源），所以脚下 5m 内交给平铺贴图，
+             5~45m 的中景交给照片（这一段的 texel:quad 比最接近 1，细节最真实），
+             45m 之外也逐渐淡出回到平铺。 */
+          const dist = Math.hypot(x, z);
+          const w = smoothstep(0.0, 0.06, Math.min(edgeU, edgeV))
+            * (1 - smoothstep(0.985, 1.0, uvp[1]))
+            * smoothstep(3.5, 9, dist)
+            * (1 - smoothstep(45, 95, dist))
+            * (opt.groundPhoto ? 1 : 0);   /* 默认关：投影 UV 在掠射角必拉丝 */
+
+          pcol[id * 4] = 1; pcol[id * 4 + 1] = 1; pcol[id * 4 + 2] = 1;
+          pcol[id * 4 + 3] = clamp(w, 0, 1);
+        }
+      }
+      /* index 必须用副本：createMesh 会对索引做类型转换/上传，
+         两张网格共用同一个数组时第二次会拿到已被处理过的数据，世界建到一半就卡住。 */
+      groundGridPhoto = {
+        pos: gpos, normal: gnrm, uv: puv, color: pcol, edge: gedge, index: gidx.slice()
+      };
     }
 
     /* 5) 行走高度场：把反投影顶点烘进 1m 的 XZ 网格（取格内最高点），
@@ -2167,7 +2229,7 @@
     const quadTotal = Math.max(1, (GW - 1) * (GH - 1));
     return {
       pos, normal: nrmS, uv, color: col, edge, index: idx,
-      vfov, tris: idx.length / 3, skipped, groundGrid,
+      vfov, tris: idx.length / 3, skipped, groundGrid, groundGridPhoto,
       calibration: cal ? { p: cal.p, zNear: cal.zNear, rNear: cal.rNear, rFar: cal.rFar } : null,
       heightField,
       bbox: { A, B },
@@ -2188,7 +2250,7 @@
         kept: idx.length / 6, total: quadTotal,
         keepRate: (idx.length / 6) / quadTotal,
         culledAlpha, culledArea, skipped, skippedCard, skippedObjEdge, skippedSteep, skippedWall,
-        skippedGround, skippedTorn,
+        skippedGround, skippedTorn, skyFillHits, skyFillOn: opt.skyFill === true,
         objectCards: instInfo.instances.length
       },
       /* 质检用：把顶点位置暴露出来（?dbgpos=1），tools/probe.mjs 可以据此
@@ -2423,6 +2485,7 @@
               groundFade: opts && opts.groundFade,
               groundGrid: opts && opts.groundGrid,
               gfade: opts && opts.gfade,
+              groundPhoto: opts && opts.groundPhoto,
               fgMask: opts && opts.fgMask,
               sem: opts && opts.sem,
               dbgPos: opts && opts.dbgPos,
@@ -2496,6 +2559,12 @@
       relief: relief ? PWGL.createMesh(gl, relief) : null,
       // 世界坐标地面方格网（替代极坐标扇形的地面部分，消掉放射状拉丝）
       groundGrid: (relief && relief.groundGrid) ? PWGL.createMesh(gl, relief.groundGrid) : null,
+      // 照片 UV 版地面（叠在平铺版之上，视锥内有细节）
+      groundGridPhoto: (() => {
+        try {
+          return (relief && relief.groundGridPhoto) ? PWGL.createMesh(gl, relief.groundGridPhoto) : null;
+        } catch (e) { return null; }     // 双 UV 失败不影响主流程
+      })(),
       // 照片底行向下的连续裙边（消掉照片底边的几何断口）
       skinSkirt: (relief && relief.skirt) ? PWGL.createMesh(gl, relief.skirt) : null,
       // 单体十字账单牌（v1.16）：替代被拉成鳍的对象四边形
@@ -2535,7 +2604,13 @@
       Math.sin(analysis.sunElev),
       Math.cos(analysis.sunAz) * Math.cos(analysis.sunElev)
     ];
-    const sunPower = clamp((analysis.sunLum - 0.35) / 0.55, 0.12, 1.0);
+    /* v1.23：夜景不能当白天渲染。
+       判据用整图平均亮度：夜景（meanLum < 0.28）里那个"最亮的地方"是月亮/路灯，
+       不是太阳 —— 旧的 sunPower 只看局部最亮，于是夜景也会有一轮巨大的白日光晕。
+       夜景：光晕压到 12%，太阳色降饱和、环境光降到 35%，把暗部还给夜色。 */
+    const isNight = (analysis.meanLum !== undefined ? analysis.meanLum : 0.5) < 0.28;
+    const sunPower = clamp((analysis.sunLum - 0.35) / 0.55, 0.12, 1.0) * (isNight ? 0.12 : 1);
+    const nightDim = isNight ? 0.35 : 1;
     const warm = clamp(0.45 + (analysis.skyHorizon[0] - analysis.skyHorizon[2]) * 1.6, 0.3, 1.0);
 
     const fogS = analysis.fog;
@@ -2554,7 +2629,7 @@
     /* 曝光反解：让重建画面的平均亮度对齐原片 */
     const aces = (x) => Math.min(1, Math.max(0, (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)));
     const ambientL = lin3(ambient);
-    const sunL = lin3(sunColor).map((v) => v * 1.30);
+    const sunL = lin3(sunColor).map((v) => v * 1.30 * nightDim);
     const fogL = lin3(fogS);
     const skyTopL = lin3(analysis.skyTop);
     const skyHorL = lin3(analysis.skyHorizon);

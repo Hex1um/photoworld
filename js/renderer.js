@@ -284,6 +284,14 @@
         drawMesh(world, world.meshes.groundGrid, {
           tex: world.tex.ground, mode: 4, fog: 0.26, mipBias: 0.2
         });
+        /* 照片 UV 版地面（v1.23）：同一张几何，UV 换成"该点反投影到照片的坐标"，
+           顶点 alpha = 视锥内权重。叠在平铺地面之上 —— 视锥内出现照片自己的
+           草/砂/水波细节，视锥外仍然用平铺贴图（不拉丝）。 */
+        if (world.meshes.groundGridPhoto) {
+          drawMesh(world, world.meshes.groundGridPhoto, {
+            tex: world.tex.photo, mode: 4, fog: 0.26, mipBias: 0, backdrop: [0, 0]
+          });
+        }
         gl.disable(gl.BLEND);
         gl.enable(gl.CULL_FACE);
       }
