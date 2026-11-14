@@ -289,8 +289,39 @@ def apply_calibration(depth_rel: np.ndarray, cal: dict, far: float,
     return z, out
 
 
+def build_walkable(pos: np.ndarray, span: float = 60.0, gh: int = 64,
+                   gw: int = 64) -> dict:
+    """T9-7（v1.22）：把表面顶点烘成可走高度网格。
+
+    每条规则都是**实测坑**：
+      * 每格取**中位**而不是"先到先得" —— 同一格里先落进来的可能是一片树叶/一根
+        电线，整格高度就被它决定；
+      * 空格写 `None`（JSON null），**不要**用全图中位填 —— 那等于凭空造出一片
+        平地，前端会在没有地形的地方"站得住"。
+    """
+    pos = np.asarray(pos)
+    grid: list[list[float | None]] = [[None] * gw for _ in range(gh)]
+    fwd = -pos[:, 2]                                     # 朝前距离（z 为负）
+    ok = ((pos[:, 0] > -span * 0.5) & (pos[:, 0] < span * 0.5)
+          & (fwd > 0.2) & (fwd < span) & np.isfinite(pos[:, 1]))
+    if not ok.any():
+        return {"span": span, "grid": gh, "gw": gw, "height": grid, "empty_cells": gh * gw}
+    gx = (pos[ok, 0] + span * 0.5) / span * (gw - 1)
+    gz = fwd[ok] / span * (gh - 1)
+    ix = np.clip(gx.astype(np.int32), 0, gw - 1)
+    iz = np.clip(gz.astype(np.int32), 0, gh - 1)
+    cells: dict[tuple[int, int], list[float]] = {}
+    for a, b, y in zip(ix, iz, pos[ok, 1]):
+        cells.setdefault((int(b), int(a)), []).append(float(y))
+    for (b, a), ys in cells.items():
+        grid[b][a] = round(float(np.median(ys)), 3)
+    empty = sum(1 for row in grid for v in row if v is None)
+    return {"span": span, "grid": gh, "gw": gw, "height": grid, "empty_cells": empty}
+
+
 def extend_fov(img: np.ndarray, depth_m: np.ndarray, cam: Camera,
-               target_hfov: float = math.radians(120.0)) -> tuple[np.ndarray, np.ndarray, Camera]:
+               target_hfov: float = math.radians(120.0),
+               far: float = 1800.0) -> tuple[np.ndarray, np.ndarray, Camera]:
     """把视场横向延展到 target_hfov（按边界深度连续延伸，不镜像）。
 
     做法：左右各补若干列；每列的深度取边界列并沿角度做小斜率外推，
@@ -318,8 +349,10 @@ def extend_fov(img: np.ndarray, depth_m: np.ndarray, cam: Camera,
 
     # 沿角度做少量外推：越靠外越远一点（地形连续感），并轻微加雾
     ramp = np.linspace(0.0, 1.0, n_side, dtype=np.float32)[None, :]   # (1, n_side)
-    depth_ext_l = left_d * (1.0 + 0.25 * ramp)
-    depth_ext_r = right_d * (1.0 + 0.25 * ramp)
+    # T9-5（v1.22）：外推的深度必须**夹到 far**。边界深度本身可能已经贴着 far，
+    #   再乘 1.25 就会超过标定上限，落到 GLB 里是凸出世界盒子的远片。
+    depth_ext_l = np.clip(left_d * (1.0 + 0.25 * ramp), 0.5, float(far))
+    depth_ext_r = np.clip(right_d * (1.0 + 0.25 * ramp), 0.5, float(far))
     fog = np.array([0.72, 0.76, 0.80], dtype=np.float32)
     col_l = left_c * (1 - FOG_FADE * ramp[..., None]) + fog * (FOG_FADE * ramp[..., None])
     col_r = right_c * (1 - FOG_FADE * ramp[..., None]) + fog * (FOG_FADE * ramp[..., None])
@@ -382,9 +415,13 @@ def build_mesh(depth_m: np.ndarray, cam: Camera, edge_ratio: float = 2.4,
     # --- 断崖判定：结构张量（见《传统视觉与深度学习视觉的数学基础》ch.07）---
     # 相对深度梯度比"绝对比值"更稳：|∇log z| 与尺度无关，细密纹理不会被误杀。
     lz = np.log(np.maximum(z, 1e-3))
+    # T9-6（v1.22）：z 是按 `step` 下采样后的网格，相邻格相差 step 个源像素，
+    #   所以逐像素梯度要再除以 step。旧实现缺这一步：step=2 时 edge_str 被放大 2×，
+    #   `edge_tau=0.055` 等于悄悄变成 0.11，密集纹理的地形会被大面积误判成断崖。
     gx = np.zeros_like(lz); gy = np.zeros_like(lz)
-    gx[:, 1:-1] = (lz[:, 2:] - lz[:, :-2]) * 0.5
-    gy[1:-1] = (lz[2:] - lz[:-2]) * 0.5
+    inv_step = 1.0 / float(step)
+    gx[:, 1:-1] = (lz[:, 2:] - lz[:, :-2]) * 0.5 * inv_step
+    gy[1:-1] = (lz[2:] - lz[:-2]) * 0.5 * inv_step
     # 结构张量 J = [[gx², gxgy],[gxgy, gy²]]，3×3 均值平滑
     def box(a):
         k = np.pad(a, 1, mode="edge")

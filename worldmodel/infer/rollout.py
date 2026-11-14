@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 from worldmodel.action_codec import apply_action_scale, dsl_action, parse_spec
-from worldmodel.ckpt_meta import checkpoint_warning
+from worldmodel.ckpt_meta import checkpoint_warning, resolve_hist_frames
 from worldmodel.model.dit import DiTConfig
 from worldmodel.train.trainer import make_model
 from worldmodel.model.tokenizer import Tokenizer
@@ -95,6 +95,13 @@ def rollout(image: torch.Tensor, actions: list[torch.Tensor], ckpt_path: str,
             steps: int = 8, cfg_scale: float = 4.0, device: str = "cuda",
             use_ema: bool = True, hist_frames: int = 4):
     model, tok, cfg = _load(ckpt_path, device, use_ema)
+    # T9-3（v1.22）：hist_frames 必须与 checkpoint 训练时的历史长度一致。
+    #   训练用 N 帧历史、推理给 4 帧，位置编码/因果掩码的时序长度就对不上，
+    #   表现是"能跑但动作响应变糊"。以前只取函数默认值，没人校验。
+    hist_frames, hist_warn = resolve_hist_frames(cfg, hist_frames)
+    if hist_warn:
+        import warnings
+        warnings.warn(hist_warn, RuntimeWarning, stacklevel=2)
     z_init = tok.encode(image.to(device))
     hist = [z_init.clone() for _ in range(hist_frames)]
     frames = []

@@ -140,7 +140,8 @@ def main() -> int:
     cal["a_effective"] = a_eff
 
     print(f"[4/5] 视场外延拓 → {args.target_fov:.0f}° …")
-    img2, z2, cam2 = geom.extend_fov(arr, z_m, cam, target_hfov=math.radians(args.target_fov))
+    img2, z2, cam2 = geom.extend_fov(arr, z_m, cam,
+                                    target_hfov=math.radians(args.target_fov), far=far_m)
     print(f"      {img2.shape[1]}x{img2.shape[0]}")
 
     print("[5/5] 建网格 + 导出 …")
@@ -240,22 +241,9 @@ def main() -> int:
     print(f"      近景 {int(near_mask.sum())} 三角 / 远景 {int((~near_mask).sum())} 三角"
           f"（分界 {args.split:.0f}m）")
 
-    # 可走区域高度网格（前端碰撞用）：在相机前方 60m×60m 上采样表面高度
-    gh, gw = 64, 64
-    pos = mesh["pos"]
-    ext = np.abs(pos[:, 0]).max()
-    grid = np.full((gh, gw), np.nan, dtype=np.float32)
-    span = 60.0
-    gx = (pos[:, 0] + span * 0.5) / span * (gw - 1)
-    fwd = -pos[:, 2]                            # 朝前的距离（z 为负）
-    gz = fwd / span * (gh - 1)
-    ok = (pos[:, 0] > -span * 0.5) & (pos[:, 0] < span * 0.5) & (fwd > 0.2) & (fwd < span)
-    ix = np.clip(gx[ok].astype(np.int32), 0, gw - 1)
-    iz = np.clip(gz[ok].astype(np.int32), 0, gh - 1)
-    for a, b, y in zip(ix, iz, pos[ok, 1]):
-        if np.isnan(grid[b, a]):
-            grid[b, a] = y
-    grid = np.nan_to_num(grid, nan=float(np.nanmedian(grid)))
+    # 可走区域高度网格（前端碰撞用）：T9-7 抽到 geom.build_walkable（每格中位、空格 null）
+    walkable = geom.build_walkable(mesh["pos"], span=60.0, gh=64, gw=64)
+    print(f"      可走网格：{walkable['grid']}×{walkable['gw']}，空格 {walkable['empty_cells']} 个")
 
     meta_out = {
         "world": "photoworld",
@@ -283,7 +271,7 @@ def main() -> int:
                    "pitch_source": ("fit" if (pitch_fit and pitch_fit.get("ok")) else "none"),
                    "fov_source": fov_source, "fov_confidence": fov_conf},
         "check": chk,
-        "walkable": {"span": span, "grid": gh, "height": grid.round(3).tolist()},
+        "walkable": walkable,
         "elapsed_s": round(time.time() - t0, 1),
     }
     with open(os.path.join(args.out, "world.json"), "w", encoding="utf-8") as f:

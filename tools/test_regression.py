@@ -190,6 +190,67 @@ def test_ckpt_mark() -> None:
     print("PASS  G3  旧 checkpoint 判定：缺标记/False → 警告，True → 放行")
 
 
+def test_hist_frames() -> None:
+    """T9-3（v1.22）：历史帧数以 checkpoint 配置为准，不一致要给出警告。"""
+    from worldmodel.ckpt_meta import resolve_hist_frames
+    n, w = resolve_hist_frames({"data": {"hist_frames": 6}}, 4)
+    assert n == 6 and w, "应覆盖为 checkpoint 的 6 帧并警告"
+    n2, w2 = resolve_hist_frames({"data": {"hist_frames": 4}}, 4)
+    assert n2 == 4 and w2 is None, "一致时不应警告"
+    n3, w3 = resolve_hist_frames({"data": {}}, 5)
+    assert n3 == 5 and w3 is None, "无配置时沿用调用方取值"
+    print("PASS  T9-3 hist_frames：以 checkpoint 为准（6 vs 4 → 覆盖并警告；一致/缺省不警告）")
+
+
+def test_extend_clamp() -> None:
+    """T9-5（v1.22）：视场延拓的深度不得超过 far。"""
+    import numpy as np
+    cam = geom.Camera(hfov=math.radians(60.0), vfov=math.radians(37.0), w=64, h=40)
+    img = np.zeros((40, 64, 3), np.float32)
+    dep = np.full((40, 64), 1750.0, np.float32)
+    _, d2, _ = geom.extend_fov(img, dep, cam, target_hfov=math.radians(100.0), far=1800.0)
+    assert float(d2.max()) <= 1800.0 + 1e-3, "延拓深度超过 far：%.1f" % float(d2.max())
+    print("PASS  T9-5 延拓深度夹到 far：max %.1fm ≤ 1800m" % float(d2.max()))
+
+
+def test_edge_step() -> None:
+    """T9-6（v1.22）：structure tensor 梯度按 step 归一后，跳面比例不应随 step 暴涨。"""
+    import numpy as np
+    h, w = 120, 160
+    hfov = math.radians(62.0)
+    cam = geom.Camera(hfov, exif.vfov_of(hfov, w, h), w, h)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    # 左半 8m、右半 40m：一条**真断崖** + 高频纹理（最容易触发跳面判据的组合）。
+    #   第一版没放断崖，跳面数恒为 0，断言等于空跑。
+    z = np.where(xx < w // 2, 8.0, 40.0) + 0.3 * np.sin(xx * 0.9) * np.cos(yy * 0.7)
+    z = z.astype(np.float32)
+    m1 = geom.build_mesh(z, cam, max_tris=10 ** 9)          # step = 1
+    m2 = geom.build_mesh(z, cam, max_tris=(h * w) // 2)     # step ≈ 2
+    s1, s2 = float(m1["skipped"]), float(m2["skipped"])
+    # 归一化正确时两者应在同一量级；旧实现 step=2 会把 edge_str 放大 2×、
+    # 跳面比例显著上升。
+    assert s2 < s1 * 1.6 + 0.05, ("跳面比例随 step 暴涨：%.3f（step1）→ %.3f（step2）" % (s1, s2))
+    print("PASS  T9-6 梯度按 step 归一：跳面比例 %.3f（step1）→ %.3f（step2）" % (s1, s2))
+
+
+def test_walkable() -> None:
+    """T9-7（v1.22）：每格取中位；没有采样点的格子必须是 None（不是造一片平地）。"""
+    import numpy as np
+    # 同一格塞三个高度（含一个"树叶"离群值），另一片区域留空
+    pos = np.array([
+        [-1.0, -1.70, -10.0], [-0.9, -1.71, -10.1], [-1.1, -0.20, -9.9],   # 同格：中位应≈ -1.70
+        [2.0, -1.60, -20.0],
+    ], dtype=np.float32)
+    w = geom.build_walkable(pos, span=60.0, gh=8, gw=8)
+    filled = [v for row in w["height"] for v in row if v is not None]
+    assert len(filled) == 2, "应只有 2 个格子有采样点，实际 %d" % len(filled)
+    assert w["empty_cells"] == 8 * 8 - 2, "空格数不对：%d" % w["empty_cells"]
+    assert -1.75 < filled[0] < -1.65 or -1.75 < filled[1] < -1.65, \
+        "同格应取中位（≈-1.70），实际 %s" % filled
+    assert not any(v == 0 for v in filled), "空格不应被填成 0/平地"
+    print("PASS  T9-7 可走网格：每格中位 %s，空格 %d 个写 null" % (filled, w["empty_cells"]))
+
+
 def test_normals() -> None:
     """T8（v1.22）：GLB 顶点法线必须都是单位向量，边界也必须有法线。"""
     import numpy as np
@@ -215,6 +276,10 @@ if __name__ == "__main__":
     test_metric_depth()
     test_action_scale()
     test_ckpt_mark()
+    test_hist_frames()
+    test_extend_clamp()
+    test_edge_step()
+    test_walkable()
     test_normals()
     sys.path.insert(0, os.path.join(ROOT, "tools"))
     import test_regression_p2  # noqa: E402

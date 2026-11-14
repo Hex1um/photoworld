@@ -18,3 +18,17 @@ def checkpoint_warning(cfg: dict) -> str | None:
             "隐变量切法与当前代码不一致，评测/续训结果不可信。"
             "请用 v1.22+ 重新训练，或在 cfg.data 里显式写 %s: true。"
             % (DIT_SLICE_MARK, DIT_SLICE_MARK))
+
+
+def resolve_hist_frames(cfg: dict, requested: int) -> tuple[int, str | None]:
+    """T9-3（v1.22）：历史帧数以 **checkpoint 训练时的配置**为准。
+
+    返回 (实际使用的帧数, 警告文案或 None)。抽成纯函数便于无 torch 回归。
+    """
+    hist_cfg = ((cfg or {}).get("data") or {}).get("hist_frames")
+    if hist_cfg is None:
+        return int(requested), None
+    if int(hist_cfg) != int(requested):
+        return int(hist_cfg), ("hist_frames=%d 与 checkpoint 的 %d 不一致，已按 checkpoint 覆盖"
+                               % (int(requested), int(hist_cfg)))
+    return int(requested), None
