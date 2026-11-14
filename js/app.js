@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '1.24.8';
+  const VERSION = '1.24.9';
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -270,6 +270,34 @@
           setProgress(76, '补全完成：背景使用 AI 外扩图');
         } catch (e) {
           console.warn('MI-GAN 补全不可用：', e && e.message);
+        }
+      }
+      /* 简化 LDI 的第二半（?ldi=2）：把前景物体擦掉，让 MI-GAN 补出
+         「它背后的背景」，再用 buildHolePoints 垫一层稍远的点。
+         侧移时前景移开，背后有真实补全内容。 */
+      if (params.get('ldi') === '2' && objInfo && objInfo.fgMask && window.PW.inpaint) {
+        try {
+          setProgress(76, 'AI 补前景背后（LDI，MI-GAN）…');
+          const mc = document.createElement('canvas');
+          mc.width = objInfo.fgMask.w;
+          mc.height = objInfo.fgMask.h;
+          const mc2 = mc.getContext('2d', { willReadFrequently: true });
+          mc2.fillStyle = '#ffffff';            // 白 = 保留
+          mc2.fillRect(0, 0, mc.width, mc.height);
+          const md = mc2.getImageData(0, 0, mc.width, mc.height);
+          for (let q = 0; q < objInfo.fgMask.w * objInfo.fgMask.h; q++) {
+            if (objInfo.fgMask.data[q]) {       // 前景 = 黑 = 要补
+              md.data[q * 4] = 0; md.data[q * 4 + 1] = 0; md.data[q * 4 + 2] = 0;
+            }
+          }
+          mc2.putImageData(md, 0, 0);
+          analysis.bgPhotoCanvas = await Promise.race([
+            window.PW.inpaint.fill(img, mc),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('LDI 补全超时')), 45000))
+          ]);
+          setProgress(77, 'LDI 补全完成：前景背后已补齐');
+        } catch (e) {
+          console.warn('LDI 补全不可用：', e && e.message);
         }
       }
       // 竖直夸张：?yg= 与 ?ygain= 是同一参数的历史别名。旧代码在 opts 字面量里

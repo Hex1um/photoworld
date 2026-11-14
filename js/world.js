@@ -1290,7 +1290,13 @@
     if (indoor && hasSky) {
       const ceilShare = (opt.sem && opt.sem.stats && opt.sem.stats.ceiling)
         ? opt.sem.stats.ceiling : 0;
-      if (ceilShare < 0.18) indoor = false;
+      /* 只有「地平线接近中间、本来就不确定」时才允许语义天花板翻案。
+         地平线明显异常（<0.42 俯拍 / >0.72 仰拍）说明这确实是室内视角，
+         不能因为 SegFormer 没识别出天花板就当成室外 —— 楼梯图
+         ceiling=0 时 indoor 被翻成 false，skippedWall 一路涨到 12372，
+         整张画面碎成黑块。 */
+      if (ceilShare < 0.18
+        && analysis.horizon >= 0.42 && analysis.horizon <= 0.72) indoor = false;
     }
 
     /* v1.21（P0）：用**画面底部行**反解俯仰角，替代"天际线"估计。
@@ -2460,6 +2466,33 @@
     };
   }
 
+  /* LDI 补洞点（v1.24.9）：前景物体被 MI-GAN 擦掉后补出的背景，反投影成
+     一层「稍远」的点，垫在前景点后面。玩家侧移时前景点移开，露出的是
+     补出来的真实背景，而不是空洞或拉伸。 */
+  function buildHolePoints(relief, fgMask, gl, step) {
+    const GW = relief.grid.GW, GH = relief.grid.GH;
+    const st = step || 2;
+    const pos = [], uv = [], col = [];
+    for (let j = 0; j < GH; j += st) {
+      for (let i = 0; i < GW; i += st) {
+        const gx = Math.max(0, Math.min(fgMask.w - 1, Math.round((i / (GW - 1)) * (fgMask.w - 1))));
+        const gy = Math.max(0, Math.min(fgMask.h - 1, Math.round((j / (GH - 1)) * (fgMask.h - 1))));
+        if (!fgMask.data[gy * fgMask.w + gx]) continue;
+        const k = j * GW + i;
+        const x = relief.pos[k * 3], y = relief.pos[k * 3 + 1], z = relief.pos[k * 3 + 2];
+        const d = Math.hypot(x, y - 1.7, z) || 1;
+        const s = 1 + 2.0 / d;   // 沿视线后退 2m：垫在前景点后面
+        pos.push(x * s, 1.7 + (y - 1.7) * s, z * s);
+        uv.push(relief.uv[k * 2], relief.uv[k * 2 + 1]);
+        col.push(1, 1, 1, 1);
+      }
+    }
+    return {
+      pos: new Float32Array(pos), uv: new Float32Array(uv),
+      color: new Float32Array(col), mode: gl.POINTS
+    };
+  }
+
   /* 程序化地平环：视锥外的延续（不是照片内容，是"推测"出的远景雾带）
    * 实验特性，默认关闭（?ring=1）。做法上只保证"不突兀"：
    * 顶边 alpha 渐隐到 0、颜色从地平线色渐变到天顶色，否则会出现一条硬边灰带。 */
@@ -2614,6 +2647,9 @@
       // 分析画布。其余程序化纹理（sky / ground / backdrop）仍取 analysis.canvas，
       // 它们本来就是低频色带，且与语义采样口径绑定，不能跟着换源。
       photo: PWGL.createTexture(gl, analysis.photoCanvas || analysis.canvas, { wrap: 'clamp', clampV: true, aniso: 8, flipY: false }),
+      bg: analysis.bgPhotoCanvas
+        ? PWGL.createTexture(gl, analysis.bgPhotoCanvas, { wrap: 'clamp', clampV: true, aniso: 4, flipY: false })
+        : null,
       // 区域外地面用程序化色斑（A/B：改用照片底部延展会在边界外出现大面积
       // 照片纹理重复，比纯色更糟，已回退）。
       ground: PWGL.createTexture(gl, relief ? makeProceduralGroundTexture(analysis, seed + 3) : makeGroundTexture(analysis, seed + 3), { wrap: 'mirror', aniso: 8 }),
@@ -2626,6 +2662,8 @@
     const m = {
       relief: relief ? PWGL.createMesh(gl, relief) : null,
       splat: (relief && relief.grid) ? PWGL.createMesh(gl, buildSplat(relief, gl, 2)) : null,
+      splatHole: (relief && relief.grid && opts && opts.fgMask && analysis.bgPhotoCanvas)
+        ? PWGL.createMesh(gl, buildHolePoints(relief, opts.fgMask, gl, 2)) : null,
       // 世界坐标地面方格网（替代极坐标扇形的地面部分，消掉放射状拉丝）
       groundGrid: (relief && relief.groundGrid) ? PWGL.createMesh(gl, relief.groundGrid) : null,
       // 照片 UV 版地面（叠在平铺版之上，视锥内有细节）
@@ -2661,7 +2699,10 @@
       // v1.19：所有模式都不限制移动（0 = 不限制）。旧 fallback 的 116m 半径
       // 就是用户遇到的「空气墙」。
       walkRadius: 0,
-      splatMode: !!(opts && opts.splat),
+      /* 点云只用于室外风景：室内是密集小几何 + 大俯角，点云会把墙面和楼梯
+         撕成黑块/白块（楼梯图实测），室内仍走三角网格（v1.15 的完整效果）。 */
+      splatMode: !!(opts && opts.splat)
+        && !(analysis.horizon < 0.42 || analysis.horizon > 0.72),
       splatScale: (opts && opts.splatScale) || 30,
       /* v1.17：重建表面是单层薄壳，从背面看就是糊成一片的拉花。
          默认关闭背面（?cull=0 保留旧双面），转到侧后方时看到的是

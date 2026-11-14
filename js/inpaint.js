@@ -139,9 +139,60 @@
     return res;
   }
 
+  /* 按给定 mask 补全：maskCanvas 里 **白色 = 保留、黑色 = 补**（与模型极性一致）。
+     用于 LDI：把前景物体擦掉，让模型补出「它背后」的背景。 */
+  async function fill(img, maskCanvas, onProgress) {
+    const session = await init(onProgress);
+    const ort = S_.ort;
+    const iw = img.naturalWidth || img.width;
+    const ih = img.naturalHeight || img.height;
+
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = S;
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, iw, ih, 0, 0, S, S);
+    const rgba = ctx.getImageData(0, 0, S, S).data;
+
+    const mc = document.createElement('canvas');
+    mc.width = mc.height = S;
+    const mctx = mc.getContext('2d', { willReadFrequently: true });
+    mctx.drawImage(maskCanvas, 0, 0, maskCanvas.width, maskCanvas.height, 0, 0, S, S);
+    const md = mctx.getImageData(0, 0, S, S).data;
+
+    const image = new Uint8Array(3 * S * S);
+    const mask = new Uint8Array(S * S);
+    for (let q = 0; q < S * S; q++) {
+      const p = q * 4;
+      image[q] = rgba[p];
+      image[S * S + q] = rgba[p + 1];
+      image[2 * S * S + q] = rgba[p + 2];
+      // 灰度 > 127 视为「保留」（255），否则「补」（0）
+      mask[q] = md[p] > 127 ? 255 : 0;
+    }
+
+    const out = await session.run({
+      image: new ort.Tensor('uint8', image, [1, 3, S, S]),
+      mask: new ort.Tensor('uint8', mask, [1, 1, S, S])
+    });
+    const data = out[Object.keys(out)[0]].data;
+
+    const res = document.createElement('canvas');
+    res.width = res.height = S;
+    const rctx = res.getContext('2d');
+    const dst = rctx.createImageData(S, S);
+    for (let q = 0; q < S * S; q++) {
+      dst.data[q * 4] = data[q];
+      dst.data[q * 4 + 1] = data[S * S + q];
+      dst.data[q * 4 + 2] = data[2 * S * S + q];
+      dst.data[q * 4 + 3] = 255;
+    }
+    rctx.putImageData(dst, 0, 0);
+    return res;
+  }
+
   global.PW = global.PW || {};
   global.PW.inpaint = {
-    init, expand,
+    init, expand, fill,
     get ready() { return !!S_.session; },
     get failed() { return S_.failed; }
   };

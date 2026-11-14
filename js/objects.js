@@ -18,7 +18,9 @@
   const SELF = (document.currentScript && document.currentScript.src) || location.href;
   const BASE = new URL('../', SELF).href;
   const MODEL = BASE + 'models/yolov8n-seg.onnx';
-  const SIZE = 640, FW = 96, FH = 96;
+  // 前景网格从 96 提到 160（mask proto 的原生分辨率）：96 太粗，
+  // LDI 补洞会把一整片像素当成前景 → 侧移时出现大块错位（楼梯图实测）。
+  const SIZE = 640, FW = 160, FH = 160;
   const CONF = 0.28, IOU = 0.45;
 
   const COCO = [

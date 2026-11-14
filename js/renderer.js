@@ -330,6 +330,13 @@
            混合与剔除可以并存（alpha 只用于天空渐隐），不影响正面边缘。
            ?cull=0 可回到 v1.16 的双面行为做 A/B。 */
         if (world.splatMode && world.meshes.splat) {
+          /* LDI 补洞层（?ldi=2）：先用 MI-GAN 补出的背景点垫在后面，
+             再画原照片点云 —— 侧移时前景移开，背后不是洞。 */
+          if (world.meshes.splatHole && world.tex.bg) {
+            drawSplat(world, world.meshes.splatHole, {
+              tex: world.tex.bg, fog: 0.5, scale: 34
+            });
+          }
           /* 点云路径（?splat=1）：三角形网格在掠射角会拉丝、单层壳侧面是竖幕，
              点云没有「连接」，天然不会出现这两类病。 */
           drawSplat(world, world.meshes.splat, {
