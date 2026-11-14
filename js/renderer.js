@@ -256,6 +256,13 @@
         drawMesh(world, world.meshes.floor, {
           tex: world.tex.ground, mode: 4, fog: 0.42, mipBias: 2.6
         });
+        /* 近景补片：竖向视场比照片大时，照片底边以下那条地面靠它提供细节，
+           否则是一块糊平的灰板（底板 UV 放大 40m + mipBias 2.6）。 */
+        if (world.meshes.nearGround) {
+          drawMesh(world, world.meshes.nearGround, {
+            tex: world.tex.ground, mode: 4, fog: 0.40, mipBias: 0.2
+          });
+        }
         gl.enable(gl.CULL_FACE);
       }
 

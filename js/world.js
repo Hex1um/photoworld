@@ -1083,8 +1083,11 @@
     const cosP = Math.cos(pitch), sinP = Math.sin(pitch);
     /* 室内 / 俯拍检测：地平线被顶到画面上方 42% 以外（或压到 72% 以下）。
        户外风景的地平线基本在 0.45~0.60。室内走短基线测距、不夸张高度、
-       不裁天空，否则会被户外双锚点拉到几十米、卷成弧形。 */
-    const indoor = analysis.horizon < 0.42 || analysis.horizon > 0.72;
+       不裁天空，否则会被户外双锚点拉到几十米、卷成弧形。
+       **但这只是初判**：低地平线的大画幅风景（赤岩峡谷 horizon=0.364）
+       会命中这条规则，然后被 indoor 的 0.6~18m 短基线压成半径 18m 的碗
+       —— 手机上看到的就是"整个地面只有一个圆弧"。等 hasSky 算出来后要纠正。 */
+    let indoor = analysis.horizon < 0.42 || analysis.horizon > 0.72;
 
     const dw = depth.width || depth.size;
     const dh = depth.height || depth.size;
@@ -1239,6 +1242,15 @@
       for (let i = 0; i < GW; i += 3) { botSum += gS[j * GW + i]; botN++; }
     }
     const hasSky = botN ? (botSum / botN) - skyD > 0.12 : false;
+
+    /* 纠正 indoor：有天空（上下深度差 > 0.12）就说明这是"看向远方"的户外/大画幅，
+       哪怕地平线很低。室内俯拍没有天空，hasSky 为 false，仍然走短基线。
+       语义层再兜一道：天花板占多数时无条件保持 indoor。 */
+    if (indoor && hasSky) {
+      const ceilShare = (opt.sem && opt.sem.stats && opt.sem.stats.ceiling)
+        ? opt.sem.stats.ceiling : 0;
+      if (ceilShare < 0.18) indoor = false;
+    }
 
     /* 1) 反投影：世界坐标点（相机朝 -Z，yaw=0，眼高 1.7m） */
     const pos = new Float32Array(GW * GH * 3);
@@ -1541,11 +1553,13 @@
        近处 18m 内保持原样（走动视差与前景细节都在这里），60m 外基本只剩色块。
        `?gblend=0` 可关掉做 A/B。 */
     if (opt.groundFade !== false) {
+      const gf = (opt.gfade || '6,34,0.95').split(',').map(Number);
+      const f0 = gf[0] || 0, f1 = gf[1] || 34, famt = gf[2] || 0.95;
       for (let k = 0; k < GW * GH; k++) {
         if (gGround[k] !== 1) continue;
         if (col[k * 4 + 3] < 0.02) continue;      // 已被天空裁掉的不管
         const d = Math.hypot(pos[k * 3], pos[k * 3 + 2]);
-        edge[k * 2 + 1] = smoothstep(8, 42, d) * 0.92;
+        edge[k * 2 + 1] = smoothstep(f0, f1, d) * famt;
       }
     }
 
@@ -1695,7 +1709,11 @@
               if (dy2 > vSpan) vSpan = dy2;
             }
           }
-          if (vSpan > 1.0 && vSpan > hMin * 2.5) { skippedWall++; continue; }
+          /* 只剪「高墙」（> 3m）。v1.16.1 用 1m 门槛去掉 alpine 崖脚的竖直拉花，
+             代价是把**近景石头/灌木的侧面**也一起剪掉了 —— 那块几何一没，
+             物体就变成悬空的片（手机竖屏的"悬空感"）。3m 以下保留：那点高度
+             读作物体自身的侧壁，不构成横贯画面的竖幕。 */
+          if (vSpan > 3.0 && vSpan > hMin * 2.5) { skippedWall++; continue; }
         }
         idx.push(a0, b0, a1, a1, b0, b1);
       }

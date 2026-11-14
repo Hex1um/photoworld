@@ -216,8 +216,55 @@
       }
       return global.PW.GL.createMesh(gl, { pos, normal: nrm, uv, color: col, index: idx });
     }
+    /* 近处地面补片（v1.18.1）：竖屏时相机竖直视场（~60°）比照片自己的视场（~41°）
+       大一截，照片几何下方会留出一条"比照片底边还近"的地面 —— 那条只能用底板兜，
+       但底板 UV 放大到 40m + 高 mipBias，是一块没有细节的灰板（手机截图里最显眼）。
+       这里再铺一张**带贴图细节**的近景补片（uv 4.5m 一次，mipBias 0.2），
+       同样画在重建表面之前：有几何处被完全遮住，只在缺口/近处露出来。 */
+    function buildNearGroundMesh() {
+      const NX = 41, NZ = 41;
+      const pos = new Float32Array(NX * NZ * 3);
+      const nrm = new Float32Array(NX * NZ * 3);
+      const uv = new Float32Array(NX * NZ * 2);
+      const col = new Float32Array(NX * NZ * 4);
+      const idx = [];
+      const base = (world.groundBaseLin && world.groundBaseLin.length === 3)
+        ? world.groundBaseLin.map((v) => Math.max(1e-4, v)) : [0.18, 0.18, 0.18];
+      const colorAt = world.groundColorAt || null;
+      const W2 = 40;                       // 补片半宽（米）：覆盖玩家周围的近景
+      for (let j = 0; j < NZ; j++) {
+        for (let i = 0; i < NX; i++) {
+          const k = j * NX + i;
+          const x = -W2 + (i / (NX - 1)) * 2 * W2;
+          const z = -W2 + (j / (NZ - 1)) * 2 * W2;
+          pos[k * 3] = x; pos[k * 3 + 1] = -0.05; pos[k * 3 + 2] = z;
+          nrm[k * 3 + 1] = 1;
+          uv[k * 2] = x / 4.5; uv[k * 2 + 1] = z / 4.5;
+          let r = 1, g = 1, b = 1;
+          if (colorAt) {
+            const c = colorAt(x, z);
+            for (let q = 0; q < 3; q++) {
+              const gain = clamp(c[q] / base[q], 0.25, 6);
+              if (q === 0) r = gain; else if (q === 1) g = gain; else b = gain;
+            }
+          }
+          col[k * 4] = r; col[k * 4 + 1] = g; col[k * 4 + 2] = b; col[k * 4 + 3] = 1;
+        }
+      }
+      for (let j = 0; j < NZ - 1; j++) {
+        for (let i = 0; i < NX - 1; i++) {
+          const a0 = j * NX + i, a1 = a0 + 1;
+          const b0 = (j + 1) * NX + i, b1 = b0 + 1;
+          idx.push(a0, b0, a1, a1, b0, b1);
+        }
+      }
+      return global.PW.GL.createMesh(gl, { pos, normal: nrm, uv, color: col, index: idx });
+    }
     try {
-      if (world.meshes) world.meshes.floor = buildFloorMesh();
+      if (world.meshes) {
+        world.meshes.floor = buildFloorMesh();
+        world.meshes.nearGround = buildNearGroundMesh();
+      }
     } catch (e) { /* 底板失败不影响主流程 */ }
 
     const tiles = new Map();

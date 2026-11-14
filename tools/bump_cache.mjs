@@ -36,5 +36,9 @@ if (arg === '--check') {
   }
   const out = src.replace(/\?v=\d+\.\d+\.\d+/g, `?v=${arg}`);
   fs.writeFileSync(FILE, out);
-  console.log(`index.html: v${current[0]} → v${arg}（${tags} 处缓存串已同步）`);
+  // version.json：给页面里的「过期缓存自检」比对用（GitHub Pages 的 HTML 缓存
+  // 最长 10 分钟，手机浏览器还可能更久，光靠 ?v= 拿不到新的 index.html）
+  fs.writeFileSync(path.join(ROOT, 'version.json'),
+    JSON.stringify({ version: arg, builtAt: new Date().toISOString() }, null, 1) + '\n');
+  console.log(`index.html: v${current[0]} → v${arg}（${tags} 处缓存串已同步；version.json 已更新）`);
 }

@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '1.18.0';
+  const VERSION = '1.18.1';
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -261,6 +261,8 @@
         noCull: params.get('cull') === '0',
         // 地面远处渐隐到地面基色（压极坐标拉丝）：默认开，?gblend=0 做 A/B
         groundFade: params.get('gblend') !== '0',
+        // 地面渐隐区间可调（A/B 用）：?gfade=起始m,结束m,强度
+        gfade: params.get('gfade') || undefined,
         // 真实分阶段回调：中值 / 反投影 / 法线 / 索引 / 高度场各推进一格
         onProgress: (p) => setProgress(75 + p * 12,
           p < 0.35 ? '深度去噪：5×5 中值…'
@@ -698,9 +700,18 @@
     if (rm && rm.vfov > 0.1 && world.analysis) {
       const tanV = Math.tan(rm.vfov / 2);
       const pa = world.analysis.W / Math.max(1, world.analysis.H);
-      // 竖直与水平都要盖住：取两者中更大的张角
-      const need = Math.max(tanV, tanV * pa / aspect);
-      return clamp(2 * Math.atan(need) * mul, 0.55, 1.42);
+      /* v1.18.1：按**水平**视场取景，而不是"竖直/水平都要盖住"。
+         旧写法 need = max(tanV, tanV·pa/aspect) 在竖屏（aspect≈0.46）算出
+         need=1.30 → 竖直 81°，比照片的 41.5° 大一倍：上下各多出 20° 没有几何，
+         于是手机上是"照片条悬在大片地面/天空中间"，边缘还露出照片网格的断片。
+         现在把水平视场夹在 30°~78°，竖直由宽高比推出：
+           · 竖屏：水平 30° → 竖直 60°（只多 9°，天空和地面都能兜住）
+           · 横屏：水平照旧由照片宽高比推出，与 v1.16.1 一致
+         水平视场小于照片视场时是"裁掉照片左右几个百分点"，不会露边。 */
+      const hfovPhoto = 2 * Math.atan(tanV * pa);
+      const hfov = clamp(hfovPhoto, 30 * Math.PI / 180, 78 * Math.PI / 180);
+      const vfov = 2 * Math.atan(Math.tan(hfov / 2) / Math.max(0.4, aspect));
+      return clamp(vfov * mul, 0.35, 1.4);
     }
     const hfov = (66 * Math.PI / 180) * mul;
     return clamp(2 * Math.atan(Math.tan(hfov / 2) / aspect), 0.55, 1.42);
