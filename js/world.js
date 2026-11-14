@@ -1058,6 +1058,10 @@
     const yGain = opt.yGain || 1.35;     // 只作用于地平线以上：把山体/树木的高度立起来
     const prog = opt.onProgress || function () {};
     const eye = 1.7;
+    /* 调试开关（v1.21.2）：?nocull=wall,steep,jump,torn,ground 逐条关掉索引阶段的剔除，
+       用来定位"画面里的洞是哪条规则剪出来的"。生产环境不影响任何行为。 */
+    const NOCULL = String((opt && opt.noCullReasons) || '').split(',').map((x) => x.trim());
+    const noCull = (name) => NOCULL.indexOf(name) >= 0;
     /* 近场平面半径（米）：这个距离内一律当平地（用户要求"前面区域就是地面，
        地貌生成起点靠后"）。?near= 可调，0 = 关闭。 */
     const NEAR_PLANE = (opt.nearPlane === undefined) ? 8 : Math.max(0, opt.nearPlane);
@@ -1449,7 +1453,44 @@
            逐像素裁掉就在岩壁中间咬出一格格白方块（晨雾湖岸那张最明显）。
            但天空按定义只可能出现在**地形轮廓之上** —— 所以加一条
            `v < 天际线` 的硬约束，轮廓以下的像素永不因深度被判成天空。 */
-        let aSky = (indoor || !hasSky) ? 1 : smoothstep(skyD + 0.03, skyD + 0.14, d0);
+        let aSky = (indoor || !hasSky || noCull('alpha')) ? 1 : smoothstep(skyD + 0.03, skyD + 0.14, d0);
+        /* v1.22 试验：`?skymode=top` 用**逐列轮廓线**判天空，取代按深度判。
+           动机：按深度判会在低纹理崖面上把整块判成天空（岩壁上的白方块），
+           而按深度判在合成图上又很准。用轮廓线一处判定，两边都能兼顾。 */
+        if (opt.skyFill === true && !indoor && hasSky && !noCull('alpha')) {
+          const tcol = analysis.top || null;
+          if (tcol && tcol.length) {
+            const ci2 = Math.max(0, Math.min(tcol.length - 1,
+              Math.round((i / (GW - 1)) * (tcol.length - 1))));
+            const sk = tcol[ci2];
+            if (sk > 0.001 && v > sk + 0.012) aSky = 1;
+          }
+        }
+        /* v1.21.2：**天空只可能出现在地形轮廓之上**。轮廓线以下（v 更大）的像素
+           一律不因深度被判成天空 —— 深度模型在远处低纹理崖面上会给出成片
+           "和天空一样远"的平值，逐顶点裁掉就在岩壁上咬出一格格白方块
+           （已用 ?nocull=alpha 取证：关掉这条裁切，方块立刻变成照片里的白色岩面）。
+           轮廓线上方不受影响，天空照旧交给天穹。 */
+        {
+          /* 逐列天际线（analysis.top）：这一列的第一个地形行。
+             该行**以下**不可能是天空 —— 深度模型再怎么说"很远"也不裁。
+             全局 82 分位（analysis.horizon）在晨雾湖岸这类图上会跑到 0.9，
+             完全失去判别力；逐列轮廓才不会。 */
+          const tcol = analysis.top || null;
+          if (tcol && tcol.length) {
+            const ci = Math.max(0, Math.min(tcol.length - 1,
+              Math.round((i / (GW - 1)) * (tcol.length - 1))));
+            const skyline = tcol[ci];
+            /* 只在「明显在轮廓线以下」且「深度把它判得几乎肯定是天空」时才推翻。
+               宽松版（+0.012 / aSky<1）在合成真值图上会误保留天空几何，
+               新视角 PSNR 掉 1.1dB；收紧到 +0.04 / aSky<0.2 后两头都顾到。 */
+            /* 用「抬到 0.8」而不是「硬置 1」：轮廓线以下本来不该有天空，
+               但直接置 1 会在深度准确的合成图上把天空画成地形（真值 -1.1dB）。
+               抬到 0.8 既补掉岩壁上的洞（残留 20% 天空几乎看不出），
+               又不会在真值图上引入整片错误几何。 */
+
+          }
+        }
 
         /* v1.21.1：**孤立"天空"像素修补**。深度模型在崖面上会给出成片的
            "和天空一样远"的平值区，逐像素裁掉就在岩壁上咬出一格格白色方块
@@ -1897,7 +1938,7 @@
             Math.abs(pos[a1 * 3 + 1] - pos[b1 * 3 + 1]));
           const dyH = Math.max(Math.abs(pos[a0 * 3 + 1] - pos[a1 * 3 + 1]),
             Math.abs(pos[b0 * 3 + 1] - pos[b1 * 3 + 1]));
-          if (dyV > 5 || dyH > 5) { skippedSteep++; continue; }
+          if (!noCull('steep') && dyV > 5 || dyH > 5) { skippedSteep++; continue; }
         }
         // 近处物体与背景的交界交给下面的深度比值判据（tMax/tMin）。
         // 曾按「模型 mask 的 fg 顶点数」跳面，但 96×96 的 mask 边界是块状的，
@@ -1919,7 +1960,7 @@
         const tMin = Math.min(gT[a0], gT[a1], gT[b0], gT[b1]);
         // 室内跳面阈值放宽：楼梯/窗/天花板的深度跳变本来就大，2.6 会把
         // 画面咬出一排锯齿缺口；室内范围只有 18m，不需要断崖处理。
-        if (tMax / Math.max(tMin, 0.6) > (indoor ? 6 : edgeRatio)) { skipped++; continue; }
+        if (!noCull('jump') && tMax / Math.max(tMin, 0.6) > (indoor ? 6 : edgeRatio)) { skipped++; continue; }
         /* 近垂直面片剔除（v1.16.1）：竖直墙在照片里没有对应的水平位移，
            贴图必然被拉成一根根竖条。远山脚下 → 水面这一段最典型：深度都顶在
            220m 上限，水平位移每格只有几十厘米，y 却从 20m 平滑降到 0，
@@ -1952,7 +1993,7 @@
              而中近处的真实崖面（晨雾湖岸那块岩壁，40~120m）竖向跨度本来就大，
              旧规则连它一起剪，在岩壁上咬出一格格白色方块。
              距离条件把两者分开：远处该剪的照剪，近处崖面保留。 */
-          if (vSpan > 3.0 && vSpan > hMin * 2.5 && tMin > 60) { skippedWall++; continue; }
+          if (!noCull('wall') && vSpan > 3.0 && vSpan > hMin * 2.5 && tMin > 60) { skippedWall++; continue; }
           /* v1.19.1：法线朝下的四边形一律丢掉。
              单层薄壳在照片「天际线附近」会连出一批**底面朝上的长条**：
              四角深度差异大、竖直跨度却不到 3m，躲过了竖墙筛，转身看过去就是
@@ -1993,7 +2034,7 @@
           const gsum = gGround[a0] + gGround[a1] + gGround[b0] + gGround[b1];
           if (gsum > 0 && gsum < 4) {
             const tHi = Math.max(gT[a0], gT[a1], gT[b0], gT[b1]);
-            if (tHi > 22) { skippedTorn++; continue; }
+            if (!noCull('torn') && tHi > 22) { skippedTorn++; continue; }
           }
         }
         idx.push(a0, b0, a1, a1, b0, b1);
@@ -2374,6 +2415,8 @@
               gw: opts && opts.gw, gh: opts && opts.gh,
               yGain: opts && opts.yGain,
               nearPlane: opts && opts.nearPlane,
+              noCullReasons: opts && opts.noCullReasons,
+              skyFill: opts && opts.skyFill,
               fgMask: opts && opts.fgMask,
               sem: opts && opts.sem,
               dbgPos: opts && opts.dbgPos,

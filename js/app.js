@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '1.21.1';
+  const VERSION = '1.22.0';
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -274,6 +274,12 @@
         groundFade: params.get('gblend') !== '0',
         // 近场平面半径：?near=12 放宽，?near=0 关闭（A/B）
         nearPlane: params.has('near') ? Math.max(0, Math.min(40, parseFloat(params.get('near')) || 0)) : undefined,
+        // 调试：?nocull=wall,steep,jump,torn 逐条关掉剔除，定位"洞的来源"
+        noCullReasons: params.get('nocull') || '',
+        /* 逐列轮廓线补天（默认开）：轮廓线以下的像素不因深度被判成天空，
+           修掉低纹理崖面上那一片白色方块。?skyfill=0 回到纯深度判定
+           （真值基准高 1.05dB，但真实照片会有洞）。 */
+        skyFill: params.get('skyfill') !== '0',
         // 竖直夸张（只作用于地平线以上）：?ygain=2 做 A/B
         yGain: params.has('ygain') ? Math.max(0.6, Math.min(4, parseFloat(params.get('ygain')) || 1.35)) : undefined,
         // 地面拓扑：默认世界坐标方格网；?gfan=1 回到旧的极坐标扇形地面（A/B）
