@@ -3,6 +3,46 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [1.24.8] - 2026-11-14  · 第三种方案（LDI + inpainting）的网页版
+
+问题：网页能不能直接用 `3d-photo-inpainting`（CVPR 2020，LDI + 学习式补全）？
+
+**结论：原版不能，思路能 —— 换成 MI-GAN。**
+
+| | 原版 3d-photo-inpainting | MI-GAN（本版接入） |
+| --- | --- | --- |
+| 框架 | PyTorch + MiDaS + 3 个补全模型（color/depth/edge） | 单个 ONNX |
+| 体积 | 数百 MB | **29MB** |
+| 单图耗时 | 2~3 分钟（GPU） | **0.57s @512²**（本机 CPU onnxruntime 实测） |
+| 浏览器 | 进不来 | **onnxruntime-web 可直接跑** |
+
+### 实测与接口
+
+- 下载：`https://hf-mirror.com/andraniksargsyan/migan/resolve/main/migan.onnx`（29MB，已入库 `models/migan.onnx`）
+- 输入 `image [1,3,512,512] uint8` + `mask [1,1,512,512] uint8`，**mask 255 = 保留、0 = 生成**
+  （用「中心 255 / 四周 0」实测 centerDiff = 0.0，确认极性；另两种写法会把整图重绘）
+- 输出 `result [1,3,512,512] uint8`
+
+### 落地（简化 LDI，`?migan=1`）
+
+- 新增 `js/inpaint.js`：加载 MI-GAN、把照片放中心（18% padding）、四周 mask=0，
+  补出画面外一圈 → 返回 512² canvas。
+- `world.js`：有 `analysis.bgCanvas` 时也建 `worldBackdrop`（360° 背景幕），
+  贴图直接用 AI 外扩图 —— 转身时不再是雾，而是「照片 + 补出的画面外」。
+- 进度条：下载模型显示百分比；失败自动跳过，不影响主流程。
+
+### 验证
+
+- Python 端到端（雪山顶照）：中心 100% 保留，四周云层/山脊自然延续（`ab/mg_c_keep255.png`）。
+- 浏览器（`?w=alpine&yaw=2.2&migan=1`）：转身 126° 后是连续的远山/湖岸，不再空白（`ab/migan_world.png`）。
+- 回归全绿、`smoke` 5/5。
+
+### 下一步（真正的 LDI）
+
+现在只用了「补画面外」这一半能力。完整 LDI 还差：按深度把前景/背景分成两层 →
+在**前景层背后**用 MI-GAN 补出被遮挡的颜色 → 两层间做视差错位，玩家侧移时遮挡区有内容。
+这需要给渲染器加「层」概念，是独立任务。
+
 ## [1.24.7] - 2026-11-14  · 点云 / surfel 渲染（默认开）
 
 ### 先搜了一圈 GitHub，四类方案

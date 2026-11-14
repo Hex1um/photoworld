@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '1.24.7';
+  const VERSION = '1.24.8';
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -253,6 +253,25 @@
       setProgress(75, depthMap ? '反投影：像素 → 世界坐标…' : '构建分层地形…');
       await sleep(40);
       const params = new URLSearchParams(location.search);
+      /* 「第三种方案」网页版（简化 LDI，?migan=1）：
+         MI-GAN 把照片放在中心、补出画面外一圈，作为世界背景幕。
+         原版 3d-photo-inpainting 是 PyTorch 三模型 + MiDaS（2~3 分钟/图），
+         浏览器进不来；MI-GAN 29MB、512²、CPU 0.57s（实测）可以。 */
+      if (params.get('migan') === '1' && window.PW.inpaint) {
+        try {
+          setProgress(75.5, 'AI 补全画面外（MI-GAN 29MB，仅首次）…');
+          const bg = await Promise.race([
+            window.PW.inpaint.expand(img, { pad: 0.18 }, (p) => {
+              if (p < 1) setProgress(75.5, '下载补全模型 ' + Math.round(p * 100) + '%（29MB）');
+            }),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('补全超时')), 45000))
+          ]);
+          analysis.bgCanvas = bg;
+          setProgress(76, '补全完成：背景使用 AI 外扩图');
+        } catch (e) {
+          console.warn('MI-GAN 补全不可用：', e && e.message);
+        }
+      }
       // 竖直夸张：?yg= 与 ?ygain= 是同一参数的历史别名。旧代码在 opts 字面量里
       // 写了两次 yGain 键，后者覆盖前者，?yg= 永久失效；这里统一成一处解析。
       const yGainRaw = params.has('ygain') ? params.get('ygain') : params.get('yg');

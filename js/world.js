@@ -2588,7 +2588,10 @@
     // 360° 低频世界幕：补上照片没覆盖到的方向，也兜住断崖跳面留下的洞。
     // 默认关闭（?proxy=1 开启）：A/B 截图里它会在卡片边缘露出竖直色带与
     // 重复天际线尖峰，比 v1.11 的融色边界更突兀，故先作为实验特性保留。
-    const worldBackdrop = (relief && opts && opts.proxy) ? buildWorldBackdrop(analysis) : null;
+    // MI-GAN 外扩图（analysis.bgCanvas）存在时也建背景幕：转身看到的是
+    // 「照片 + AI 补出的画面外」，而不是一片雾。
+    const worldBackdrop = (relief && opts && (opts.proxy || analysis.bgCanvas))
+      ? buildWorldBackdrop(analysis) : null;
     // 兜底地面比重建区域大一倍：玩家可以走出重建区（移动不限制），
     // 但脚下仍然有地面，不会一步踏进纯雾。
     const ground = relief
@@ -2615,7 +2618,7 @@
       // 照片纹理重复，比纯色更糟，已回退）。
       ground: PWGL.createTexture(gl, relief ? makeProceduralGroundTexture(analysis, seed + 3) : makeGroundTexture(analysis, seed + 3), { wrap: 'mirror', aniso: 8 }),
       sky: PWGL.createTexture(gl, makeSkyTexture(analysis), { wrap: 'clamp', clampV: true, flipY: false }),
-      worldBackdrop: worldBackdrop ? PWGL.createTexture(gl, makeWorldBackdropTexture(analysis), { wrap: 'mirror', aniso: 4 }) : null,
+      worldBackdrop: worldBackdrop ? PWGL.createTexture(gl, analysis.bgCanvas || makeWorldBackdropTexture(analysis), { wrap: 'mirror', aniso: 4 }) : null,
       backdrop: (relief && relief.bg) ? PWGL.createTexture(gl, makeWorldBackdropTexture(analysis), { wrap: 'mirror', aniso: 4 }) : null,
       grass: PWGL.createTexture(gl, makeGrassTexture(mulberry32(seed + 77)), { wrap: 'clamp', clampV: true })
     };
