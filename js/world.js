@@ -1347,7 +1347,13 @@
           y = 0;
           gGround[k] = 1;
         } else {
-          t = clamp(metric(d0), 0.6, 220);
+          /* 远场**软压缩**而不是硬夹断（v1.19.1）。
+             以前 `clamp(metric(d0), 0.6, 220)` 把所有 >220m 的像素都压到正好 220，
+             等于在半径 220m 处生成一层"壳"；再叠上近处的壳，从外面看就是一层层
+             漂浮的横向薄片（32 视角质检里 stripe>3 的那类）。
+             tanh 把 220 附近压缩成 172、1000m 压成 219 —— 远山仍然在，但不再重叠成壳。 */
+          const tRaw = metric(d0);
+          t = Math.max(0.6, 220 * Math.tanh(tRaw / 220));
           y = eye + dirY * t * ((hasSky && dirY > 0) ? yGain : 1);
           // 室内不做近景限幅：室内深度范围只有 18m，按行中位判定会把
           // 半面墙/天花板误标成「近景」，压到近处后画面被咬出锯齿缺口。
@@ -1463,6 +1469,68 @@
       }
       ccnt[ci] = 1;
     }
+    /* 底部裙边（v1.19.1）：竖屏时相机竖直视场（~60°）比照片（~41°）大，
+       照片底边以下那条"比照片底边还近"的地面原来只能靠 y=-0.05 的平面补片兜，
+       与照片网格之间是一条**几何断口** —— 无论怎么调颜色都能看出那条横线。
+       这里把网格继续往下延伸 K 行：射线方向延续（v>1），仍与 y=0 求交，
+       UV 的 v 钳到 0.995（取照片最后一行像素）——
+       于是地面从照片的最后一排像素"接着长"到脚下，没有断口、没有色差。 */
+    function buildSkirt() {
+      const K = 4;                       // 额外行数
+      const DV = 0.075;                  // 每行 v 的步进（1.0 → 1.30）
+      const cols = GW;
+      const rows = K + 1;                // 含照片底行本身
+      const pos = new Float32Array(cols * rows * 3);
+      const nrm = new Float32Array(cols * rows * 3);
+      const uv = new Float32Array(cols * rows * 2);
+      const col = new Float32Array(cols * rows * 4);
+      const edge = new Float32Array(cols * rows * 2);
+      const idx = [];
+      for (let r = 0; r < rows; r++) {
+        const v = 1.0 + r * DV;
+        for (let i = 0; i < cols; i++) {
+          const k = r * cols + i;
+          const u = i / (cols - 1);
+          const dx = (u - 0.5) * 2 * tanH;
+          const dy0 = (0.5 - v) * 2 * tanV;
+          const dy = dy0 * cosP - sinP;
+          const dz = -dy0 * sinP - cosP;
+          const l = Math.hypot(dx, dy, dz) || 1;
+          const dirX = dx / l, dirY = dy / l, dirZ = dz / l;
+          const t = Math.min(eye / Math.max(0.06, -dirY), 220);
+          pos[k * 3] = dirX * t;
+          pos[k * 3 + 1] = 0;
+          pos[k * 3 + 2] = dirZ * t;
+          nrm[k * 3 + 1] = 1;
+          /* UV 用**世界坐标**投影（和中景地面块同口径），不要钳到照片最后一行 ——
+             单行采样沿 u 只有 320 个颜色，往脚下延伸时每列一个颜色，会拉成
+             一根根竖条（第一版实测就是这样）。世界坐标 UV 是方格网，无方向性。 */
+          uv[k * 2] = pos[k * 3] / 4.5;
+          uv[k * 2 + 1] = pos[k * 3 + 2] / 4.5;
+          /* 顶点色 = 照片底行颜色 / 地面贴图基色：色相与照片最后一行一致，
+             细节由贴图提供，两者一乘就"接着长"。 */
+          const bc = bottomRowColor(pos[k * 3]);
+          col[k * 4] = clamp(bc[0] / Math.max(1e-4, baseLin[0]), 0.25, 6);
+          col[k * 4 + 1] = clamp(bc[1] / Math.max(1e-4, baseLin[1]), 0.25, 6);
+          col[k * 4 + 2] = clamp(bc[2] / Math.max(1e-4, baseLin[2]), 0.25, 6);
+          col[k * 4 + 3] = 1;
+          // 越靠近脚下越融进地面色，避免纹理在 1m 内被拉成条纹
+          edge[k * 2 + 1] = smoothstep(2, 14, Math.hypot(pos[k * 3], pos[k * 3 + 2])) * 0.85;
+        }
+      }
+      for (let r = 0; r < rows - 1; r++) {
+        for (let i = 0; i < cols - 1; i++) {
+          const a0 = r * cols + i, a1 = a0 + 1;
+          const b0 = (r + 1) * cols + i, b1 = b0 + 1;
+          idx.push(a0, b0, a1, a1, b0, b1);
+        }
+      }
+      return { pos, normal: nrm, uv, color: col, edge, index: idx };
+    }
+    const baseLin = [0.18, 0.18, 0.18];
+    let skirt = null;
+    try { skirt = buildSkirt(); } catch (e) { skirt = null; }
+
     /* 照片底行颜色剖面（v1.19）：竖屏时相机竖直视场比照片大，照片底边以下那条
        地面只能由近景补片兜底。补片原来用 groundColorAt（整图下半带平均），
        与照片底行颜色差一截 → 有一条看得见的横向接缝。
@@ -1778,6 +1846,29 @@
              物体就变成悬空的片（手机竖屏的"悬空感"）。3m 以下保留：那点高度
              读作物体自身的侧壁，不构成横贯画面的竖幕。 */
           if (vSpan > 3.0 && vSpan > hMin * 2.5) { skippedWall++; continue; }
+          /* v1.19.1：法线朝下的四边形一律丢掉。
+             单层薄壳在照片「天际线附近」会连出一批**底面朝上的长条**：
+             四角深度差异大、竖直跨度却不到 3m，躲过了竖墙筛，转身看过去就是
+             一层层漂浮的薄片（32 视角质检里 stripe 3.1 的那类）。
+             地面的法线永远朝上（y=+1），所以 ny < 0 只可能是这种翻面几何。 */
+          const qax = pos[b0 * 3] - pos[a0 * 3], qay = pos[b0 * 3 + 1] - pos[a0 * 3 + 1], qaz = pos[b0 * 3 + 2] - pos[a0 * 3 + 2];
+          const qbx = pos[a1 * 3] - pos[a0 * 3], qby = pos[a1 * 3 + 1] - pos[a0 * 3 + 1], qbz = pos[a1 * 3 + 2] - pos[a0 * 3 + 2];
+          const qny = qaz * qbx - qax * qbz;          // cross(pa,pb) 的 y 分量
+          const qlen = Math.hypot(qax, qay, qaz) * Math.hypot(qbx, qby, qbz) || 1;
+          if (qny / qlen < -0.12) { skippedWall++; continue; }
+          /* 更狠的一条：**只保留「从照片相机位置看得见」的面**。
+             整块重建是"从原始视点看到的一层壳"，从别的角度看到的背面本来就是
+             编出来的内容 —— 转身时那些横贯画面的漂浮薄片就是它们的背面。
+             判据：四边形中心相对照片相机（0, 1.7, 0）的方向与面法线同向 → 是背面。 */
+          const nqx = qay * qbz - qaz * qby;
+          const nqy = qaz * qbx - qax * qbz;
+          const nqz = qax * qby - qay * qbx;
+          const nql = Math.hypot(nqx, nqy, nqz) || 1;
+          const ccx = (pos[a0 * 3] + pos[a1 * 3] + pos[b0 * 3] + pos[b1 * 3]) * 0.25;
+          const ccy = (pos[a0 * 3 + 1] + pos[a1 * 3 + 1] + pos[b0 * 3 + 1] + pos[b1 * 3 + 1]) * 0.25 - eye;
+          const ccz = (pos[a0 * 3 + 2] + pos[a1 * 3 + 2] + pos[b0 * 3 + 2] + pos[b1 * 3 + 2]) * 0.25;
+          const ccl = Math.hypot(ccx, ccy, ccz) || 1;
+          if ((nqx * ccx + nqy * ccy + nqz * ccz) / (nql * ccl) > 0.15) { skippedWall++; continue; }
         }
         idx.push(a0, b0, a1, a1, b0, b1);
       }
@@ -1843,6 +1934,8 @@
       groundColorAt,
       /* 照片最底几行的按列颜色：竖屏近景补片用它接上照片底边，消掉横向接缝 */
       bottomRowColor,
+      /* 底部裙边网格（照片底行向下连续延伸）：消掉照片底边的几何断口 */
+      skirt,
       semGroups: sem ? sem.groups : null,
       semSize: sem ? [sem.width, sem.height] : null,
       /* 信息保留率诊断：哪一步丢了多少面，直接决定「图片丢信息」的排查方向 */
@@ -2146,6 +2239,8 @@
 
     const m = {
       relief: relief ? PWGL.createMesh(gl, relief) : null,
+      // 照片底行向下的连续裙边（消掉照片底边的几何断口）
+      skinSkirt: (relief && relief.skirt) ? PWGL.createMesh(gl, relief.skirt) : null,
       // 单体十字账单牌（v1.16）：替代被拉成鳍的对象四边形
       objectCards: (relief && relief.cards) ? PWGL.createMesh(gl, relief.cards) : null,
       // v1.15：默认只生成正面一个扇环，其他地方留空（用户明确要求）。

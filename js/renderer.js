@@ -212,7 +212,10 @@
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(true);
-        gl.disable(gl.CULL_FACE);
+        /* v1.19.1：远景层也是照片衍生的**单面薄壳**。以前这里 disable(CULL_FACE)，
+           转身面对它背面时，整片远景会被摊成一层层漂浮的横向薄片（32 视角质检里
+           「断片/拉丝」最重的一类，stripe≈3.1）。剔除背面后它只在正对照片时出现。 */
+        gl.enable(gl.CULL_FACE);
         drawMesh(world, world.meshes.reliefBackdrop, {
           tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.26, mipBias: 0,
           backdrop: [cam.eye[0], cam.eye[2]]
@@ -240,7 +243,7 @@
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(true);
-        gl.disable(gl.CULL_FACE);
+        gl.enable(gl.CULL_FACE);      // 同理：补洞层也是单面薄壳
         drawMesh(world, world.meshes.reliefBg, {
           tex: world.tex.backdrop, mode: 4, fog: 0.30, mipBias: 1.0
         });
@@ -281,6 +284,21 @@
         drawMesh(world, world.meshes.relief, {
           tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.26, mipBias: 0,
           backdrop: [0, 0]
+        });
+        gl.disable(gl.BLEND);
+        gl.enable(gl.CULL_FACE);
+      }
+
+      /* 照片底行向下的裙边（v1.19.1）：几何上延续照片网格，UV 钳到最后一行。
+         竖屏相机竖直视场比照片大时，它能接住"照片底边以下"那条地面，
+         不再露出 y=-0.05 平面的断口与色差。画在 relief 之后，深度测试负责遮挡。 */
+      if (world.meshes.skinSkirt && !skip('shell')) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.depthMask(true);
+        gl.disable(gl.CULL_FACE);
+        drawMesh(world, world.meshes.skinSkirt, {
+          tex: world.tex.ground, mode: 4, fog: 0.30, mipBias: 0.2, backdrop: [0, 0]
         });
         gl.disable(gl.BLEND);
         gl.enable(gl.CULL_FACE);
