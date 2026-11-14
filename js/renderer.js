@@ -299,9 +299,12 @@
         gl.disable(gl.CULL_FACE);
         for (const t of world.extraMeshes) {
           if (!t.mesh) continue;
+          /* mode 由 tile 自己决定（v1.18）：陡坡用 mode 1（顶点色，无贴图），
+             平地用 mode 4（贴图 × 顶点色）。陡坡贴图在掠射/竖直面上会被拉成
+             一条条竖丝 —— 36 视角质检里最刺眼的一项，改用顶点色后消失。 */
           drawMesh(world, t.mesh, {
-            tex: t.tex || world.tex.ground, mode: 4,
-            fog: t.fog === undefined ? 0.32 : t.fog, mipBias: 0.4
+            tex: t.tex || world.tex.ground, mode: t.mode === undefined ? 4 : t.mode,
+            fog: t.fog === undefined ? 0.32 : t.fog, mipBias: t.mode === 1 ? 0 : 0.4
           });
         }
         gl.disable(gl.BLEND);

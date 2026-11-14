@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '1.17.0';
+  const VERSION = '1.18.0';
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -179,8 +179,10 @@
       let depthMap = null;
       try {
         setProgress(32, '加载深度模型（27MB，仅首次）…');
-        await window.PW.depth.init((p) => {
-          setProgress(32 + p * 32, '下载深度模型 ' + Math.round(p * 100) + '%（27MB）');
+        // 流式下载：p 是真实字节进度，label 由 depth.js 给出（含 MB/s 与阶段名），
+        // 没有 label 时才退回旧文案。卡在「下载深度模型 15%」就是旧实现的症状。
+        await window.PW.depth.init((p, label) => {
+          setProgress(32 + p * 32, label || ('下载深度模型 ' + Math.round(p * 100) + '%（27MB）'));
         });
         setProgress(65, '模型就绪，准备推理');
         await sleep(60);
@@ -296,10 +298,18 @@
             gl: renderer.gl, world,
             seed: hashString(def.id + '|extend'),
             server: params.get('api') || '',
-            radius: params.has('extr') ? Math.max(2, Math.min(8, parseInt(params.get('extr'), 10) || 5)) : 5
+            radius: params.has('extr') ? Math.max(2, Math.min(8, parseInt(params.get('extr'), 10) || 5)) : 5,
+            // 实时变化：视锥驱动生成 + 主题/记忆参数（v1.18）
+            live: liveState.on, chaos: liveState.chaos, memory: liveState.memory
           });
           world.extender = ext;
-          ext.update(player.state.x, player.state.z);
+          /* 重要：extender 接管 heightAt 之后必须把玩家重新落地一次。
+             出生点可能在矩形外（?x=0&z=49 这类），玩家 reset 时 heightAt 还是
+             照片高度场（矩形外恒 0），接管后真实地形可能有十几米 ——
+             不重落就会"站在地下"，看到的是被背面剔除后的空洞。 */
+          if (player) player.reset(player.state.x, player.state.z, player.state.yaw);
+          ext.update(player.state.x, player.state.z, undefined,
+            { yaw: player.state.yaw, fov: fovRad() });
         } catch (e) {
           console.warn('地貌延伸初始化失败：', e && e.message);
         }
@@ -753,7 +763,10 @@
     time += dt;
 
     player.update(dt);
-    if (world.extender) world.extender.update(player.state.x, player.state.z, now);
+    if (world.extender) {
+      world.extender.update(player.state.x, player.state.z, now,
+        { yaw: player.state.yaw, fov: fovRad() });
+    }
     updateParticles(dt);
     fadeFrames++;
     if (instant) {
@@ -849,11 +862,13 @@
       e.target.value = '';
     });
 
+    wireLive();
     document.querySelectorAll('.actions [data-act]').forEach((btn) => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         const act = btn.dataset.act;
         if (act === 'gallery') backToGallery();
+        if (act === 'live') { liveState.on = !liveState.on; saveLiveState(); applyLiveState(true); }
         if (act === 'upload') el('fileInput').click();
         if (act === 'sound') {
           const on = ambience.toggle();
@@ -895,11 +910,106 @@
     if (document.body) document.body.dataset.version = VERSION;
   }
 
+  /* 落地页空闲时预取深度模型：用户真正点「用我的照片」时模型已在本机，
+     少掉整段 27MB 等待。省流量模式与 2G 不预取（用户没主动要，别烧流量）。 */
+  function prefetchDepthModel() {
+    const nav = window.navigator || {};
+    const c = nav.connection || {};
+    if (c.saveData || c.effectiveType === 'slow-2g' || c.effectiveType === '2g') return;
+    if (!window.PW || !window.PW.depth) return;
+    const run = () => { window.PW.depth.init(() => {}).catch(() => {}); };
+    if (window.requestIdleCallback) window.requestIdleCallback(run, { timeout: 5000 });
+    else setTimeout(run, 2600);
+  }
+
+  /* ---------------- 实时变化（视锥生成 + 混乱度 / 记忆力） ---------------- */
+  const LIVE_KEY = 'pw.live';
+
+  function loadLiveState() {
+    let st = { on: false, chaos: 0.35, memory: 0.70 };
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(LIVE_KEY) || 'null');
+      if (saved && typeof saved === 'object') {
+        st.on = !!saved.on;
+        if (typeof saved.chaos === 'number') st.chaos = clamp(saved.chaos, 0, 1);
+        if (typeof saved.memory === 'number') st.memory = clamp(saved.memory, 0, 1);
+      }
+    } catch (e) { /* 隐私模式没有 localStorage */ }
+    const q = new URLSearchParams(location.search);
+    if (q.has('live')) st.on = q.get('live') !== '0';
+    if (q.has('chaos')) st.chaos = clamp(parseFloat(q.get('chaos')) || 0, 0, 1);
+    if (q.has('memory')) st.memory = clamp(parseFloat(q.get('memory')) || 0, 0, 1);
+    return st;
+  }
+
+  let liveState = { on: false, chaos: 0.35, memory: 0.70 };
+
+  function saveLiveState() {
+    try { window.localStorage.setItem(LIVE_KEY, JSON.stringify(liveState)); } catch (e) { /* ignore */ }
+  }
+
+  /* 把状态同步到 extender / DOM / body.dataset（测试用） */
+  function applyLiveState(push) {
+    const ext = world && world.extender;
+    if (push && ext && ext.setLive) ext.setLive(liveState);
+    const btn = el('btnLive');
+    if (btn) btn.classList.toggle('on', liveState.on);
+    const panel = el('livePanel');
+    if (panel) panel.classList.toggle('hidden', !liveState.on);
+    const cEl = el('liveChaos'), mEl = el('liveMemory');
+    if (cEl) cEl.value = String(liveState.chaos);
+    if (mEl) mEl.value = String(liveState.memory);
+    const cv = el('liveChaosVal'), mv = el('liveMemoryVal');
+    if (cv) cv.textContent = liveState.chaos.toFixed(2);
+    if (mv) mv.textContent = liveState.memory.toFixed(2);
+    if (document.body) {
+      document.body.dataset.live = liveState.on ? '1' : '0';
+      document.body.dataset.chaos = liveState.chaos.toFixed(2);
+      document.body.dataset.memory = liveState.memory.toFixed(2);
+    }
+  }
+
+  function wireLive() {
+    const btn = el('btnLive');
+    if (btn) {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        liveState.on = !liveState.on;
+        saveLiveState();
+        applyLiveState(true);
+      });
+    }
+    const close = el('btnLiveClose');
+    if (close) close.addEventListener('click', (e) => {
+      e.stopPropagation();
+      liveState.on = false;
+      saveLiveState();
+      applyLiveState(true);
+    });
+    const bind = (id, key) => {
+      const input = el(id);
+      if (!input) return;
+      input.addEventListener('input', () => {
+        liveState[key] = clamp(parseFloat(input.value) || 0, 0, 1);
+        saveLiveState();
+        applyLiveState(true);
+      });
+      // 触屏拖动时别让指针锁定/摇杆抢事件
+      input.addEventListener('pointerdown', (e) => e.stopPropagation());
+      input.addEventListener('touchstart', (e) => e.stopPropagation(), { passive: true });
+    };
+    bind('liveChaos', 'chaos');
+    bind('liveMemory', 'memory');
+    applyLiveState(false);
+  }
+
   /* ---------------- 启动 ---------------- */
   function boot() {
     applyVersion();
+    liveState = loadLiveState();
     buildGallery();
     buildCompass();
+    prefetchDepthModel();
     initIntro();
     wireUI();
 
@@ -949,6 +1059,14 @@
     }
     window.__pw = {
       enterWorld, WORLDS, version: VERSION,
+      get live() { return Object.assign({}, liveState, world && world.extender ? { ext: world.extender.getLive() } : {}); },
+      setLive(p) {
+        if (typeof p.chaos === 'number') liveState.chaos = clamp(p.chaos, 0, 1);
+        if (typeof p.memory === 'number') liveState.memory = clamp(p.memory, 0, 1);
+        if (typeof p.on === 'boolean') liveState.on = p.on;
+        saveLiveState(); applyLiveState(true);
+        return liveState;
+      },
       get world() { return world; },
       get renderer() { return renderer; },
       get player() { return player; },

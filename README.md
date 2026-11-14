@@ -24,6 +24,12 @@ python -m http.server 8099 --bind 127.0.0.1
 - 语义分组（v1.16）：默认开，`?sem=0` 关闭；结果写到 `body.dataset.semstats`
 - 扇环延伸（v1.16）：默认开，`?ext=0` 关闭，`?extr=3..8` 调保留半径（默认 5 块 × 32m），
   `?api=http://127.0.0.1:8100` 指向本地 GPU 生成服务（不填则纯程序化）
+- **实时变化（v1.18，类 Oasis）**：HUD 里的「实时变化」按钮，开启后两个滑杆
+  · `混乱度 chaos`（`?chaos=`）0 = 整个世界按照片这一个主题生成（连续无缝）；
+    1 = 每个扇区的地貌与之前、与邻居**完全无关**（主题原型来自 1268 张图集的聚类）
+  · `记忆力 memory`（`?memory=`）1 = 生成后基本不再改变；0 = **眼前不动、身后迅速变化**：
+    视锥外的扇区按 ~1.8 次/秒的概率重掷（epoch+1），转身看到的是新地貌
+  · 也可以直接 `?live=1&chaos=0.6&memory=0.3` 进世界；状态记在 localStorage
 - 单体真网格（v1.16，可选）：`?obj3d=1&api=http://127.0.0.1:8100`，服务端 InstantMesh/TripoSR
 - 质检：`?dbgpos=1` 把重建网格挂到 `world.dbgPos`；`?skip=floor,cards,shell,ground` 分层关；
   `node tools/probe.mjs --url ... --exprfile tools/diag_jumps.js` 查竖直跳变
@@ -222,6 +228,28 @@ server/            本地 GPU 生成服务（FastAPI）：/api/extend、/api/obj
 training/          数据集整理与训练脚本（四条能力对应四个可训练模型），见 training/README.md
 CHANGELOG.md       面向使用者的更新日志
 ```
+
+## 视锥实时生成（v1.18）
+
+扇环外不再是「镜像副本」或「一套固定噪声铺满 360°」，而是**只生成相机视锥覆盖的格子**：
+
+| 层 | 做什么 | 代码 |
+|---|---|---|
+| 候选 | 以玩家为中心 9 格（288m）扫一遍，按「是否在视锥内 → 距离」排序 | `extend.js::update` |
+| 预算 | 视锥内缺口 > 8 时单拍补 8 块（每块 ~1–3ms），否则 4 块；**转身时优先补身后** | 同上 |
+| 保底 | 玩家周围 1.6 格无条件生成，避免转身瞬间脚下是空的 | 同上 |
+| 主题 | 24 个扇区（15°）× epoch；原型提供配色/起伏/频率，hash 提供形状种子 | `themeFor / tintOf` |
+| 记忆 | 视锥外扇区按 `(1-memory)²×1.8` 次/秒重掷，只删不重建（看不见的不烧 CPU） | `decayMemory` |
+| 行走 | `heightAt` 是 (x,z,sector,epoch) 的解析函数，**不限制移动范围**，脚下永远与渲染同源 | `themedHeight` |
+
+混乱度=0 时 `themedHeight` 逐值等于 v1.16 的 `outsideHeight`（回归测试守住这条），
+所以「同一主题」不会引入任何接缝；混乱度=1 时每个扇区换一套原型与噪声种子，边界允许硬跳变
+（这正是"完全无关"的定义）。
+
+参考：Oasis（Decart）逐帧生成 + 短上下文导致「走远了 / 转身后地貌就变了」是其公开已知的短板，
+官方方向是滑动窗口与显式记忆；本项目的 `记忆力` 就是把这个**失效模式变成可调参数**。
+分块流式（load near / unload far）与「coherence from shared fields」的做法参考了
+常规无限地形工程实现（Minecraft/No Man's Sky 式 chunk streaming）。
 
 ## 已知限制
 

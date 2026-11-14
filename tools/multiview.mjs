@@ -38,6 +38,27 @@ const VIEWS = parseInt(arg('views', '16'), 10);
 const OUTDIR = arg('out', 'shots/mv');
 const JSONOUT = arg('json', 'reports/multiview.json');
 const RADIUS = parseFloat(arg('radius', '11'));
+/* 32 视角套餐：三圈不同「视角 + 坐标」
+   A 圈 12 个方位（r=10，平视）      ：照片区域内的日常观看视角
+   B 圈 12 个方位（r=26，微仰）      ：照片区域内的远景 / 地平线衔接
+   C 圈 8 个方位（r=75）             ：**区域外**（|x|>55 或 z>0 或 z<-100），
+                                      检查视锥实时生成的地貌；一半平视、一半 14m 俯视。
+   之前的 C 圈放在 r=18（仍在照片矩形内），32 张全落在照片几何上，
+   等于没测到生成区 —— 细看指标才发现。 */
+const RINGS_32 = (() => {
+  const plan = [];
+  for (let i = 0; i < 12; i++) plan.push({ ring: 'A', a: (i / 12) * Math.PI * 2, r: 10, pitch: -0.10, eye: null });
+  for (let i = 0; i < 12; i++) plan.push({ ring: 'B', a: (i / 12) * Math.PI * 2, r: 26, pitch: 0.05, eye: null });
+  for (let i = 0; i < 8; i++) {
+    const elevated = i % 2 === 1;
+    plan.push({
+      ring: 'C', a: (i / 8) * Math.PI * 2, r: 75,
+      pitch: elevated ? -0.35 : -0.02,
+      eye: elevated ? 14 : null
+    });
+  }
+  return plan;
+})();
 const CENTER = (arg('center', '0,-26')).split(',').map(Number);
 const PITCH = parseFloat(arg('pitch', '-0.10'));
 const WAIT = parseInt(arg('wait', '100'), 10);       // 单图最长等待（秒）
@@ -281,27 +302,34 @@ try {
     const dbg = state.dbg ? JSON.parse(state.dbg) : null;
     if (dbg) rec.relief = dbg;
 
-    for (let i = 0; i < VIEWS; i++) {
-      const a = (i / VIEWS) * Math.PI * 2;
-      const x = cx + Math.sin(a) * RADIUS;
-      const z = cz + Math.cos(a) * RADIUS;
-      const ok = await evalIn(send, `window.__setCam ? window.__setCam(${x.toFixed(2)}, ${z.toFixed(2)}, ${(-a).toFixed(4)}, ${PITCH}) : false`);
+    const plan = (VIEWS === 32) ? RINGS_32 : Array.from({ length: VIEWS }, (_, i) => ({
+      ring: 'A', a: (i / VIEWS) * Math.PI * 2, r: RADIUS, pitch: PITCH, eye: null
+    }));
+    for (let i = 0; i < plan.length; i++) {
+      const v = plan[i];
+      const a = v.a;
+      const x = cx + Math.sin(a) * v.r;
+      const z = cz + Math.cos(a) * v.r;
+      const eyeArg = (v.eye === null || v.eye === undefined) ? 'undefined' : String(v.eye);
+      const ok = await evalIn(send, `window.__setCam ? window.__setCam(${x.toFixed(2)}, ${z.toFixed(2)}, ${(-a).toFixed(4)}, ${v.pitch}, ${eyeArg}) : false`);
       if (!ok) throw new Error('页面缺少 window.__setCam');
       await sleep(SETTLE);
       const shot = await send('Page.captureScreenshot', { format: 'png' });
       const buf = Buffer.from(shot.data, 'base64');
-      const file = path.join(OUTDIR, `${path.basename(rel).replace(/\.[a-z0-9]+$/i, '')}_${String(i).padStart(2, '0')}.png`);
+      const file = path.join(OUTDIR, `${path.basename(rel).replace(/\.[a-z0-9]+$/i, '')}_${v.ring}${String(i).padStart(2, '0')}.png`);
       fs.writeFileSync(file, buf);
       const m = metrics(decodePNG(buf));
-      rec.views.push({ i, a: +(a * 180 / Math.PI).toFixed(0), ...m, file: file.replace(/\\/g, '/') });
+      rec.views.push({ i, ring: v.ring, r: v.r, a: +(a * 180 / Math.PI).toFixed(0), ...m, file: file.replace(/\\/g, '/') });
     }
-    // 俯视：检查地面有没有洞、单体是否浮空
-    await evalIn(send, `window.__setCam(${cx}, ${(cz - RADIUS * 0.55).toFixed(2)}, 0, -1.0, 24)`);
-    await sleep(SETTLE);
-    const top = Buffer.from((await send('Page.captureScreenshot', { format: 'png' })).data, 'base64');
-    const topFile = path.join(OUTDIR, `${path.basename(rel).replace(/\.[a-z0-9]+$/i, '')}_top.png`);
-    fs.writeFileSync(topFile, top);
-    rec.top = { ...metrics(decodePNG(top)), file: topFile.replace(/\\/g, '/') };
+    // 俯视：检查地面有没有洞、单体是否浮空（32 视角套餐的 C 圈已含俯视，跳过）
+    if (VIEWS !== 32) await evalIn(send, `window.__setCam(${cx}, ${(cz - RADIUS * 0.55).toFixed(2)}, 0, -1.0, 24)`);
+    if (VIEWS !== 32) {
+      await sleep(SETTLE);
+      const top = Buffer.from((await send('Page.captureScreenshot', { format: 'png' })).data, 'base64');
+      const topFile = path.join(OUTDIR, `${path.basename(rel).replace(/\.[a-z0-9]+$/i, '')}_top.png`);
+      fs.writeFileSync(topFile, top);
+      rec.top = { ...metrics(decodePNG(top)), file: topFile.replace(/\\/g, '/') };
+    }
 
     rec.ok = true;
     // 聚合：均值 + 最差视角（改进前/后对比看这两个数）

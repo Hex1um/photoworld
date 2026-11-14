@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#08090b">
 <title>PHOTOWORLD — 走进照片里的世界</title>
 <meta name="description" content="上传一张风景照片，在浏览器里重建为可以自由行走的 3D 世界。">
-<link rel="stylesheet" href="css/style.css?v=1.17.0">
+<link rel="stylesheet" href="css/style.css?v=1.18.0">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23111'/><circle cx='16' cy='16' r='6' fill='none' stroke='%23d8c9a8' stroke-width='1.6'/><path d='M16 4v4M16 24v4M4 16h4M24 16h4' stroke='%23d8c9a8' stroke-width='1.6'/></svg>">
 </head>
 <body>
@@ -24,7 +24,7 @@
     </div>
     <div class="topbar-actions">
       <span class="live-dot" id="liveDot"></span>
-      <span class="ver-chip" id="verBadge" title="PHOTOWORLD 版本">v1.17.0</span>
+      <span class="ver-chip" id="verBadge" title="PHOTOWORLD 版本">v1.18.0</span>
       <button class="ghost" id="btnAbout">工作原理</button>
     </div>
   </header>
@@ -61,7 +61,7 @@
     <span class="dot"></span>
     <span id="footStat">Depth-Anything-V2-Small · 518×518</span>
     <span class="dot"></span>
-    <span id="footVer" class="foot-ver">v1.17.0</span>
+    <span id="footVer" class="foot-ver">v1.18.0</span>
   </footer>
 </div>
 
@@ -89,6 +89,10 @@
         <button data-act="upload" class="icon-btn" title="上传照片">
           <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
           <span>照片</span>
+        </button>
+        <button data-act="live" class="icon-btn" id="btnLive" title="实时变化（视锥外地貌按需生成）">
+          <svg viewBox="0 0 24 24"><path d="M12 2.6v3.2M12 18.2v3.2M4.1 7.3l2.8 1.6M17.1 15.1l2.8 1.6M4.1 16.7l2.8-1.6M17.1 8.9l2.8-1.6"/><circle cx="12" cy="12" r="3.1"/></svg>
+          <span>实时变化</span>
         </button>
         <button data-act="sound" class="icon-btn" title="环境声">
           <svg viewBox="0 0 24 24"><path d="M4 9v6h3l5 4V5L7 9H4zm12-1a5 5 0 010 8"/></svg>
@@ -120,6 +124,25 @@
         <button class="ghost" id="btnBackGallery">返回画廊</button>
       </div>
     </div>
+  </div>
+
+  <!-- 实时变化参数（点 HUD 的「实时变化」展开） -->
+  <div class="live-panel hidden" id="livePanel">
+    <div class="live-head">
+      <b>实时变化</b>
+      <button class="live-x" id="btnLiveClose" title="收起">×</button>
+    </div>
+    <label class="live-row">
+      <span>混乱度</span>
+      <input type="range" id="liveChaos" min="0" max="1" step="0.01" value="0.35">
+      <em id="liveChaosVal">0.35</em>
+    </label>
+    <label class="live-row">
+      <span>记忆力</span>
+      <input type="range" id="liveMemory" min="0" max="1" step="0.01" value="0.70">
+      <em id="liveMemoryVal">0.70</em>
+    </label>
+    <p class="live-hint">混乱度 1：视锥外新生成的地貌与之前完全无关；记忆力 0：眼前保持不动，身后被迅速重掷。</p>
   </div>
 
   <div id="joystick"><div id="joystickKnob"></div></div>
@@ -178,20 +201,21 @@ window.addEventListener('unhandledrejection', function (e) {
 });
 </script>
 
-<script src="js/mat.js?v=1.17.0"></script>
-<script src="js/glutil.js?v=1.17.0"></script>
-<script src="js/reconstruct.js?v=1.17.0"></script>
-<script src="js/world.js?v=1.17.0"></script>
-<script src="js/depth.js?v=1.17.0"></script>
-<script src="js/objects.js?v=1.17.0"></script>
-<script src="js/semantics.js?v=1.17.0"></script>
-<script src="js/intro.js?v=1.17.0"></script>
-<script src="js/glbworld.js?v=1.17.0"></script>
-<script src="js/renderer.js?v=1.17.0"></script>
-<script src="js/player.js?v=1.17.0"></script>
-<script src="js/audio.js?v=1.17.0"></script>
-<script src="js/extend.js?v=1.17.0"></script>
-<script src="js/object3d.js?v=1.17.0"></script>
-<script src="js/app.js?v=1.17.0"></script>
+<script src="js/mat.js?v=1.18.0"></script>
+<script src="js/glutil.js?v=1.18.0"></script>
+<script src="js/reconstruct.js?v=1.18.0"></script>
+<script src="js/world.js?v=1.18.0"></script>
+<script src="js/depth.js?v=1.18.0"></script>
+<script src="js/objects.js?v=1.18.0"></script>
+<script src="js/semantics.js?v=1.18.0"></script>
+<script src="js/intro.js?v=1.18.0"></script>
+<script src="js/glbworld.js?v=1.18.0"></script>
+<script src="js/renderer.js?v=1.18.0"></script>
+<script src="js/player.js?v=1.18.0"></script>
+<script src="js/audio.js?v=1.18.0"></script>
+<script src="js/live_params.js?v=1.18.0"></script>
+<script src="js/extend.js?v=1.18.0"></script>
+<script src="js/object3d.js?v=1.18.0"></script>
+<script src="js/app.js?v=1.18.0"></script>
 </body>
 </html>

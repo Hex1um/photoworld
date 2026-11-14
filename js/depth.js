@@ -14,7 +14,7 @@
   const MODEL = BASE + 'models/model_quantized.onnx';
   const SIZE = 518;   // DPT 输入尺寸（14 的倍数）
 
-  const S = { session: null, loading: null, failed: null, ort: null };
+  const S = { session: null, loading: null, failed: null, ort: null, listeners: [], stage: null };
 
   /* 同一张照片重复进入世界时复用深度图，省掉一次约 5s 的 CPU 推理。
      key 用「尺寸 + 16×16 缩略图内容指纹」而不是纯 URL：CDN 同名换图、
@@ -129,23 +129,138 @@
     });
   }
 
-  function fetchBuffer(url, onProgress) {
-    return fetch(url).then((r) => {
+  /* 模型字节：流式下载 + 真实进度 + 浏览器缓存。
+   *
+   * 旧实现 `fetch(url).then(r => r.arrayBuffer())` 只有「拿到响应头」和「下载结束」
+   * 两个事件，中间 27MB 全程没有回调 —— 界面就卡在 15% 不动（手机 4G 上能卡十几秒
+   * 到一分钟），用户以为死了。现在按 chunk 读，进度 = 已下载字节 / content-length。
+   *
+   * 另外两级缓存：
+   *   1) Cache Storage（跨会话持久）：第二次进世界直接命中，不再走网络；
+   *   2) HTTP 缓存由 CDN 自己管，这里不干预（GitHub Pages 带 ETag）。
+   * 没有 caches API（file:// 或旧浏览器）时静默退化为直接下载。
+   *
+   * 卡死保护：20 秒没有任何新字节就 abort，让上层按「模型不可用」回退到天际线方案，
+   * 而不是让载入界面永远停在某一个百分比。
+   */
+  const MODEL_CACHE = 'pw-depth-model-v1';
+  const MB = 1048576;
+
+  async function fromCacheStorage() {
+    try {
+      if (!global.caches) return null;
+      const c = await global.caches.open(MODEL_CACHE);
+      const hit = await c.match(MODEL);
+      if (!hit) return null;
+      return await hit.arrayBuffer();
+    } catch (e) {
+      return null;                       // 隐私模式 / 配额满：当作没缓存
+    }
+  }
+
+  async function toCacheStorage(buf) {
+    try {
+      if (!global.caches) return;
+      const c = await global.caches.open(MODEL_CACHE);
+      await c.put(MODEL, new Response(buf, {
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': String(buf.byteLength)
+        }
+      }));
+    } catch (e) { /* 存不下不影响本次使用 */ }
+  }
+
+  async function fetchBuffer(onProgress) {
+    const report = (p, label) => { if (onProgress) onProgress(p, label); };
+
+    const cached = await fromCacheStorage();
+    if (cached && cached.byteLength > 1e6) {
+      report(0.9, '深度模型已在本地缓存（' + (cached.byteLength / MB).toFixed(1) + 'MB）');
+      return cached;
+    }
+
+    report(0.02, '连接模型服务器…');
+    /* 卡死保护依赖 AbortController + setInterval。Node 回归沙箱里没有
+       AbortController（也不该为了一个 UI 计时器去 polyfill），这里按能力降级：
+       没有就用不带 signal 的 fetch，保证纯逻辑回归能跑。 */
+    const canAbort = typeof AbortController === 'function' && typeof setInterval === 'function';
+    const ctrl = canAbort ? new AbortController() : null;
+    let lastByte = performance.now();
+    const guard = canAbort ? setInterval(() => {
+      if (performance.now() - lastByte > 20000) ctrl.abort();
+    }, 1000) : null;
+
+    try {
+      const r = await fetch(MODEL, ctrl ? { signal: ctrl.signal } : undefined);
       if (!r.ok) throw new Error('模型下载失败 ' + r.status);
-      if (onProgress) onProgress(0.15);
-      return r.arrayBuffer();
-    }).then((b) => {
-      if (onProgress) onProgress(1);
-      return b;
-    });
+      const total = (r.headers && typeof r.headers.get === 'function')
+        ? (Number(r.headers.get('content-length')) || 0) : 0;
+      if (!r.body || !r.body.getReader) {
+        // 极老浏览器没有流式 body：退回一次性读取，至少给个"下载中"的标签
+        report(0.05, '下载深度模型（浏览器不支持流式进度）…');
+        const buf = await r.arrayBuffer();
+        report(0.9, '深度模型下载完成（' + (buf.byteLength / MB).toFixed(1) + 'MB）');
+        return buf;
+      }
+
+      const reader = r.body.getReader();
+      const chunks = [];
+      let got = 0, lastPct = -1;
+      const t0 = performance.now();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        got += value.length;
+        lastByte = performance.now();
+        const p = total ? Math.min(1, got / total) : Math.min(0.85, got / (27 * MB));
+        if (p - lastPct >= 0.01 || p === 1) {
+          lastPct = p;
+          const secs = Math.max(0.2, (performance.now() - t0) / 1000);
+          const speed = (got / MB / secs).toFixed(1);
+          report(0.02 + p * 0.86, total
+            ? '下载深度模型 ' + Math.round(p * 100) + '%（'
+              + (got / MB).toFixed(1) + ' / ' + (total / MB).toFixed(1) + 'MB · ' + speed + 'MB/s）'
+            : '下载深度模型 ' + (got / MB).toFixed(1) + 'MB（' + speed + 'MB/s）');
+        }
+      }
+
+      const buf = new Uint8Array(got);
+      let off = 0;
+      for (const c of chunks) { buf.set(c, off); off += c.length; }
+      report(0.9, '深度模型下载完成（' + (got / MB).toFixed(1) + 'MB），写入本地缓存');
+      toCacheStorage(buf.buffer);
+      return buf.buffer;
+    } finally {
+      if (guard) clearInterval(guard);
+    }
+  }
+
+  /* 进度广播：落地页会预取模型，用户此时点进世界 -> 两个调用方共用同一个 init。
+     没有广播的话，第二个调用方拿不到任何回调，界面又会「卡在某个百分比」。
+     `S.stage` 记住最后一次进度，新订阅者立刻收到当前状态。 */
+  function attach(onProgress) {
+    if (!onProgress) return;
+    S.listeners.push(onProgress);
+    if (S.stage) { try { onProgress(S.stage.p, S.stage.label); } catch (e) {} }
+  }
+  function broadcast(p, label) {
+    S.stage = { p, label };
+    for (const f of S.listeners) { try { f(p, label); } catch (e) { /* 单个订阅者异常不影响加载 */ } }
   }
 
   async function init(onProgress) {
-    if (S.session) return S.session;
+    if (S.session) {
+      if (onProgress) onProgress(1, '深度模型已就绪');
+      return S.session;
+    }
     if (S.failed) throw S.failed;
-    if (S.loading) return S.loading;
+    if (S.loading) { attach(onProgress); return S.loading; }
 
+    attach(onProgress);
     S.loading = (async () => {
+      broadcast(0, '加载推理运行时…');
       await loadScript(ORT_JS);
       const ort = global.ort;
       if (!ort) throw new Error('onnxruntime-web 未就绪');
@@ -155,20 +270,28 @@
       ort.env.logLevel = 'error';
       S.ort = ort;
 
-      const buf = await fetchBuffer(MODEL, onProgress);
+      const buf = await fetchBuffer(broadcast);
+      // 建会话 = 解析 ONNX 图 + 编译 WASM 内核，弱机上要几秒到十几秒。
+      // 这一段以前完全静默，界面停在「下载 100%」不动，同样像卡死。
+      broadcast(0.92, '编译 WASM 内核（解析 ONNX 计算图）…');
+      const t0 = performance.now();
       const session = await ort.InferenceSession.create(buf, {
         executionProviders: ['wasm'],
         graphOptimizationLevel: 'all'
       });
       S.session = session;
+      broadcast(1, '深度模型就绪（' + ((performance.now() - t0) / 1000).toFixed(1) + 's）');
       return session;
     })();
 
     try {
-      return await S.loading;
+      const out = await S.loading;
+      S.listeners.length = 0;
+      return out;
     } catch (e) {
       S.failed = e;
       S.loading = null;
+      S.listeners.length = 0;
       throw e;
     }
   }
