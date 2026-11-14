@@ -4,6 +4,10 @@
 
   const { hashString, clamp } = window.PW.util;
 
+  /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
+     测试脚本读 body[data-version]，避免两处手改不同步。 */
+  const VERSION = '1.17.0';
+
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
     { id: 'desert', name: '赤岩峡谷', sub: '犹他荒漠 · 黄金时刻', src: 'worlds/desert.jpg', thumb: 'worlds/desert_thumb.jpg', badge: '峡谷' },
@@ -251,6 +255,10 @@
         sem: sem,
         // 质检：?dbgpos=1 时把 relief 顶点位置暴露到 world.dbgPos（排查竖条/鳍）
         dbgPos: params.get('dbgpos') === '1',
+        // 重建表面背面剔除：默认开（v1.17），?cull=0 回到旧的双面渲染做 A/B
+        noCull: params.get('cull') === '0',
+        // 地面远处渐隐到地面基色（压极坐标拉丝）：默认开，?gblend=0 做 A/B
+        groundFade: params.get('gblend') !== '0',
         // 真实分阶段回调：中值 / 反投影 / 法线 / 索引 / 高度场各推进一格
         onProgress: (p) => setProgress(75 + p * 12,
           p < 0.35 ? '深度去噪：5×5 中值…'
@@ -877,8 +885,19 @@
     document.addEventListener('dragstart', (e) => e.preventDefault());
   }
 
+  /* ---------------- 版本号 ---------------- */
+  function applyVersion() {
+    const v = 'v' + VERSION;
+    const chip = el('verBadge');
+    if (chip) chip.textContent = v;
+    const fv = el('footVer');
+    if (fv) fv.textContent = v;
+    if (document.body) document.body.dataset.version = VERSION;
+  }
+
   /* ---------------- 启动 ---------------- */
   function boot() {
+    applyVersion();
     buildGallery();
     buildCompass();
     initIntro();
@@ -909,13 +928,27 @@
     if (instant) document.body.classList.add('instant');
     const glbUrl = q.get('glb');
     if (glbUrl) { setTimeout(() => enterAsset(glbUrl), 100); }
+    /* ?img=<同源路径> 直接进世界：批量质检（tools/multiview.mjs）用它把语料图
+       一张张喂进同一条在线链路，不经过画廊/上传。只接受同源相对路径，
+       远程地址会被画布污染（getImageData 抛错），且无 CORS 头时本来也读不到像素。 */
+    const imgUrl = q.get('img');
+    if (imgUrl && !glbUrl) {
+      const src = decodeURIComponent(imgUrl);
+      const sameOrigin = src.indexOf('//') < 0 && src.indexOf('data:') !== 0;
+      if (sameOrigin) {
+        const nm = q.get('name') || src.split('/').pop().replace(/\.[a-z0-9]+$/i, '');
+        setTimeout(() => enterWorld({ id: 'corpus:' + nm, name: nm, sub: '语料 · 批量质检', src: src }), 120);
+      } else {
+        console.warn('?img= 只接受同源相对路径，已忽略：' + src);
+      }
+    }
     const wid = q.get('w');
     if (wid) {
       const def = WORLDS.find((w) => w.id === wid);
       if (def) setTimeout(() => enterWorld(def), 120);
     }
     window.__pw = {
-      enterWorld, WORLDS,
+      enterWorld, WORLDS, version: VERSION,
       get world() { return world; },
       get renderer() { return renderer; },
       get player() { return player; },

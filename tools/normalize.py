@@ -12,7 +12,15 @@ W = 420
 OUT = os.path.join(SRC, "_norm")
 
 os.makedirs(OUT, exist_ok=True)
-man = json.load(open(os.path.join(SRC, "manifest.json"), encoding="utf-8"))
+man_path = os.path.join(SRC, "manifest.json")
+man = json.load(open(man_path, encoding="utf-8")) if os.path.exists(man_path) else []
+
+# 清单可能落后于磁盘（采集中断/清单被截断时）：以磁盘上的 jpg 为准补齐，
+# 只看文件本身能不能解码 —— 少归一化几张不该让整条评测链缺数据。
+known = {m["file"]: m for m in man}
+for f in sorted(os.listdir(SRC)):
+    if f.lower().endswith((".jpg", ".jpeg")) and f not in known:
+        man.append({"file": f, "cat": "unknown"})
 ok, bad = 0, 0
 index = []
 

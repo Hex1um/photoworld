@@ -11,8 +11,13 @@ python -m http.server 8099 --bind 127.0.0.1
 ```
 
 - `?w=alpine|desert|coast|winter` 直接进入某个内置世界
+- `?img=corpus/xxx.jpg` 直接打开任意**同源**图片进世界（批量质检用，不经画廊）
 - `?instant=1` 关闭所有过渡（截图/自动化用）
 - `?skip=sky,far,near` 关闭某一层调试
+- 背面剔除（v1.17）：重建表面默认只画正面，转到侧后方看到的是世界幕与雾，
+  而不是糊成一片的「纸片背面」；`?cull=0` 回到 v1.16 的双面渲染做 A/B
+- 地面远处渐隐（v1.17）：地面顶点按到相机的水平距离渐隐到地面基色，
+  压掉极坐标网格的放射状拉丝；`?gblend=0` 关闭做 A/B
 - `?ring=1` 打开"视锥外程序化地平雾带"实验（**观感仍不达标，默认关闭，不建议实际开启**）
 - `?x=6&z=0&yaw=0` 指定出生位置，用来对比走动视差（截图/评测用）
 - 重建 A/B：`?v1=1` 回到 v1.10 的经验曲线 + 死平地面，`?flat=1` 只关近景挤出，`?vg=1.35` 调竖直夸张
@@ -151,17 +156,41 @@ node tools/bump_cache.mjs --check
 **视场错误**必须由 `--verify-fov` 或 `--fov` 覆盖 EXIF 提供独立相机做交叉泼点。
 单视图自洽自检在数学上无法约束尺度/FOV，别只看 99dB 就认为尺度对了。详见 `CHANGELOG.md`。
 
-## 数据驱动调参
+## 多视角批量质检（v1.17）
+
+每张图取 **16 个方位 + 1 个俯视**，逐张算客观指标，用来回答「这张照片重建出来的地貌
+在别的角度看还站不站得住」：
+
+```bash
+node tools/multiview.mjs --base http://127.0.0.1:8099 \
+  --list reports/mv_sample.txt --views 16 --gl hw \
+  --out shots/mv --json reports/mv.json
+```
+
+- `--list` 每行一个相对 base 的图片路径（`corpus/xxx.jpg`），`--corpus <dir>` 可直接整目录
+- `--gl hw|sw`：hw = D3D11 真 GPU（默认），sw = SwiftShader 软件光栅。
+  **两者观感差很多**（软件光栅在掠射角会拉出放射条纹），指标只能同后端对比
+- 指标：`voidFrac` 空底色占比（洞/露底）、`innerVoid` 中央 ROI、`lowVoid` 下 40% 地面、
+  `borderVoid` 外圈、`darkFrac` 塌黑、`stripe` 竖直/水平能量比（竖幕/拉花）、
+  `detail` 平均梯度（越低越糊）
+- 空底色用「画面主色」判定（16 级直方图最大桶），不依赖雾色 —— 夜景里雾色接近黑，
+  用雾色比色会把整屏误判成雾
+
+## 数据驱动调参（图集标定）
 
 `tools/` 下是一条完整的语料 → 评测 → 调参链路（仅本地使用，不参与发布）：
 
 ```bash
-python tools/harvest.py --target 520 --out corpus   # 从 360 图搜按 20 类场景抓横构图大图
+python tools/harvest.py --target 1200 --out corpus --pages 16 --min-w 800
 python tools/normalize.py corpus                    # 统一成 420 宽基线 JPEG（Node 才能全量解码）
-node tools/eval.mjs --sets baseline,strict,loose    # 多组参数在同一批图上的量化对比
+node tools/eval.mjs --corpus corpus --sets baseline,strict,loose
 ```
 
-`eval.mjs` 用 Node 里的 `jpeg-js` 解码，直接调与浏览器完全相同的 `analyzePixels`，统计地平线截断率、天空识别失效率、高度饱和率、低谷率等指标。当前默认阈值来自 503 张语料上 7 组参数的扫描结果（score 0.704 vs 基线 0.645）。
+`harvest.py` 是**内存校验**的：只有 PIL 真解码通过（≥700×400、横构图）的字节才落盘，
+文件名取内容哈希（天然去重）。旧版先写 `.part` 再删，热链返 404/502 时会留下
+一堆几十 KB 的假 jpg（一次实测 969 个文件里只有 461 张能读）。
+
+`eval.mjs` 用 Node 里的 `jpeg-js` 解码，直接调与浏览器完全相同的 `analyzePixels`，统计地平线截断率、天空识别失效率、高度饱和率、低谷率等指标。默认阈值来自 503 张语料上 7 组参数的扫描结果（score 0.704 vs 基线 0.645）；v1.17 把语料扩到 1000+ 张复核了同一组参数。
 
 `tools/shot.mjs` 是基于 CDP 的真实等待式截图工具（等页面 `data-ready` 再截），比 `--virtual-time-budget` 可靠。
 
@@ -187,7 +216,7 @@ models/            Depth-Anything-V2-Small 量化 ONNX（27MB）
 vendor/ort/        onnxruntime-web（WASM 单线程）
 worlds/            内置场景图
 train/             历史实验：早期本地小网络（deprecated，运行时无引用，见 train/README.md）
-tools/             语料采集 / 归一化 / 批量评测 / CDP 截图 / 算法回归 / 缓存升版
+tools/             语料采集 / 归一化 / 批量评测 / 多视角质检 / CDP 截图 / 算法回归 / 缓存升版
 worldmodel/        Causal World DiT（action_codec 统一训练/推理动作，data/ 读 tar 与 .latent）
 server/            本地 GPU 生成服务（FastAPI）：/api/extend、/api/object3d，见 server/README.md
 training/          数据集整理与训练脚本（四条能力对应四个可训练模型），见 training/README.md

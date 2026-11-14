@@ -21,8 +21,7 @@ seed: 0
 train:
   batch_size: 2
   clip: 1.0
-  drop_action: 0.1
-  drop_init: 0.1
+  drop_cond: 0.1
   ema: 0.999
   grad_accum: 1
   hist_noise_prob: 0.5
@@ -32,6 +31,10 @@ train:
   out: runs/s3
   resume: true
   scheduled_sampling: 0.5
+  # forward：多跑一次 DiT 前向造自产帧（旧行为，+16.7% MACs）
+  # noise_proxy：把真值 z1 往噪声方向推一点当自产帧，零额外前向
+  ss_mode: noise_proxy
+  val_max_samples: 64
   steps: 1500
   val_every: 250
   warmup: 100

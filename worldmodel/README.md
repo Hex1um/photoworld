@@ -119,6 +119,23 @@ trainer 检测到 batch 的 `z_init` 就跳过 VAE，这个瓶颈归零；原分
 验证 loss 现在临时换上 EMA 权重再评估（评估完恢复训练权重），与默认加载 EMA 的
 rollout 同源；日志里的 `val loss ... (EMA)` 即此路径。
 
+### 三项「省时不改算法」的开关（v1.17，全部 opt-in，默认行为不变）
+
+| 配置键 | 默认 | 作用 | 代价 |
+|---|---|---|---|
+| `data.prefer_latent` | `false` | 自动切到 `{shard_dir}_latent`（缺失则回退并打印），训练循环内 VAE encode 归零 | 需离线预编码一次 |
+| `train.ss_mode: noise_proxy` | `forward` | scheduled sampling 不再多跑一次 DiT 前向：`z_self = (1-α)z1 + αε`，α~U(0.05,0.25) | 无（`s3.yaml` p=0.5 时省掉 +16.7% MACs） |
+| `train.val_max_samples` | `0`（全量） | 固定 seed 抽固定子集验证，`val_every` 到点时不再遍历全量 val | 指标方差更小、开销降一个量级 |
+| `train.ema_every` | `1` | 每 N 步更新一次 EMA，衰减用 `decay**N` 补偿 | 无（显存访存减少） |
+
+`configs/s1_fast.yaml` 是 `s1_base` + 上述四项的现成组合（权重同构，checkpoint 可互读）。
+回归：`python tools/test_trainer_opts.py`（分片自动切换 / latent 直读 / 固定 val 子集 /
+EMA 降频 / noise_proxy 不产生额外前向）。
+
+**没有采用**：`flex_attention` 块稀疏（掩码掉的 41.7% 注意力对可跳过）需要训练机实测
+数值等价后再开，且会替换 SDPA 的 math path，收益 13.9% MACs 但风险高于收益，
+留作下一版在真实分片上做 A/B。
+
 ## 五、Rollout
 
 ```bash

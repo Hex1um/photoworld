@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from worldmodel.data.dataset import TarWindows, collate, split_dataset
+from worldmodel.data.dataset import Subset, TarWindows, collate, split_dataset
 from worldmodel.model.dit import CausalWorldDiT, DiTConfig, count_params
 from worldmodel.model.tokenizer import Tokenizer
 
@@ -20,10 +20,14 @@ class EMA:
 
     固定 decay=0.999 在短训练里是灾难：300 步后影子权重仍有 74% 是初始随机值，
     rollout 拿它推理等于用了个没训过的模型。warmup 让早期紧跟当前权重。
+
+    `every > 1` 时每 N 步才更新一次，等价衰减用 decay**N 补偿
+    （每步都更新 → 时间常数 1/(1-d)；每 N 步更新 → 1/(1-d**N)，两者对齐）。
     """
 
-    def __init__(self, model: torch.nn.Module, decay: float = 0.999):
+    def __init__(self, model: torch.nn.Module, decay: float = 0.999, every: int = 1):
         self.max_decay = decay
+        self.every = max(1, int(every))
         self.step = 0
         self.shadow = {k: v.detach().clone().float() for k, v in model.state_dict().items()}
 
@@ -34,7 +38,9 @@ class EMA:
     @torch.no_grad()
     def update(self, model: torch.nn.Module):
         self.step += 1
-        d = self.decay
+        if self.every > 1 and (self.step % self.every) != 0:
+            return
+        d = self.decay ** self.every
         for k, v in model.state_dict().items():
             s = self.shadow[k]
             if v.dtype.is_floating_point:
@@ -76,6 +82,25 @@ def enable_fast_math() -> None:
     # benchmark=True 会在 sm_120 上对每个 conv 形状做算法搜索，首步要跑几分钟，关掉
 
 
+def resolve_shard_dir(cfg: dict) -> str:
+    """选分片目录：`data.prefer_latent=true` 时优先用预编码 latent 分片。
+
+    VAE 编码是冻结的、结果只跟图片有关，所以「离线编一次 → 训练直读 .latent」
+    与「每步在线编码」在数学上完全等价，只是把 6 次 encode/样本 从训练循环里搬走。
+    没有 latent 分片时退回原目录并明确打印，不静默改变行为（默认 false）。
+    """
+    base = cfg["data"]["shard_dir"]
+    if not cfg["data"].get("prefer_latent"):
+        return base
+    cand = cfg["data"].get("latent_dir") or (base.rstrip("/\\") + "_latent")
+    if os.path.isdir(cand) and any(
+            f.startswith("shard-") and f.endswith(".tar") for f in os.listdir(cand)):
+        print("[data] 使用预编码 latent 分片：%s（训练侧跳过 VAE encode）" % cand, flush=True)
+        return cand
+    print("[data] prefer_latent=true 但没找到 %s 的分片，回退在线编码" % cand, flush=True)
+    return base
+
+
 def train(cfg: dict) -> None:
     enable_fast_math()
     seed = cfg.get("seed", 0)
@@ -86,7 +111,8 @@ def train(cfg: dict) -> None:
     os.makedirs(out_dir, exist_ok=True)
 
     # cache=False：缓存解码后的张量会把内存吃爆（5160×6 帧 ≈ 36GB），导致疯狂换页
-    ds = TarWindows(cfg["data"]["shard_dir"], cfg["data"]["width"], cfg["data"]["height"],
+    shard_dir = resolve_shard_dir(cfg)
+    ds = TarWindows(shard_dir, cfg["data"]["width"], cfg["data"]["height"],
                     cfg["data"]["n_hist"], cache=False,
                     action_scale=cfg["data"].get("action_scale"))
     tr, va = split_dataset(ds, cfg["data"].get("val_ratio", 0.05), seed)
@@ -114,8 +140,20 @@ def train(cfg: dict) -> None:
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min(1.0, (s + 1) / max(1, warm)) *
         (0.5 * (1 + math.cos(math.pi * min(1.0, s / max(1, total))))))
-    ema = EMA(model, cfg["train"].get("ema", 0.999))
+    ema = EMA(model, cfg["train"].get("ema", 0.999), cfg["train"].get("ema_every", 1))
     scaler_dtype = torch.bfloat16
+
+    # 验证集子集化：val_every 一到就遍历全量 val（10% 数据），前向开销能顶 5 个训练 step。
+    # 固定 seed 抽固定样本 + 固定 (t, z0)，val loss 曲线方差更小，前后可比。
+    val_max = int(cfg["train"].get("val_max_samples", 0) or 0)
+    val_noise = None
+    if val_max > 0 and len(va) > val_max:
+        import random as _random
+        order = list(range(len(va)))
+        _random.Random(int(seed) * 7919 + 17).shuffle(order)
+        va = Subset(va, order[:val_max])
+        dl_va = DataLoader(va, batch_size=bs, shuffle=False, num_workers=0, collate_fn=collate)
+        print("[val] 固定子集 %d / %d 条" % (val_max, len(ds) - len(tr)), flush=True)
 
     # 联合条件 dropout：训练与 CFG 的无条件分支共用同一条前向路径。
     # 旧的 drop_action / drop_init 是两次独立 10% dropout，而推理只把 action
@@ -124,6 +162,8 @@ def train(cfg: dict) -> None:
     p_hist_noise = cfg["train"].get("hist_noise_prob", 0.5)
     hist_sigma = cfg["train"].get("hist_noise_sigma", 0.3)
     accum = cfg["train"].get("grad_accum", 1)
+    # "forward"（默认，旧行为：多跑一次前向造自产帧）/ "noise_proxy"（零额外前向）
+    ss_mode = cfg["train"].get("ss_mode", "forward")
 
     step = 0
     resume = cfg["train"].get("resume")
@@ -179,12 +219,19 @@ def train(cfg: dict) -> None:
             # 这里以概率 p 用模型自产的一帧替换最近的历史帧。
             p_ss = cfg["train"].get("scheduled_sampling", 0.0)
             if p_ss > 0 and torch.rand(1).item() < p_ss:
-                with torch.no_grad():
-                    z_noise = torch.randn_like(z1)
-                    t_mid = torch.full((B,), 0.35, device=device)
-                    with torch.autocast("cuda", dtype=scaler_dtype, enabled=(device == "cuda")):
-                        v_self = model(z_init, z_hist, z_noise, t_mid, act, None)
-                    z_self = (z_noise + v_self.float() * 0.65)
+                if ss_mode == "noise_proxy":
+                    # 零成本代理：不再多跑一次 DiT 前向（p=0.5 时那是 +16.7% MACs），
+                    # 直接把真值 z1 沿 flow 轨迹往噪声方向推一点当"自产帧"。
+                    # 单步从纯噪声出发的 z_self 本来就离流形极远，既贵又不真。
+                    alpha = 0.05 + torch.rand(B, 1, 1, 1, device=device) * 0.20
+                    z_self = (1 - alpha) * z1 + alpha * torch.randn_like(z1)
+                else:
+                    with torch.no_grad():
+                        z_noise = torch.randn_like(z1)
+                        t_mid = torch.full((B,), 0.35, device=device)
+                        with torch.autocast("cuda", dtype=scaler_dtype, enabled=(device == "cuda")):
+                            v_self = model(z_init, z_hist, z_noise, t_mid, act, None)
+                        z_self = (z_noise + v_self.float() * 0.65)
                 z_hist = torch.cat([z_hist[:, 1:], z_self.unsqueeze(1)], dim=1)
 
             z0 = torch.randn_like(z1)

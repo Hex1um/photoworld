@@ -76,9 +76,13 @@ const setNameList = arg('sets', 'baseline').split(',');
 const limit = parseInt(arg('limit', '0'), 10);
 const targets = setNameList.map((n) => ({ name: n, opt: SETS[n] || {} }));
 
-const manifestPath = path.join(corpusDir, 'manifest.json');
-if (!fs.existsSync(manifestPath)) {
-  console.error('缺少 corpus/manifest.json，请先运行 python tools/harvest.py');
+// 原始语料用 manifest.json（harvest 产物）；归一化目录只有 index.json（normalize 产物）。
+// 两者字段都含 file/cat，直接按目录挑一个，省掉「再去复制一份清单」的麻烦。
+const manifestPath = ['manifest.json', 'index.json']
+  .map((f) => path.join(corpusDir, f))
+  .find((p) => fs.existsSync(p));
+if (!manifestPath) {
+  console.error('缺少 manifest.json / index.json：先跑 tools/harvest.py 或 tools/normalize.py');
   process.exit(1);
 }
 let manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));

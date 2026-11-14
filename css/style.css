@@ -114,6 +114,19 @@ button.primary:hover { background: #f0e2c0; }
 .brand svg { color: var(--accent); }
 .topbar-actions button { font-size: 12px; padding: 7px 14px; color: var(--dim); }
 .topbar-actions { display: flex; align-items: center; gap: 10px; }
+/* 版本号：顶栏小徽标 + 页脚同源显示（app.js 用 VERSION 常量统一写入） */
+.ver-chip {
+  font-family: var(--mono);
+  font-size: 10.5px; line-height: 1;
+  letter-spacing: .04em;
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: var(--accent);
+  border: 1px solid rgba(224, 207, 169, .28);
+  background: rgba(224, 207, 169, .07);
+  user-select: none;
+}
+.foot-ver { font-family: var(--mono); color: var(--dim); }
 .live-dot {
   width: 6px; height: 6px; border-radius: 50%;
   background: #79c8b8;

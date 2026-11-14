@@ -33,7 +33,7 @@ from collections import OrderedDict
 import numpy as np
 from PIL import Image
 
-__all__ = ["TarWindows", "collate", "split_dataset"]
+__all__ = ["TarWindows", "collate", "split_dataset", "Subset"]
 
 ACT_DIM = 7          # DiTConfig.act_dim
 _MAX_OPEN_SHARDS = 8
@@ -79,6 +79,9 @@ class _Subset:
 
     def __getitem__(self, i):
         return self.ds[int(self.ids[i])]
+
+
+Subset = _Subset     # 公开别名：trainer 的 val 子集化需要包一层固定抽样视图
 
 
 def split_dataset(ds, val_ratio: float = 0.05, seed: int = 0):

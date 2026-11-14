@@ -264,7 +264,13 @@
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(true);
-        gl.disable(gl.CULL_FACE);
+        /* v1.17：默认剔除背面。单层薄壳的双面渲染在侧后方是「糊纸片」，
+           读起来比雾还假；剔除后露出低频世界幕 + 雾，观感连续。
+           混合与剔除可以并存（alpha 只用于天空渐隐），不影响正面边缘。
+           ?cull=0 可回到 v1.16 的双面行为做 A/B。 */
+        const cullRelief = world.reliefCull !== false;
+        if (cullRelief) { gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); }
+        else gl.disable(gl.CULL_FACE);
         drawMesh(world, world.meshes.relief, {
           tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.26, mipBias: 0,
           backdrop: [0, 0]

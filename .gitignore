@@ -7,3 +7,11 @@ __pycache__/
 
 # 质检截图（tools/shot.mjs / probe.mjs / orbit_shot.mjs 产物）
 /shots/
+
+# 语料与评测产物（本地训练/质检用，不入库：1000+ 张图约 300MB）
+/corpus/
+/reports/
+
+# 本地 Node 依赖（jpeg-js 用于 tools/eval.mjs 解码，npm i --no-save 安装）
+node_modules/
+package-lock.json

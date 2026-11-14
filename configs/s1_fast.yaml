@@ -1,0 +1,35 @@
+# s1_base 的「省时」变体：三项零算法风险优化全部打开，权重与 s1_base 同构，
+# checkpoint 可与 s1_base 互读（只改数据路径与调度节奏）。
+#   node … 无；训练：python -m worldmodel.train --config configs/s1_fast.yaml
+# 相对 s1_base 的变化：
+#   data.prefer_latent     预编码 latent 分片直读，训练循环内 0 次 VAE encode
+#   train.val_max_samples  验证固定 64 条子集（曲线方差更小，验证开销 -88%）
+#   train.ema_every        每 4 步更新 EMA（衰减按 4 次方补偿，行为等价）
+data:
+  shard_dir: data/wm
+  prefer_latent: true
+  width: 384
+  height: 256
+  n_hist: 4
+  vae: stabilityai/sd-vae-ft-mse
+  val_ratio: 0.1
+model:
+  dim: 768
+  depth: 12
+  heads: 12
+train:
+  out: runs/s1_fast
+  steps: 2000
+  batch_size: 2
+  grad_accum: 16
+  lr: 1.5e-4
+  warmup: 100
+  clip: 1.0
+  ema: 0.999
+  ema_every: 4
+  drop_cond: 0.1
+  hist_noise_prob: 0.5
+  hist_noise_sigma: 0.3
+  val_every: 500
+  val_max_samples: 64
+  log_every: 20

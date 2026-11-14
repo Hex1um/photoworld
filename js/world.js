@@ -1457,6 +1457,12 @@
     const yWin = new Float32Array(9);
     for (let j = 0; j < GH; j++) {
       for (let i = 0; i < GW; i++) {
+        /* v1.17：地面顶点（y 由「平地 + 眼高」反解，严格 0）不能参与尖刺限幅。
+           旧代码对**所有**顶点做 clamp(y, median-1.5, median+2.2)，而地平线附近
+           地面顶点下方的邻域中值是山体高度（~30m），于是 y=0 被抬到 28.5m
+           —— 地面被拔成一圈放射状竖针（16 视角质检的「拉丝」与俯视「冰柱」
+           都是它）。地面几何本来就精确，跳过即修复。 */
+        if (gGround[j * GW + i] === 1) continue;
         // 只取「下方邻域」（j..j+2）：树梢上方是天空，与天空求中值会把尖刺
         // 一起抬高；下方是树冠/地面，才反映物体真实高度。
         let n = 0;
@@ -1505,6 +1511,7 @@
     for (let j = 0; j < GH; j++) {
       for (let i = 0; i < GW; i++) {
         const k = j * GW + i;
+        if (gGround[k] === 1) continue;      // 地面恒为 y=0，不参与远处横向中值
         if (gT[k] < 60) continue;
         let n = 0;
         for (let di = -3; di <= 3; di++) {
@@ -1521,6 +1528,24 @@
         const med = farWin[(n - 1) >> 1];
         const y0 = pos[k * 3 + 1];
         if (Math.abs(y0 - med) > 4) pos[k * 3 + 1] = med + (y0 > med ? 1 : -1) * 4;
+      }
+    }
+
+    /* 1b-ter) 地面「极坐标拉丝」抑制（v1.17）。
+       地面顶点是按反投影射线落在 y=0 上算出来的：同一 v 行半径相同 →
+       **网格是一圈圈同心圆 + 一条条射线**（极坐标网格）。原始视角下它正好
+       与照片透视一致，但从别的角度（尤其背向/侧向）看，射线上被拉长的四边形
+       会把贴图沿径向拉成一束"放射状拉丝"，是 16 视角质检里最刺眼的一项。
+       这里按到相机水平距离把地面顶点渐隐到地面基色（edge.y 通道，着色器里
+       mode 4 已经 `col = mix(col, uGroundTint, vEdge.y)`）：
+       近处 18m 内保持原样（走动视差与前景细节都在这里），60m 外基本只剩色块。
+       `?gblend=0` 可关掉做 A/B。 */
+    if (opt.groundFade !== false) {
+      for (let k = 0; k < GW * GH; k++) {
+        if (gGround[k] !== 1) continue;
+        if (col[k * 4 + 3] < 0.02) continue;      // 已被天空裁掉的不管
+        const d = Math.hypot(pos[k * 3], pos[k * 3 + 2]);
+        edge[k * 2 + 1] = smoothstep(8, 42, d) * 0.92;
       }
     }
 
@@ -2060,7 +2085,11 @@
       mode: relief ? 'depth' : 'legacy',
       eyeHeight: 1.7,
       // v1.14：深度重建不再限制移动半径（0 = 不限制），边界交给几何与雾
-      walkRadius: relief ? 0 : 116
+      walkRadius: relief ? 0 : 116,
+      /* v1.17：重建表面是单层薄壳，从背面看就是糊成一片的拉花。
+         默认关闭背面（?cull=0 保留旧双面），转到侧后方时看到的是
+         360° 低频世界幕 + 雾，而不是「纸片背面」。 */
+      reliefCull: !(opts && opts.noCull)
     };
 
     /* 光照与雾 */
