@@ -1231,6 +1231,10 @@
     const col = new Float32Array(GW * GH * 4);
     const edge = new Float32Array(GW * GH * 2);
     const gT = new Float32Array(GW * GH);
+    const gFg = new Uint8Array(GW * GH);   // 1 = 比同排地面基线明显更近（近处物体）
+    const gDirX = new Float32Array(GW * GH);
+    const gDirZ = new Float32Array(GW * GH);
+    const gTW = new Float32Array(9);
     for (let j = 0; j < GH; j++) {
       const v = j / (GH - 1);
       for (let i = 0; i < GW; i++) {
@@ -1239,19 +1243,57 @@
         // 天空也压到同一个有限半径 B（不能放到 1.6B，否则会被区域裁剪整片切掉，
         // 天际线处出现一条水平分界线）。
         const d0 = dSample(u, v);
-        const t = clamp(metric(d0), 0.6, B);
         const dx = (u - 0.5) * 2 * tanH;
         const dy0 = (0.5 - v) * 2 * tanV;
         // 绕相机 X 轴加俯仰：dy0 = tan(pitch) 的那一行正好落在地平线
         const dy = dy0 * cosP - sinP;
         const dz = -dy0 * sinP - cosP;
         const l = Math.hypot(dx, dy, dz) || 1;
-        pos[k * 3] = (dx / l) * t;
-        // 地平线以上做竖直夸张：单目深度会把山体/树压扁，照片里的仰角
-        // 乘上距离才是真实高度；地面（dy<0）不夸张，避免脚下被拉低。
-        // 室内（无天空）不做竖直夸张：那会把楼梯/天花板拉成弧形大曲面
-        pos[k * 3 + 1] = eye + (dy / l) * t * ((!indoor && hasSky && dy > 0) ? yGain : 1);
-        pos[k * 3 + 2] = (dz / l) * t;
+        const dirX = dx / l, dirY = dy / l, dirZ = dz / l;
+        const rowBaseD = rowD[j];
+        // 近景判定：YOLOv8n-seg 的实例 mask（语义边界）+ 深度基线兜底。
+        // 深度只知道"更近"，分不清一块石头和一座山的边界；模型 mask 能。
+        const mf = (opt.fgMask && opt.fgMask.data) ? opt.fgMask : null;
+        const modelFg = mf
+          ? mf.data[clamp(Math.round(v * (mf.h - 1)), 0, mf.h - 1) * mf.w
+                   + clamp(Math.round(u * (mf.w - 1)), 0, mf.w - 1)]
+          : 0;
+        // 两种前景各司其职：模型 mask 只负责「边界断开」，深度基线负责
+        // 「近处物体距离限幅」。把模型 mask 拿去限幅会把 96×96 量化的边界
+        // 连带一整片背景压到近处，画面被咬出缺口（楼梯图 A/B 实测）。
+        const isFgDepth = (gS[k] - rowBaseD) > 0.10;
+        const isFg = modelFg > 0 || isFgDepth;
+        gFg[k] = modelFg > 0 ? 1 : 0;
+
+        /* v1.15 距离策略：
+           - 地面：按「平地 + 眼高」反解，严格落在 y=0，近处透视正确、
+             **不会被深度噪声拉成横向长条**（用户反馈的核心问题）；
+           - 山体/树/建筑/近景物体：按深度反投影，远处可以放到 220m；
+           - 近处物体：限制在自身行基线深度附近，**不向远处延伸**。 */
+        let t, y;
+        if (indoor) {
+          // 室内用「行距离」而不是逐像素深度：同一行 t 相同 → 网格规则、
+          // 不会自交遮挡（逐像素反投影在墙面/天花板之间穿插，会把画面咬出空洞）。
+          t = clamp(metric(rowBaseD), 0.6, 18);
+          y = eye + dirY * t;
+        } else if (v > analysis.horizon + 0.005 && !isFg) {
+          t = Math.min(eye / Math.max(0.06, -dirY), 220);
+          y = 0;
+        } else {
+          t = clamp(metric(d0), 0.6, 220);
+          y = eye + dirY * t * ((hasSky && dirY > 0) ? yGain : 1);
+          // 室内不做近景限幅：室内深度范围只有 18m，按行中位判定会把
+          // 半面墙/天花板误标成「近景」，压到近处后画面被咬出锯齿缺口。
+          if (isFgDepth && !indoor) {
+            const tBase = clamp(metric(rowBaseD), 0.8, 220);
+            t = clamp(t, tBase * 0.5, tBase * 1.6);
+            y = clamp(y, -0.5, 12);   // 近景物体（树/石头/人）不会长成几十米的尖塔
+          }
+        }
+        gDirX[k] = dirX; gDirZ[k] = dirZ;
+        pos[k * 3] = dirX * t;
+        pos[k * 3 + 1] = y;
+        pos[k * 3 + 2] = dirZ * t;
         uv[k * 2] = u;
         uv[k * 2 + 1] = v;
         gT[k] = t;
@@ -1264,6 +1306,8 @@
         const aSky = (indoor || !hasSky) ? 1 : smoothstep(skyD + 0.03, skyD + 0.14, d0);
         const aU = smoothstep(0, 0.02, u) * (1 - smoothstep(0.98, 1, u));
         const aV = smoothstep(0, 0.015, v) * (1 - smoothstep(0.985, 1, v));
+        // 室外按深度裁掉天空（否则照片天空会被压到 100m 处，和地面分成两块）；
+        // 室内保留全部像素（室内没有天空，裁切会把墙咬出缺口）。
         col[k * 4 + 3] = aSky * aU * aV;
         col[k * 4] = 1; col[k * 4 + 1] = 1; col[k * 4 + 2] = 1;
         // 有限区域的边界就是照片投影的梯形，alpha 硬边比"融色灰带"干净；
@@ -1279,8 +1323,10 @@
     const yWin = new Float32Array(9);
     for (let j = 0; j < GH; j++) {
       for (let i = 0; i < GW; i++) {
+        // 只取「下方邻域」（j..j+2）：树梢上方是天空，与天空求中值会把尖刺
+        // 一起抬高；下方是树冠/地面，才反映物体真实高度。
         let n = 0;
-        for (let dj = -1; dj <= 1; dj++) {
+        for (let dj = 0; dj <= 2; dj++) {
           const jj = clamp(j + dj, 0, GH - 1);
           for (let di = -1; di <= 1; di++) {
             const ii = clamp(i + di, 0, GW - 1);
@@ -1293,7 +1339,26 @@
           yWin[b + 1] = v;
         }
         const k = j * GW + i;
-        pos[k * 3 + 1] = clamp(pos[k * 3 + 1], yWin[4] - 1.6, yWin[4] + 1.6);
+        pos[k * 3 + 1] = clamp(pos[k * 3 + 1], yWin[4] - 1.5, yWin[4] + 2.2);
+        // 横向尖刺抑制：树梢/电线这类细结构的深度误差会把 x/z 拉出几十米，
+        // 只限 y 没用。对 t 做 3×3 中值限幅（±30%）后重算 x/z。
+        let ts = 0;
+        for (let dj = -1; dj <= 1; dj++) {
+          const jj = clamp(j + dj, 0, GH - 1);
+          for (let di = -1; di <= 1; di++) {
+            gTW[dj * 3 + di] = gT[jj * GW + clamp(i + di, 0, GW - 1)];
+          }
+        }
+        for (let a = 1; a < 9; a++) {
+          const vv = gTW[a]; let b = a - 1;
+          while (b >= 0 && gTW[b] > vv) { gTW[b + 1] = gTW[b]; b--; }
+          gTW[b + 1] = vv;
+        }
+        ts = gTW[4];
+        const tLim = clamp(gT[k], ts * 0.7, ts * 1.4);
+        gT[k] = tLim;
+        pos[k * 3] = gDirX[k] * tLim;
+        pos[k * 3 + 2] = gDirZ[k] * tLim;
       }
     }
 
@@ -1362,14 +1427,24 @@
         const b0 = (j + 1) * GW + i, b1 = b0 + 1;
         const alpha = Math.max(col[a0 * 4 + 3], col[a1 * 4 + 3], col[b0 * 4 + 3], col[b1 * 4 + 3]);
         if (alpha < 0.06) { culledAlpha++; continue; }
-        let inside = true;
-        for (const k of [a0, a1, b0, b1]) {
-          if (Math.abs(pos[k * 3]) > A || pos[k * 3 + 2] < -B - 0.5 || pos[k * 3 + 2] > 1.5) { inside = false; break; }
+        // 近处物体与背景的交界交给下面的深度比值判据（tMax/tMin）。
+        // 曾按「模型 mask 的 fg 顶点数」跳面，但 96×96 的 mask 边界是块状的，
+        // 会在画面里咬出一排方块缺口（楼梯图 A/B 实测），已移除。
+        // 区域裁剪只作用于近景：远景（>60m 的山）交给雾，不硬切，
+        // 否则「远处的物体放得比较远」会被边界一刀切掉。
+        const tNear = Math.min(gT[a0], gT[a1], gT[b0], gT[b1]) < 60;
+        if (tNear) {
+          let inside = true;
+          for (const k of [a0, a1, b0, b1]) {
+            if (Math.abs(pos[k * 3]) > A || pos[k * 3 + 2] < -B - 0.5 || pos[k * 3 + 2] > 1.5) { inside = false; break; }
+          }
+          if (!inside) { culledArea++; continue; }
         }
-        if (!inside) { culledArea++; continue; }
         const tMax = Math.max(gT[a0], gT[a1], gT[b0], gT[b1]);
         const tMin = Math.min(gT[a0], gT[a1], gT[b0], gT[b1]);
-        if (tMax / Math.max(tMin, 0.6) > edgeRatio) { skipped++; continue; }
+        // 室内跳面阈值放宽：楼梯/窗/天花板的深度跳变本来就大，2.6 会把
+        // 画面咬出一排锯齿缺口；室内范围只有 18m，不需要断崖处理。
+        if (tMax / Math.max(tMin, 0.6) > (indoor ? 6 : edgeRatio)) { skipped++; continue; }
         idx.push(a0, b0, a1, a1, b0, b1);
       }
     }
@@ -1432,7 +1507,8 @@
         kept: idx.length / 6, total: quadTotal,
         keepRate: (idx.length / 6) / quadTotal,
         culledAlpha, culledArea, skipped
-      }
+      },
+      meta: { indoor, hasSky, skyD: +skyD.toFixed(3), culledAlpha, culledArea, skipped }
     };
   }
 
@@ -1574,6 +1650,7 @@
               areaX: opts && opts.areaX, areaZ: opts && opts.areaZ,
               gw: opts && opts.gw, gh: opts && opts.gh,
               yGain: opts && opts.yGain,
+              fgMask: opts && opts.fgMask,
               onProgress: opts && opts.onProgress
             })
           : buildRelief(analysis, depthMap, {
@@ -1639,7 +1716,10 @@
 
     const m = {
       relief: relief ? PWGL.createMesh(gl, relief) : null,
-      reliefSurround: (relief && relief.grid) ? PWGL.createMesh(gl, buildSurround(relief, { step: 3 })) : null,
+      // v1.15：默认只生成正面一个扇环，其他地方留空（用户明确要求）。
+      // 镜像副本保留为实验（?surround=1），默认不建，避免假内容。
+      reliefSurround: (relief && relief.grid && opts && opts.surround)
+        ? PWGL.createMesh(gl, buildSurround(relief, { step: 3 })) : null,
       reliefBg: (relief && relief.bg) ? PWGL.createMesh(gl, relief.bg) : null,
       reliefBackdrop: (relief && relief.backdrop) ? PWGL.createMesh(gl, relief.backdrop) : null,
       worldBackdrop: worldBackdrop ? PWGL.createMesh(gl, worldBackdrop) : null,
@@ -1724,7 +1804,7 @@
       mode: worldInfo.mode,
       eyeHeight: worldInfo.eyeHeight,
       walkRadius: worldInfo.walkRadius,
-      reliefMeta: relief ? { vfov: relief.vfov } : null
+      reliefMeta: relief ? Object.assign({ vfov: relief.vfov }, relief.meta || {}) : null
     };
 
     return world;

@@ -192,6 +192,26 @@
         console.warn('深度模型不可用，回退到天际线方案：', e && e.message);
       }
 
+      /* 近景物体识别（YOLOv8n-seg，COCO 80 类）：给「近处物体不要延伸到远处」
+         提供语义边界。失败不影响主流程，回退到纯深度分层。 */
+      let objInfo = null;
+      if (depthMap && window.PW.objects) {
+        try {
+          setProgress(73, '识别近景物体（YOLOv8n-seg · COCO 80 类）…');
+          objInfo = await Promise.race([
+            window.PW.objects.estimate(img, (p) => {
+              if (p < 1) setProgress(73 + p, '下载识别模型 ' + Math.round(p * 100) + '%（14MB）');
+            }),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('物体识别超时')), 25000))
+          ]);
+          setProgress(74, objInfo.labels.length
+            ? ('识别到：' + objInfo.labels.slice(0, 4).join(' / '))
+            : '未识别到显著近景物体');
+        } catch (e) {
+          console.warn('物体识别不可用，回退纯几何分层：', e && e.message);
+        }
+      }
+
       setProgress(75, depthMap ? '反投影：像素 → 世界坐标…' : '构建分层地形…');
       await sleep(40);
       const params = new URLSearchParams(location.search);
@@ -208,6 +228,7 @@
         proxy: params.get('proxy') === '1', // ?proxy=1 实验：360° 低频世界幕（默认关）
         vg: params.has('vg') ? parseFloat(params.get('vg')) : undefined,
         yGain: params.has('yg') ? parseFloat(params.get('yg')) : undefined,
+        fgMask: objInfo && objInfo.fgMask,
         // 真实分阶段回调：中值 / 反投影 / 法线 / 索引 / 高度场各推进一格
         onProgress: (p) => setProgress(75 + p * 12,
           p < 0.35 ? '深度去噪：5×5 中值…'
@@ -289,6 +310,8 @@
         document.body.dataset.ready = '1';
         document.body.dataset.mode = world.mode;
         document.body.dataset.expo = (world.exposure || 0).toFixed(3);
+        if (objInfo) document.body.dataset.objects = objInfo.labels.slice(0, 8).join(',');
+        if (world.reliefMeta) document.body.dataset.dbg = JSON.stringify(world.reliefMeta);
         document.body.dataset.horizon = (world.analysis.horizon || 0).toFixed(3);
         document.body.dataset.fog = world.fogColor.map((v) => v.toFixed(2)).join(',');
       }
