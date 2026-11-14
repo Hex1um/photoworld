@@ -1968,6 +1968,24 @@
            单目深度在树梢/栏杆/细杆上会突然给一个近距离，反投影后就沿视线
            拉出几十米的长鳍；山脊的真实起伏在一个网格单元内只有几十厘米，
            不会被误伤。这一条对没被卡片覆盖到的细高物体兜底。 */
+        /* 语义地形保护（v1.24.5）：山体（TERRAIN）是「单层薄壳」里最容易
+           被误剪的一类 —— 它的陡面同时满足「竖墙」「法线朝下」「背面」三条，
+           剪完就只剩几根立柱和矩形空洞（desert/alpine 截图实测）。
+           语义把这四个角判为 TERRAIN 的面，跳过这三条几何剔除；
+           深度断崖（jump）与 alpha 仍然生效，避免真的把天空拉成片。 */
+        let terrainKeep = false;
+        if (sem) {
+          const g0 = semGroup(i / (GW - 1), j / (GH - 1));
+          const g1 = semGroup((i + 1) / (GW - 1), j / (GH - 1));
+          const g2 = semGroup(i / (GW - 1), (j + 1) / (GH - 1));
+          const g3 = semGroup((i + 1) / (GW - 1), (j + 1) / (GH - 1));
+          let tn = 0;
+          if (g0 === SGRP.TERRAIN) tn++;
+          if (g1 === SGRP.TERRAIN) tn++;
+          if (g2 === SGRP.TERRAIN) tn++;
+          if (g3 === SGRP.TERRAIN) tn++;
+          terrainKeep = tn >= 2;
+        }
         if (sem) {
           const dyV = Math.max(Math.abs(pos[a0 * 3 + 1] - pos[b0 * 3 + 1]),
             Math.abs(pos[a1 * 3 + 1] - pos[b1 * 3 + 1]));
@@ -1976,7 +1994,7 @@
           // 运算符优先级修正：原写法 `!noCull && dyV > 5 || dyH > 5` 等价于
           // `(!noCull && dyV>5) || dyH>5`，导致 `?nocull=steep` 对 dyH 完全失效
           // （山脊两侧水平相邻顶点高差普遍 >5m，A/B 时无法关掉这条剔除）。
-          if (!noCull('steep') && (dyV > 5 || dyH > 5)) { skippedSteep++; continue; }
+          if (!noCull('steep') && !terrainKeep && (dyV > 5 || dyH > 5)) { skippedSteep++; continue; }
         }
         // 近处物体与背景的交界交给下面的深度比值判据（tMax/tMin）。
         // 曾按「模型 mask 的 fg 顶点数」跳面，但 96×96 的 mask 边界是块状的，
@@ -2031,7 +2049,7 @@
              而中近处的真实崖面（晨雾湖岸那块岩壁，40~120m）竖向跨度本来就大，
              旧规则连它一起剪，在岩壁上咬出一格格白色方块。
              距离条件把两者分开：远处该剪的照剪，近处崖面保留。 */
-          if (!noCull('wall') && vSpan > 3.0 && vSpan > hMin * 2.5 && tMin > 60) { skippedWall++; continue; }
+          if (!noCull('wall') && !terrainKeep && vSpan > 3.0 && vSpan > hMin * 2.5 && tMin > 60) { skippedWall++; continue; }
           /* v1.19.1：法线朝下的四边形一律丢掉。
              单层薄壳在照片「天际线附近」会连出一批**底面朝上的长条**：
              四角深度差异大、竖直跨度却不到 3m，躲过了竖墙筛，转身看过去就是
@@ -2041,7 +2059,7 @@
           const qbx = pos[a1 * 3] - pos[a0 * 3], qby = pos[a1 * 3 + 1] - pos[a0 * 3 + 1], qbz = pos[a1 * 3 + 2] - pos[a0 * 3 + 2];
           const qny = qaz * qbx - qax * qbz;          // cross(pa,pb) 的 y 分量
           const qlen = Math.hypot(qax, qay, qaz) * Math.hypot(qbx, qby, qbz) || 1;
-          if (qny / qlen < -0.12) { skippedWall++; continue; }
+          if (!terrainKeep && qny / qlen < -0.12) { skippedWall++; continue; }
           /* 更狠的一条：**只保留「从照片相机位置看得见」的面**。
              整块重建是"从原始视点看到的一层壳"，从别的角度看到的背面本来就是
              编出来的内容 —— 转身时那些横贯画面的漂浮薄片就是它们的背面。
@@ -2054,7 +2072,7 @@
           const ccy = (pos[a0 * 3 + 1] + pos[a1 * 3 + 1] + pos[b0 * 3 + 1] + pos[b1 * 3 + 1]) * 0.25 - eye;
           const ccz = (pos[a0 * 3 + 2] + pos[a1 * 3 + 2] + pos[b0 * 3 + 2] + pos[b1 * 3 + 2]) * 0.25;
           const ccl = Math.hypot(ccx, ccy, ccz) || 1;
-          if ((nqx * ccx + nqy * ccy + nqz * ccz) / (nql * ccl) > 0.15) { skippedWall++; continue; }
+          if (!terrainKeep && (nqx * ccx + nqy * ccy + nqz * ccz) / (nql * ccl) > 0.15) { skippedWall++; continue; }
         }
         /* 四角都是地面的四边形交给**世界坐标方格网**（见下），
            不要留在极坐标扇形里 —— 扇形在近处是放射状长条，贴图沿径向被拉成
@@ -2072,7 +2090,7 @@
           const gsum = gGround[a0] + gGround[a1] + gGround[b0] + gGround[b1];
           if (gsum > 0 && gsum < 4) {
             const tHi = Math.max(gT[a0], gT[a1], gT[b0], gT[b1]);
-            if (!noCull('torn') && tHi > 22) { skippedTorn++; continue; }
+            if (!noCull('torn') && !terrainKeep && tHi > 22) { skippedTorn++; continue; }
           }
         }
         idx.push(a0, b0, a1, a1, b0, b1);
