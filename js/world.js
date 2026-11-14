@@ -2493,6 +2493,27 @@
     };
   }
 
+  /* 低信息量场景的降级路径（v1.25.0）：夜景 / 大面积水面这类照片，
+     单目深度基本是噪声，反投影后整屏竖条（夜景）或平板色块（泳池）。
+     这时不硬重建，改回「照片墙」：一张竖直卡片贴照片 + 程序化地面，
+     相机移动仍有透视变化，至少是一张完整的画面而不是碎片。 */
+  function buildFlatCard(analysis, gl) {
+    const d = 12;
+    const tanH = Math.tan(HFOV / 2);
+    const tanV = tanH / (analysis.W / Math.max(1, analysis.H));
+    const w = 2 * tanH * d, h = 2 * tanV * d;
+    const y0 = 0, y1 = h;
+    const pos = [-w / 2, y0, -d, w / 2, y0, -d, -w / 2, y1, -d, w / 2, y1, -d];
+    const nrm = [0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1];
+    const uv = [0, 1, 1, 1, 0, 0, 1, 0];
+    const col = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+    return {
+      pos: new Float32Array(pos), normal: new Float32Array(nrm),
+      uv: new Float32Array(uv), color: new Float32Array(col),
+      index: [0, 2, 1, 1, 2, 3]
+    };
+  }
+
   /* 程序化地平环：视锥外的延续（不是照片内容，是"推测"出的远景雾带）
    * 实验特性，默认关闭（?ring=1）。做法上只保证"不突兀"：
    * 顶边 alpha 渐隐到 0、颜色从地平线色渐变到天顶色，否则会出现一条硬边灰带。 */
@@ -2662,6 +2683,9 @@
     const m = {
       relief: relief ? PWGL.createMesh(gl, relief) : null,
       splat: (relief && relief.grid) ? PWGL.createMesh(gl, buildSplat(relief, gl, 2)) : null,
+      flat: (analysis.meanLum < 0.18
+        || (opts && opts.sem && opts.sem.stats && opts.sem.stats.water > 0.5))
+        ? PWGL.createMesh(gl, buildFlatCard(analysis, gl)) : null,
       splatHole: (relief && relief.grid && opts && opts.fgMask && analysis.bgPhotoCanvas)
         ? PWGL.createMesh(gl, buildHolePoints(relief, opts.fgMask, gl, 2)) : null,
       // 世界坐标地面方格网（替代极坐标扇形的地面部分，消掉放射状拉丝）
@@ -2701,7 +2725,9 @@
       walkRadius: 0,
       /* 点云只用于室外风景：室内是密集小几何 + 大俯角，点云会把墙面和楼梯
          撕成黑块/白块（楼梯图实测），室内仍走三角网格（v1.15 的完整效果）。 */
-      splatMode: !!(opts && opts.splat)
+      flatMode: analysis.meanLum < 0.18
+        || !!(opts && opts.sem && opts.sem.stats && opts.sem.stats.water > 0.5),
+      splatMode: !!(opts && opts.splat) && !(analysis.meanLum < 0.18)
         && !(analysis.horizon < 0.42 || analysis.horizon > 0.72),
       splatScale: (opts && opts.splatScale) || 30,
       /* v1.17：重建表面是单层薄壳，从背面看就是糊成一片的拉花。

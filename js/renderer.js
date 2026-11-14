@@ -321,7 +321,18 @@
       }
 
       // 深度重建的三维表面（照片即场景）
-      if (world.meshes.relief && !skip('shell')) {
+      if (world.meshes.flat && !skip('shell')) {
+        /* 夜景 / 大面积水面：深度是噪声，不硬重建，贴回「照片墙」。 */
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.depthMask(true);
+        gl.disable(gl.CULL_FACE);
+        drawMesh(world, world.meshes.flat, {
+          tex: world.tex.photo, mode: 4, fog: 0.12, mipBias: 0
+        });
+        gl.disable(gl.BLEND);
+        gl.enable(gl.CULL_FACE);
+      } else if (world.meshes.relief && !skip('shell')) {
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(true);
