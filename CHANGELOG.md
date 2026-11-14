@@ -3,6 +3,62 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [1.24.3] - 2026-11-14  · T9 收尾（训练侧 3 项，真 torch 验证）
+
+torch 环境就绪（`envs/default`，2.14.1+cu130，CUDA 可用），T9 剩下的训练侧三项做完。
+另加一个**真跑训练循环**的冒烟，避免"函数级单测通过、放进循环就崩"。
+
+### T9-1 scheduled sampling 的 Euler 步不自洽
+
+- **根因**：SS 自产帧在 `x_0`（纯噪声）上以 `t=0.35` 求速度、再走 `0.65·v`。
+  状态在 t=0、速度取 t=0.35，两者错位；v 依赖 t 时落点偏 **70%**（实测：正确 0.500 vs 旧写法 0.850），
+  SS 教给模型的是错误分布。
+- **修法**：抽成 `trainer.make_self_frame()`，从 `x_0` 出发、**在 t=0 求速度**、步长 `dt∈[0.35,0.65]`；
+  同时把 `domain` 提前定义并传 `zeros`（旧代码传 `None`，等于第三条前向路径）。
+- **验收**：`test_trainer_opts.py [5]` —— 传入 t 全 0、domain 是 zeros、步长 0.402~0.604、
+  样本内位移偏差 1.8e-07。
+
+### T9-2 验证损失用随机 (t, z0)
+
+- **根因**：注释写着"固定 (t, z0)"，实际每次评测都 `randn/rand` 重抽，val loss 的方差
+  有相当一部分来自抽样噪声。
+- **修法**：专用 `val_gen`（CPU generator），每次评测前 `manual_seed(val_seed)` 重置；
+  批顺序 `shuffle=False` + 形状固定 ⇒ 每轮 (t,z0) 完全一致。
+- **验收**：数值验证"重置 → 两轮完全一致 / 不重置 → 不同"；并在真训练里连续两轮
+  打出 val loss（0.9800 → 0.9692）。
+
+### T9-4 CFG 语义
+
+- 旧式 `v_cond + w·(v_cond − v_null)` 与标准式 `v_null + s·(v_cond − v_null)` 等价，
+  但 `w=4` 实际是 `s=5`，容易被误读成"4 倍引导"。
+- 改成标准式并用 `s = 1 + cfg_scale`，**行为不变**（float64 下最大差 7e-15），语义写明。
+
+### 新增训练循环冒烟 `tools/test_train_smoke.py`
+
+本机没有 `data/wm` 分片，端到端训练跑不起来。用打桩数据集 + 假 tokenizer + 微型真模型，
+把 `train()` 完整跑 2 步（`scheduled_sampling=1.0`、`ss_mode=forward`，正好压中改动分支）：
+
+```
+[1/2] loss 0.9286  lr 5.00e-04  0.06 step/s
+  val loss 0.9800 (EMA)
+[2/2] loss 0.9903  lr 0.00e+00  0.11 step/s
+  val loss 0.9692 (EMA)
+PASS  训练循环 2 步完成，checkpoint 已写出
+```
+
+### 验证矩阵（本机，真 torch）
+
+| 套件 | 结果 |
+|---|---|
+| `tools/test_regression.py` | 全绿（P0/P1+P2，含 T6/G3/T8/T9-3/5/6/7） |
+| `tools/test_regression_p2.py` | 10 项通过 |
+| `tools/test_trainer_opts.py` | 5 组通过（含新增 SS 自洽） |
+| `tools/test_train_smoke.py` | 2 步训练跑通 |
+| `tools/verify_extend.py` | 全绿（T1/T2/T5） |
+| `tools/test_exif.py` | 8/8 |
+
+T9 的 9 小项至此**全部完成**。
+
 ## [1.24.2] - 2026-11-14  · T9 的 4 个可验证项（不依赖 torch）
 
 T9 一共 9 小项，其中 5 项（SS 前向自洽、val 固定 generator、CFG 语义、trainer 训练路径、

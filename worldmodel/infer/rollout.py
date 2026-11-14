@@ -3,8 +3,9 @@
 单步采样（Euler 中点）：
     t_s = (s + 0.5) * dt
     x_{t+dt} = x_t + dt * v(x_t, t_s)
-    t 从 0（纯噪声）走到 1（数据）；CFG：
-    v = v_cond + w * (v_cond - v_uncond)
+    t 从 0（纯噪声）走到 1（数据）；CFG（标准式）：
+    v = v_null + (1 + w) * (v_cond - v_null)
+    其中 w 是 `cfg_scale` 参数：w=0 等价于关闭引导；w=4 实际引导强度 s=5。
 
 无条件分支必须走 `uncond=True`（与训练侧联合 dropout 同一路径），
 不能再只把 action 置零：act_embed 有 bias，且训练还同时丢了 init/domain。
@@ -118,8 +119,13 @@ def rollout(image: torch.Tensor, actions: list[torch.Tensor], ckpt_path: str,
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=(device == "cuda")):
                 v_cond = model(z_init, hb, z, t, ab, dom)
                 if cfg_scale > 1.0:
+                    # T9-4（v1.22）：统一到**标准 CFG 形式** v = v_null + s·(v_cond - v_null)，
+                    #   其中 s = 1 + cfg_scale。旧写法 v_cond + w·(v_cond - v_null) 与标准式
+                    #   等价（展开后 s = 1 + w），但语义容易被误读成 s=w —— 例如
+                    #   cfg_scale=4 实际是 s=5，比"4 倍引导"更强。行为不变、语义明确。
                     v_null = model(z_init, hb, z, t, ab, dom, uncond=True)
-                    v = v_cond + cfg_scale * (v_cond - v_null)
+                    s_guid = 1.0 + float(cfg_scale)
+                    v = v_null + s_guid * (v_cond - v_null)
                 else:
                     v = v_cond
             z = z + dt * v.float()

@@ -64,6 +64,23 @@ def make_model(cfg: dict, device: str) -> CausalWorldDiT:
 
 
 @torch.no_grad()
+def make_self_frame(model, z_init, z_hist, act, domain, z1, device,
+                    scaler_dtype, dt_lo: float = 0.35, dt_hi: float = 0.65):
+    """T9-1（v1.22）：scheduled sampling 的"自产帧"—— 从 x_0 出发的单步 Euler。
+
+    自洽要求：速度必须在**当前时刻**求值。旧实现拿 t=0.35 处的速度作用在 x_0 上，
+    z_self 落在错误位置（v 依赖 t 时落点偏 70%，实测），SS 教给模型的是错分布。
+    抽成函数是为了能单测（断言传进模型的 t 全 0、domain 是 zeros 而不是 None）。
+    """
+    B = z1.shape[0]
+    z_noise = torch.randn_like(z1)
+    t_ss = torch.zeros(B, device=device)
+    dt_ss = dt_lo + torch.rand(B, 1, 1, 1, device=device) * (dt_hi - dt_lo)
+    with torch.autocast("cuda", dtype=scaler_dtype, enabled=(device == "cuda")):
+        v_self = model(z_init, z_hist, z_noise, t_ss, act, domain)
+    return z_noise + v_self.float() * dt_ss
+
+
 def _augment_hist(z_hist: torch.Tensor, B: int, device: str,
                   p: float, sigma: float) -> torch.Tensor:
     """历史帧噪声增强（对抗自回归漂移）。z_hist 只是输入，不参与梯度。"""
@@ -164,7 +181,12 @@ def train(cfg: dict) -> None:
     # 验证集子集化：val_every 一到就遍历全量 val（10% 数据），前向开销能顶 5 个训练 step。
     # 固定 seed 抽固定样本 + 固定 (t, z0)，val loss 曲线方差更小，前后可比。
     val_max = int(cfg["train"].get("val_max_samples", 0) or 0)
-    val_noise = None
+    # T9-2（v1.22）：注释一直说"固定 (t, z0)"，但验证循环里每次都 randn/rand 重抽，
+    #   val loss 的方差里有相当一部分来自噪声抽样而不是模型进步。
+    #   这里给一个**专用 generator**，每次评测前重置到同一 seed：
+    #   批顺序固定（shuffle=False）+ 形状固定 ⇒ (t,z0) 每次完全一致。
+    val_gen = torch.Generator(device="cpu")
+    val_seed = int(seed) * 104729 + 3
     if val_max > 0 and len(va) > val_max:
         import random as _random
         order = list(range(len(va)))
@@ -230,6 +252,10 @@ def train(cfg: dict) -> None:
                     z1 = get_tok().encode(target)
             B = z1.shape[0]
             z_hist = _augment_hist(z_hist, B, device, p_hist_noise, hist_sigma)
+            # T9-1（v1.22）：domain 必须在 SS 前向之前就定义好 ——
+            #   旧代码 SS 里传 `domain=None`，与训练主路径的 zeros 不是同一条路，
+            #   而且 DiT 里 None 会被当成"没有 domain 嵌入"，等于第三种前向。
+            domain = torch.zeros(B, dtype=torch.long, device=device)
 
             _t2 = time.time()
             # ---- scheduled sampling：消除暴露偏差 ----
@@ -244,12 +270,10 @@ def train(cfg: dict) -> None:
                     alpha = 0.05 + torch.rand(B, 1, 1, 1, device=device) * 0.20
                     z_self = (1 - alpha) * z1 + alpha * torch.randn_like(z1)
                 else:
+                    # T9-1：单步 Euler 自洽版（时刻与状态必须配对），实现见 make_self_frame
                     with torch.no_grad():
-                        z_noise = torch.randn_like(z1)
-                        t_mid = torch.full((B,), 0.35, device=device)
-                        with torch.autocast("cuda", dtype=scaler_dtype, enabled=(device == "cuda")):
-                            v_self = model(z_init, z_hist, z_noise, t_mid, act, None)
-                        z_self = (z_noise + v_self.float() * 0.65)
+                        z_self = make_self_frame(model, z_init, z_hist, act, domain, z1,
+                                                 device, scaler_dtype)
                 z_hist = torch.cat([z_hist[:, 1:], z_self.unsqueeze(1)], dim=1)
 
             z0 = torch.randn_like(z1)
@@ -258,7 +282,6 @@ def train(cfg: dict) -> None:
             v_target = z1 - z0
 
             uncond = torch.rand(B, device=device) < p_uncond
-            domain = torch.zeros(B, dtype=torch.long, device=device)
 
             with torch.autocast("cuda", dtype=scaler_dtype, enabled=(device == "cuda")):
                 v = model(z_init, z_hist, zt, t, act, domain, uncond=uncond)
@@ -283,6 +306,9 @@ def train(cfg: dict) -> None:
 
         if step % cfg["train"]["val_every"] == 0 or step == total:
             model.eval()
+            # T9-2：每次评测前把专用 generator 重置到同一 seed，
+            # 于是每轮评测用的 (t, z0) 序列完全相同，曲线只反映模型变化。
+            val_gen.manual_seed(val_seed)
             # val loss 必须与 rollout 同源：临时换上 EMA 权重，评估完恢复训练权重。
             # 旧代码用非 EMA 模型算 val，而 rollout 默认加载 EMA，指标不同源。
             train_sd = {k: v.detach().clone() for k, v in model.state_dict().items()}
@@ -304,8 +330,8 @@ def train(cfg: dict) -> None:
                                 vi.shape[0], vh.shape[1], -1, *zi.shape[2:])
                             z1 = get_tok().encode(vt)
                         Bv = z1.shape[0]
-                        z0 = torch.randn_like(z1)
-                        tt = torch.rand(Bv, device=device)
+                        z0 = torch.randn(z1.shape, generator=val_gen).to(device)
+                        tt = torch.rand(Bv, generator=val_gen).to(device)
                         zt = (1 - tt.view(-1, 1, 1, 1)) * z0 + tt.view(-1, 1, 1, 1) * z1
                         with torch.autocast("cuda", dtype=scaler_dtype, enabled=(device == "cuda")):
                             vv = model(zi, zh, zt, tt, va_,

@@ -160,6 +160,42 @@ def main():
         shutil.rmtree(tmp, ignore_errors=True)
 
     print("\n结果：" + ("全部通过" if not FAIL else "失败 %d 项 → %s" % (len(FAIL), FAIL)))
+    # ---- 5) T9-1：forward 模式的 SS 自产帧必须 Euler 自洽 ----
+    print("[5] forward 模式 SS：时刻与状态配对")
+    from worldmodel.train.trainer import make_self_frame
+    import torch as _t
+
+    class RecModel(_t.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def forward(self, z_init, z_hist, zt, t, act, domain, uncond=None):
+            self.calls.append({"t": t.detach().clone(), "domain": domain,
+                               "zt": zt.detach().clone()})
+            return _t.ones_like(zt)          # 恒定速度 1
+
+    rm = RecModel()
+    zi = _t.zeros(4, 6, 4, 4)            # (B, C, H, W)
+    zh = _t.zeros(4, 4, 6, 4, 4)         # (B, T_hist, C, H, W)
+    act = _t.zeros(4, 7)
+    dom = _t.zeros(4, dtype=_t.long)
+    z1 = _t.zeros(4, 6, 4, 4)
+    out = make_self_frame(rm, zi, zh, act, dom, z1, "cpu", _t.bfloat16)
+    call = rm.calls[0]
+    check("SS 求值时刻 t=0", float(call["t"].abs().max()) == 0.0, "t=%s" % call["t"])
+    check("SS domain 是 zeros 不是 None",
+          call["domain"] is not None and int(call["domain"].sum()) == 0)
+    d = float((out - call["zt"]).flatten(1)[:, :1].mean())
+    check("SS 步长 ∈ [0.35,0.65]", 0.34 <= d <= 0.66, "%.3f" % d)
+    # dt 是逐样本的 (B,1,1,1)，所以"位移一致"是**每个样本内部**一致，不是整个 batch 相同
+    disp = (out - call["zt"])                                    # (B,C,H,W)
+    per = disp.flatten(1).mean(1)                                # (B,)
+    spread = (disp - per.view(-1, 1, 1, 1)).abs().max().item()
+    check("v=1 时每样本位移恒定", spread < 1e-3, "样本内最大偏差 %.1e" % spread)
+    check("每样本步长都在 [0.35,0.65]", bool(((per >= 0.34) & (per <= 0.66)).all()),
+          "范围 %.3f~%.3f" % (float(per.min()), float(per.max())))
+
     return 1 if FAIL else 0
 
 
