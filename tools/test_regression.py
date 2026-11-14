@@ -127,8 +127,10 @@ def test_metric_depth() -> None:
     cal = geom.calibrate_scale(d, cam, eye=1.7, horizon_far=1500.0)
     p = float(cal["p"])
     far = 1.2 * 1500.0
-    r0 = float((cal["A"] / far) ** (1.0 / p))
     r_near = max(float(cal.get("r_near", 0.8)), 1e-3)
+    # 与 reconstruct.py 同一闭式解：z(0) = A·(1/r0 + 1/r_near)^p = far
+    denom = (far / cal["A"]) ** (1.0 / p) - 1.0 / r_near
+    r0 = 1.0 / denom if denom > 1e-6 else float((cal["A"] / far) ** (1.0 / p))
     a_eff = cal["A"] * (1.0 + r0 / r_near) ** p
     z_new = geom.metric_depth(d, a_eff, p=p, far=far, r0=r0)
     z_old = np.clip(cal["A"] * np.maximum(d, 1e-3) ** (-p), 0.5, 600.0)
@@ -140,6 +142,10 @@ def test_metric_depth() -> None:
     z_at_near = a_eff * (r_near + r0) ** (-p)
     assert abs(z_at_near - cal["z_near"]) / max(cal["z_near"], 1e-6) < 1e-5, \
         "A 修正后近端锚点不再精确"
+    # 旧 r0=(A/far)^(1/p) 是在这里被抓到的：z(0)=4137m 而 far=1800m
+    z_at_zero = a_eff * r0 ** (-p)
+    assert abs(z_at_zero - far) / far < 1e-6, \
+        "软饱和未收敛到 far：z(0)=%.1fm far=%.1fm" % (z_at_zero, far)
     assert np.unique(np.round(z_new[d < 0.05], 3)).size > 5, "远景仍被压成同一个硬平面"
     print("PASS  P1  深度上限：far 600→%.0fm，触顶像素 %.1f%%→%.1f%%，"
           "近端锚点 %.3fm 保持不变，远景不再是单一平面"

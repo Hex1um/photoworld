@@ -108,8 +108,17 @@ def main() -> int:
     # 实测 46.1% 像素被压到同一平面。软饱和 r0 让 r→0 时收敛到 far 而不发散。
     far_m = args.far if args.far > 0 else (1.2 * args.horizon_far if args.horizon_far > 0 else 600.0)
     pv = float(cal["p"])
-    r0 = float((cal["A"] / far_m) ** (1.0 / pv)) if pv > 0 and cal["A"] > 0 else 0.0
     r_near = max(float(cal.get("r_near", 0.8)), 1e-3)
+    # 联合求解 r0：metric_depth 收到的是 a_eff = A·(1+r0/r_near)^p，
+    # 于是 z(0) = A·(1/r0 + 1/r_near)^p。令 z(0) = far 得闭式解
+    #   r0 = 1 / ((far/A)^(1/p) - 1/r_near)
+    # 旧解 r0=(A/far)^(1/p) 用的是未修正的 A：实测 z(0)=4137m 而 far=1800m
+    # （2.298×），天空仍被 clip 成一块硬平面。分母非正时退回旧解，不发散。
+    denom = ((far_m / cal["A"]) ** (1.0 / pv) - 1.0 / r_near
+             if pv > 0 and cal["A"] > 0 else 0.0)
+    r0 = (1.0 / denom if denom > 1e-6 else
+          (float((cal["A"] / far_m) ** (1.0 / pv))
+           if pv > 0 and cal["A"] > 0 else 0.0))
     a_eff = cal["A"] * (1.0 + r0 / r_near) ** pv   # 保持 z(r_near) = z_near
     z_m = geom.metric_depth(res.depth, a_eff, cal.get("b", 0.0),
                             p=pv, far=far_m, r0=r0)

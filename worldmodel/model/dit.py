@@ -189,7 +189,10 @@ class CausalWorldDiT(nn.Module):
         for blk in self.blocks:
             x = blk(x, c, cos, sin, mask)
         x = self.norm(x)
-        out = self.head(x[:, -(cfg.per_frame + 1):-1])                # 跳过动作 token
+        # 目标帧是序列最后 per_frame 个 token；动作 token 在其前面一位。
+        # 旧写法 -(per_frame+1):-1 会把动作 token 当第 0 个输出 patch，
+        # 并丢掉目标帧最后一个 patch（shape 恰好不变，静默错位）。
+        out = self.head(x[:, -cfg.per_frame:])
         out = out.view(B, cfg.gh, cfg.gw, cfg.patch, cfg.patch, C)
         out = out.permute(0, 5, 1, 3, 2, 4).reshape(B, C, H, W)
         return out

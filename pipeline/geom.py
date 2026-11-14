@@ -140,9 +140,11 @@ def metric_depth(depth_rel: np.ndarray, a: float, b: float = 0.0,
       * far 默认 600m，而双锚点标定的远端先验是 1500m —— 实测 46.1%
         像素被压到同一个 600m 平面，"拉开中景"的设计被上限吃掉；
       * r→0 时幂律发散，直接放开 far 会让天空深度爆到 1e5m。
-    这里取 r0 = (A/far)^(1/p)：z(0) 恰好收敛到 far，中间段随 r 连续
-    变化而不是硬平面；r >> r0 时与原来的标定一致。调用方应把 A 按
-    (1 + r0/r_near)^p 修正，让近端锚点仍精确（见 reconstruct.py）。
+    调用方按 a_eff = A·(1+r0/r_near)^p 修正幅度后，
+    z(0) = A·(1/r0 + 1/r_near)^p，令其等于 far 的闭式解为
+    r0 = 1 / ((far/A)^(1/p) - 1/r_near)（见 reconstruct.py）；
+    这样中间段随 r 连续变化而不是硬平面，且 r >> r0 时与原有标定一致。
+    r0=None 的分支只用于没有近端锚点的独立调用（a 未修正，口径不同）。
     """
     d = np.maximum(depth_rel - b, 0.0)
     if p > 0 and a > 0 and far > 0:

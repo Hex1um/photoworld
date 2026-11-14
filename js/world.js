@@ -1728,7 +1728,10 @@
         for (let dj = -1; dj <= 1; dj++) {
           const jj = clamp(j + dj, 0, GH - 1);
           for (let di = -1; di <= 1; di++) {
-            gTW[dj * 3 + di] = gT[jj * GW + clamp(i + di, 0, GW - 1)];
+            // 3×3 窗口必须做 (dj+1)*3+(di+1) 的 0..8 偏移：直接用 dj*3+di
+            // 会得到 -4..4，TypedArray 负索引写入会被静默丢弃，9 个槽位只填 5 个，
+            // 排序后取到的「中值」是 5 个当前值 + 4 个残留值的混合。
+            gTW[(dj + 1) * 3 + (di + 1)] = gT[jj * GW + clamp(i + di, 0, GW - 1)];
           }
         }
         for (let a = 1; a < 9; a++) {
@@ -2374,6 +2377,9 @@
               gw: opts && opts.gw, gh: opts && opts.gh,
               yGain: opts && opts.yGain,
               nearPlane: opts && opts.nearPlane,
+              groundFade: opts && opts.groundFade,
+              groundGrid: opts && opts.groundGrid,
+              gfade: opts && opts.gfade,
               fgMask: opts && opts.fgMask,
               sem: opts && opts.sem,
               dbgPos: opts && opts.dbgPos,

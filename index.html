@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#08090b">
 <title>PHOTOWORLD — 走进照片里的世界</title>
 <meta name="description" content="上传一张风景照片，在浏览器里重建为可以自由行走的 3D 世界。">
-<link rel="stylesheet" href="css/style.css?v=1.21.1">
+<link rel="stylesheet" href="css/style.css?v=1.21.2">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23111'/><circle cx='16' cy='16' r='6' fill='none' stroke='%23d8c9a8' stroke-width='1.6'/><path d='M16 4v4M16 24v4M4 16h4M24 16h4' stroke='%23d8c9a8' stroke-width='1.6'/></svg>">
 </head>
 <body>
@@ -24,7 +24,7 @@
     </div>
     <div class="topbar-actions">
       <span class="live-dot" id="liveDot"></span>
-      <span class="ver-chip" id="verBadge" title="PHOTOWORLD 版本">v1.21.1</span>
+      <span class="ver-chip" id="verBadge" title="PHOTOWORLD 版本">v1.21.2</span>
       <button class="ghost" id="btnAbout">工作原理</button>
     </div>
   </header>
@@ -61,7 +61,7 @@
     <span class="dot"></span>
     <span id="footStat">Depth-Anything-V2-Small · 518×518</span>
     <span class="dot"></span>
-    <span id="footVer" class="foot-ver">v1.21.1</span>
+    <span id="footVer" class="foot-ver">v1.21.2</span>
   </footer>
 </div>
 
@@ -188,7 +188,7 @@
 /* 过期缓存自检：GitHub Pages 的 HTML 有 ~10 分钟缓存，手机浏览器更久。
    页面里的 BUILD 与 version.json 不一致就用带时间戳的 URL 重新加载一次
    （sessionStorage 防死循环）。用户拿到的永远是当前部署的 JS，而不是旧版本。 */
-window.__PW_BUILD__ = '1.21.1';
+window.__PW_BUILD__ = '1.21.2';
 (function () {
   var KEY = 'pw.reloaded';
   function check(reloadIfNewer) {
@@ -245,21 +245,21 @@ window.addEventListener('unhandledrejection', function (e) {
 });
 </script>
 
-<script src="js/mat.js?v=1.21.1"></script>
-<script src="js/glutil.js?v=1.21.1"></script>
-<script src="js/reconstruct.js?v=1.21.1"></script>
-<script src="js/world.js?v=1.21.1"></script>
-<script src="js/depth.js?v=1.21.1"></script>
-<script src="js/objects.js?v=1.21.1"></script>
-<script src="js/semantics.js?v=1.21.1"></script>
-<script src="js/intro.js?v=1.21.1"></script>
-<script src="js/glbworld.js?v=1.21.1"></script>
-<script src="js/renderer.js?v=1.21.1"></script>
-<script src="js/player.js?v=1.21.1"></script>
-<script src="js/audio.js?v=1.21.1"></script>
-<script src="js/live_params.js?v=1.21.1"></script>
-<script src="js/extend.js?v=1.21.1"></script>
-<script src="js/object3d.js?v=1.21.1"></script>
-<script src="js/app.js?v=1.21.1"></script>
+<script src="js/mat.js?v=1.21.2"></script>
+<script src="js/glutil.js?v=1.21.2"></script>
+<script src="js/reconstruct.js?v=1.21.2"></script>
+<script src="js/world.js?v=1.21.2"></script>
+<script src="js/depth.js?v=1.21.2"></script>
+<script src="js/objects.js?v=1.21.2"></script>
+<script src="js/semantics.js?v=1.21.2"></script>
+<script src="js/intro.js?v=1.21.2"></script>
+<script src="js/glbworld.js?v=1.21.2"></script>
+<script src="js/renderer.js?v=1.21.2"></script>
+<script src="js/player.js?v=1.21.2"></script>
+<script src="js/audio.js?v=1.21.2"></script>
+<script src="js/live_params.js?v=1.21.2"></script>
+<script src="js/extend.js?v=1.21.2"></script>
+<script src="js/object3d.js?v=1.21.2"></script>
+<script src="js/app.js?v=1.21.2"></script>
 </body>
 </html>

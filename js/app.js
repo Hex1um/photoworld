@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '1.21.1';
+  const VERSION = '1.21.2';
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -168,8 +168,11 @@
       // 照片贴图分辨率 A/B：?tex=0 回到旧的 420px 分析画布；?tex=4096 抬高上限。
       // 不传时走 DEFAULTS.displayMaxEdge（2048），仍受 GL 的 MAX_TEXTURE_SIZE 保护。
       const texArg = new URLSearchParams(location.search).get('tex');
-      const texOpts = (texArg === null) ? undefined : {
-        displayMaxEdge: Math.max(0, Math.min(8192, parseInt(texArg, 10) || 0))
+      // 只接受纯十进制整数：parseInt('1e3')=1、parseInt('abc')=NaN||0 会把
+      // 非法输入静默变成 1×1 贴图或 420px 旧画布，质检还会误判为链路跑通。
+      // 非法值一律走默认（DEFAULTS.displayMaxEdge），只有 ?tex=0 才关闭高清链路。
+      const texOpts = (texArg === null || !/^\d+$/.test(texArg)) ? undefined : {
+        displayMaxEdge: Math.min(8192, parseInt(texArg, 10))
       };
       const analysis = window.PW.reconstruct.analyze(img, def.name, texOpts);
       // 运行时可验证：质检探针读 body.dataset.tex* 即可确认贴图链路与分辨率
@@ -250,6 +253,12 @@
       setProgress(75, depthMap ? '反投影：像素 → 世界坐标…' : '构建分层地形…');
       await sleep(40);
       const params = new URLSearchParams(location.search);
+      // 竖直夸张：?yg= 与 ?ygain= 是同一参数的历史别名。旧代码在 opts 字面量里
+      // 写了两次 yGain 键，后者覆盖前者，?yg= 永久失效；这里统一成一处解析。
+      const yGainRaw = params.has('ygain') ? params.get('ygain') : params.get('yg');
+      const yGainVal = (yGainRaw === null) ? undefined : parseFloat(yGainRaw);
+      const yGain = Number.isFinite(yGainVal)
+        ? Math.max(0.6, Math.min(4, yGainVal || 1.35)) : undefined;
       const w = window.PW.world.build(renderer.gl, analysis, {
         seed: hashString(def.id + '|' + def.name),
         depth: depthMap,
@@ -262,7 +271,7 @@
         ldi: params.get('ldi') === '1',      // ?ldi=1 实验：断崖跳面 + 背景补洞（A/B 未达标，默认关）
         proxy: params.get('proxy') === '1', // ?proxy=1 实验：360° 低频世界幕（默认关）
         vg: params.has('vg') ? parseFloat(params.get('vg')) : undefined,
-        yGain: params.has('yg') ? parseFloat(params.get('yg')) : undefined,
+        yGain,
         fgMask: objInfo && objInfo.fgMask,
         // 语义分组：天空/地面/天花板/植被/建筑/人车，决定几何策略与单体卡片
         sem: sem,
@@ -274,8 +283,7 @@
         groundFade: params.get('gblend') !== '0',
         // 近场平面半径：?near=12 放宽，?near=0 关闭（A/B）
         nearPlane: params.has('near') ? Math.max(0, Math.min(40, parseFloat(params.get('near')) || 0)) : undefined,
-        // 竖直夸张（只作用于地平线以上）：?ygain=2 做 A/B
-        yGain: params.has('ygain') ? Math.max(0.6, Math.min(4, parseFloat(params.get('ygain')) || 1.35)) : undefined,
+        // 竖直夸张（只作用于地平线以上）：?ygain=2 / ?yg=2 做 A/B
         // 地面拓扑：默认世界坐标方格网；?gfan=1 回到旧的极坐标扇形地面（A/B）
         groundGrid: params.get('gfan') !== '1',
         // 地面渐隐区间可调（A/B 用）：?gfade=起始m,结束m,强度
@@ -326,7 +334,13 @@
              出生点可能在矩形外（?x=0&z=49 这类），玩家 reset 时 heightAt 还是
              照片高度场（矩形外恒 0），接管后真实地形可能有十几米 ——
              不重落就会"站在地下"，看到的是被背面剔除后的空洞。 */
-          if (player) player.reset(player.state.x, player.state.z, player.state.yaw);
+          if (player) {
+            // reset() 无条件把 pitch 置为 -0.02；先存后恢复，否则 ?pitch=
+            // 指定的出生俯仰角会在 extender 接管 heightAt 后的重新落地时被抹掉。
+            const spawnPitch = player.state.pitch;
+            player.reset(player.state.x, player.state.z, player.state.yaw);
+            player.state.pitch = spawnPitch;
+          }
           ext.update(player.state.x, player.state.z, undefined,
             { yaw: player.state.yaw, fov: fovRad() });
         } catch (e) {
@@ -644,6 +658,9 @@
       player = PW.createPlayer(canvas, world);
       if (window.__spawn) player.reset(window.__spawn.x, window.__spawn.z, window.__spawn.yaw);
       else player.reset(0, 0, 0);
+      // 与 enterWorld 同一口径：reset() 会把 pitch 置为 -0.02，
+      // ?pitch= 指定的出生俯仰角在离线 GLB 路径也要还原。
+      if (window.__spawn && typeof window.__spawn.pitch === 'number') player.state.pitch = window.__spawn.pitch;
 
       el('hudName').textContent = '离线重建世界';
       el('hudSub').textContent = asset.triangles.toLocaleString() + ' 三角 · ' + (asset.bytes / 1048576).toFixed(1) + 'MB · ' + asset.layers.length + ' 层';
@@ -896,7 +913,8 @@
         e.stopPropagation();
         const act = btn.dataset.act;
         if (act === 'gallery') backToGallery();
-        if (act === 'live') { liveState.on = !liveState.on; saveLiveState(); applyLiveState(true); }
+        // 'live' 不在通用分支里处理：wireLive() 已给 #btnLive 绑了「展开/收起面板」，
+        // 这里再翻一次 liveState.on 会让同一次点击把实时生成反向关掉。
         if (act === 'upload') el('fileInput').click();
         if (act === 'sound') {
           const on = ambience.toggle();
@@ -986,7 +1004,13 @@
   /* 把状态同步到 extender / DOM / body.dataset（测试用） */
   function applyLiveState(push) {
     const ext = world && world.extender;
-    if (push && ext && ext.setLive) ext.setLive(liveState);
+    // extender 的字段叫 enabled，不是 liveState.on。早期直接传 liveState
+    // 会让「关掉实时变化」只改 HUD 与 dataset，视锥外仍继续生成。
+    if (push && ext && ext.setLive) ext.setLive({
+      enabled: !!liveState.on,
+      chaos: liveState.chaos,
+      memory: liveState.memory
+    });
     const btn = el('btnLive');
     if (btn) btn.classList.toggle('on', livePanelOpen);
     const panel = el('livePanel');
@@ -1093,24 +1117,34 @@
       return true;
     };
     if (instant) document.body.classList.add('instant');
-    const glbUrl = q.get('glb');
+    const glbArg = q.get('glb');
+    // 与 ?img= 同样只接受同源相对路径：否则会向任意外部地址发起 fetch。
+    const glbUrl = (glbArg && glbArg.indexOf('//') < 0 && glbArg.indexOf('data:') !== 0)
+      ? glbArg : null;
+    if (glbArg && !glbUrl) console.warn('?glb= 只接受同源相对路径，已忽略：' + glbArg);
     if (glbUrl) { setTimeout(() => enterAsset(glbUrl), 100); }
     /* ?img=<同源路径> 直接进世界：批量质检（tools/multiview.mjs）用它把语料图
        一张张喂进同一条在线链路，不经过画廊/上传。只接受同源相对路径，
        远程地址会被画布污染（getImageData 抛错），且无 CORS 头时本来也读不到像素。 */
     const imgUrl = q.get('img');
     if (imgUrl && !glbUrl) {
-      const src = decodeURIComponent(imgUrl);
-      const sameOrigin = src.indexOf('//') < 0 && src.indexOf('data:') !== 0;
+      // ?img=%ZZ 这类畸形编码会让 decodeURIComponent 抛 URIError 并中断 boot()
+      // （__pw 不赋值、?w= 分支不执行）。降级为忽略该参数，保住其余启动流程。
+      let src = null;
+      try { src = decodeURIComponent(imgUrl); }
+      catch (e) { console.warn('?img= 含非法百分号编码，已忽略：' + imgUrl); }
+      const sameOrigin = !!src && src.indexOf('//') < 0 && src.indexOf('data:') !== 0;
       if (sameOrigin) {
         const nm = q.get('name') || src.split('/').pop().replace(/\.[a-z0-9]+$/i, '');
         setTimeout(() => enterWorld({ id: 'corpus:' + nm, name: nm, sub: '语料 · 批量质检', src: src }), 120);
-      } else {
+      } else if (src) {
         console.warn('?img= 只接受同源相对路径，已忽略：' + src);
       }
     }
+    // 一条 URL 只启动一个 enter 流程：旧代码 ?glb=&w= / ?img=&w= 会各自
+    // setTimeout 并交叠创建 world/player 与 rAF 链，先建的 GL 资源直接泄漏。
     const wid = q.get('w');
-    if (wid) {
+    if (wid && !glbUrl && !imgUrl) {
       const def = WORLDS.find((w) => w.id === wid);
       if (def) setTimeout(() => enterWorld(def), 120);
     }
