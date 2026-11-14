@@ -3,6 +3,50 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [1.17.1] - 2026-11-14
+
+主题：把并行开发的一支训练侧改动**合并到远端最新基座**，只保留上游没有的静态回归能力。
+基座从 `e75e487`（v1.16.1）对齐到 `b392526`（v1.17.0 + 配置数值修复），本次为
+fast-forward，未覆盖上游任何提交；`index.html` 的缓存串保持上游的 `?v=1.17.0`（16 处），
+前端文件、`server/`、`training/` 均未改动。
+
+### 1) 三项省时开关以上游实现为准，重复实现已回退
+
+- **背景**：本支在 v1.16.1 上独立实现了 `data.prefer_latent` / `train.ss_mode=noise_proxy` /
+  `train.val_max_samples`；合并前复查发现远端 v1.17.0 已独立实现同一组开关，且多了
+  `train.ema_every`、超参强制转数值（`lr: 1e-3` 被 PyYAML 读成字符串会在 AdamW 里抛
+  `TypeError`）、`configs/s1_fast.yaml` 现成组合与 GPU 训练闭环验证。
+- **处理**：`worldmodel/train/trainer.py`、`configs/*.yaml` 一律采用上游版本，回退本支的
+  重复改动。`noise_proxy` 两边公式完全一致（`z_self=(1-α)z1+αε`，`α~U(0.05,0.25)`），
+  因此没有丢功能；上游默认值是 `val_max_samples: 0`（全量）、`ss_mode: forward`、
+  `prefer_latent: false`，与本支的 `null`/`forward`/`false` 语义等价。
+- **影响**：`s1_base` 等 9 个基线配置恢复上游原样，不再默认开 latent；省时组合统一走
+  `s1_fast.yaml`，避免两份实现给出不同的默认行为和 val loss 口径。既有 `last.pt`
+  的 `model/ema/cfg/step` 键名与 `CausalWorldDiT` 权重键均未变化。
+
+### 2) 新增无 torch 静态回归（`tools/test_regression_p2.py`，5 组断言）
+
+上游的 `tools/test_trainer_opts.py` 需要 torch，只能在训练机跑；本组断言纯
+`ast` + `numpy` + `yaml`，在无 torch / 无 GPU 的开发机也能锁住关键不变量：
+
+| 组 | 锁定内容 |
+|---|---|
+| ① | 默认值 `ss_mode=forward` / `val_max_samples=0` / `ema_every=1` / `prefer_latent=false`；10 个配置的开关语义；`resolve_shard_dir` 自动切换与缺失回退；`coerce_train_cfg` 把 `"1.5e-4"`、`"64"` 转成 float/int |
+| ② | DiT 三个类的 `state_dict` 顶层键、`DiTConfig` 字段、`forward` 签名、损失/EMA/CFG/latent 分支源码片段 |
+| ③ | 10 个 yaml 无废弃 `drop_action` / `drop_init`，统一 `drop_cond: 0.1` |
+| ④ | `α~U(0.05,0.25)` 均值 0.15、方差 `0.2²/12`；`noise_proxy` 输出均值 0.85、方差 `7/240`；因果掩码有效对 **3099265 / 5313025 = 58.33%** |
+| ⑤ | MACs 解析公式复算：单样本前向 293.75 G，`s1_base` 28.20 T/step，取消 SS 额外前向 −4.70 T/step（相对基线 −16.7%、相对含 SS 总量 −14.3%） |
+
+本机实测：`python tools/test_regression_p2.py` 10/10 通过；`tools/test_regression.py`
+P0/P1 全套通过；`bump_cache.mjs --check` 显示 16 处缓存串仍为 `?v=1.17.0`。
+
+### 3) 口径说明
+
+表中的 MACs 与耗时收益均为**解析估算**，不是本机吞吐实测；本机无 torch / CUDA /
+VAE 权重 / 真实分片，训练全链路、`noise_proxy` 的收敛影响与 val 子集口径变化
+仍需在训练机做 A/B。上游 v1.17.0 记录的是作者 RTX 5070 Laptop 8G 的基线实测
+（≈0.8 s/step）与 GPU 闭环验证，两者不可混为同一口径。
+
 ## [1.17.0] - 2026-11-14
 
 主题：把「只看正面一张图」变成**可量化的多视角质检**，修掉从侧面/俯视才暴露的几何病害，

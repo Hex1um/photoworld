@@ -130,7 +130,15 @@ rollout 同源；日志里的 `val loss ... (EMA)` 即此路径。
 
 `configs/s1_fast.yaml` 是 `s1_base` + 上述四项的现成组合（权重同构，checkpoint 可互读）。
 回归：`python tools/test_trainer_opts.py`（分片自动切换 / latent 直读 / 固定 val 子集 /
-EMA 降频 / noise_proxy 不产生额外前向）。
+EMA 降频 / noise_proxy 不产生额外前向，需要 torch）。
+无 torch / 无 GPU 的开发机可跑 `python tools/test_regression_p2.py`：纯 `ast` + `numpy` + `yaml`
+静态校验默认值、10 个配置语义、DiT 权重键、`α` 分布、因果掩码有效对 3099265/5313025
+与 MACs 解析估算，秒级跑完。
+
+上表的耗时与 MACs 收益是**解析估算**，本节开头的 `≈0.8 s/step` 才是作者机器上的
+基线实测（RTX 5070 Laptop 8G，batch 2）；两者口径不同，不可直接相减当实测加速比。
+`noise_proxy` 的正则分布变化、固定 val 子集的 loss 口径变化需要在训练机上做 A/B，
+不能与旧版全量 val loss 直接比较。
 
 **没有采用**：`flex_attention` 块稀疏（掩码掉的 41.7% 注意力对可跳过）需要训练机实测
 数值等价后再开，且会替换 SDPA 的 math path，收益 13.9% MACs 但风险高于收益，
