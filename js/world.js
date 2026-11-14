@@ -1270,7 +1270,12 @@
       for (let i = 0; i < GW; i += 3) skyVals.push(gS[j * GW + i]);
     }
     skyVals.sort((a, b) => a - b);
-    const skyD = skyVals.length ? skyVals[Math.floor(skyVals.length * 0.5)] : 0.1;
+    /* 天空基线兜底：赤岩峡谷这类「顶部全是天空」的照片，8% 行中位视差会落到
+       0.000（天空是最远的那一档），于是 aSky 从 d0=0.03 起就判为 1 ——
+       照片天空被当成几何保留，在山体上方摊成一条灰白色带（v1.24.3 实测）。
+       兜底到 0.04，让天空正常被清掉。 */
+    const skyDRaw = skyVals.length ? skyVals[Math.floor(skyVals.length * 0.5)] : 0.1;
+    const skyD = Math.max(0.04, skyDRaw);
     // 有没有天空：底部 20% 行与顶部 8% 行的中位深度差。室内（楼梯/房间）
     // 顶部是天花板、底部是地面，差很小 → 不裁任何像素，否则会把半张照片切掉。
     let botSum = 0, botN = 0;
@@ -1544,7 +1549,12 @@
            `v < 0.356` 的像素，于是台地上方那一条 **云/亮天空** 被当成几何保留，
            在视点抬高后摊成一排白蓝色的碎片（截图里横贯画面的那排）。
            groundLine 更靠下、更接近真实天空分界，清得干净。 */
-        if (sem && grp === SGRP.SKY && v < Math.max(groundLine - 0.01, analysis.horizon - 0.004)) aSky = 0;
+        /* v1.24.4：只按语义清零，不再叠加 `v < groundLine` 的行限制。
+           赤岩峡谷的台地上方那条云/亮天空跨 v≈0.27~0.49，行限制只清掉上半截，
+           下半截留在几何里摊成一条横贯画面的灰带（截图实测）。
+           误清保护交给语义本身：ADE20K 的 sky 概率在台地/水体上很低，
+           真被误判的像素由下面的「地形占比」分支救回。 */
+        if (sem && grp === SGRP.SKY) aSky = 0;
         const aU = smoothstep(0, 0.02, u) * (1 - smoothstep(0.98, 1, u));
         const aV = smoothstep(0, 0.015, v) * (1 - smoothstep(0.985, 1, v));
         // 室外按深度裁掉天空（否则照片天空会被压到 100m 处，和地面分成两块）；
@@ -1963,7 +1973,10 @@
             Math.abs(pos[a1 * 3 + 1] - pos[b1 * 3 + 1]));
           const dyH = Math.max(Math.abs(pos[a0 * 3 + 1] - pos[a1 * 3 + 1]),
             Math.abs(pos[b0 * 3 + 1] - pos[b1 * 3 + 1]));
-          if (!noCull('steep') && dyV > 5 || dyH > 5) { skippedSteep++; continue; }
+          // 运算符优先级修正：原写法 `!noCull && dyV > 5 || dyH > 5` 等价于
+          // `(!noCull && dyV>5) || dyH>5`，导致 `?nocull=steep` 对 dyH 完全失效
+          // （山脊两侧水平相邻顶点高差普遍 >5m，A/B 时无法关掉这条剔除）。
+          if (!noCull('steep') && (dyV > 5 || dyH > 5)) { skippedSteep++; continue; }
         }
         // 近处物体与背景的交界交给下面的深度比值判据（tMax/tMin）。
         // 曾按「模型 mask 的 fg 顶点数」跳面，但 96×96 的 mask 边界是块状的，
