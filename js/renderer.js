@@ -269,6 +269,21 @@
         gl.enable(gl.CULL_FACE);
       }
 
+      /* 世界坐标地面方格网（v1.20）：先画地面，再画照片表面。
+         地面的几何与照片平面完全重合（都是 y=0），只是拓扑换成规则方格，
+         贴图 UV 取自反投影场 —— 从任何角度看都没有放射状拉丝。 */
+      if (world.meshes.groundGrid && !skip('ground')) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.depthMask(true);
+        gl.disable(gl.CULL_FACE);
+        drawMesh(world, world.meshes.groundGrid, {
+          tex: world.tex.ground, mode: 4, fog: 0.26, mipBias: 0.2
+        });
+        gl.disable(gl.BLEND);
+        gl.enable(gl.CULL_FACE);
+      }
+
       // 深度重建的三维表面（照片即场景）
       if (world.meshes.relief && !skip('shell')) {
         gl.enable(gl.BLEND);

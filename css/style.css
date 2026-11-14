@@ -645,3 +645,24 @@ button.primary:hover { background: #f0e2c0; }
 .live-switch { grid-template-columns: 34px 20px 1fr; }
 .live-switch input[type="checkbox"] { width: 16px; height: 16px; accent-color: #e0cfa9; }
 .live-switch em { text-align: left; color: var(--dim-2); }
+
+/* v1.20：手机上所有 HUD 按钮只显示图标，用户认不出哪个是「实时变化」。
+   给它一条常驻小标签（竖排在图下），其它按钮保持纯图标不占位。 */
+@media (max-width: 760px) {
+  #btnLive {
+    position: relative;
+    padding: 9px 10px 17px;
+  }
+  #btnLive span {
+    display: block;
+    position: absolute;
+    left: 50%; bottom: 3px;
+    transform: translateX(-50%);
+    font-size: 8px;
+    line-height: 1;
+    letter-spacing: .06em;
+    white-space: nowrap;
+    color: inherit;
+  }
+  #btnLive.on span { color: var(--accent); }
+}

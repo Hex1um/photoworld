@@ -1777,6 +1777,7 @@
        不再需要视锥掩码或镜像平铺。 */
     const idx = [];
     let skipped = 0, skippedCard = 0, skippedObjEdge = 0, skippedSteep = 0, skippedWall = 0,
+      skippedGround = 0,
       culledAlpha = 0, culledArea = 0;
     for (let j = 0; j < GH - 1; j++) {
       for (let i = 0; i < GW - 1; i++) {
@@ -1870,8 +1871,91 @@
           const ccl = Math.hypot(ccx, ccy, ccz) || 1;
           if ((nqx * ccx + nqy * ccy + nqz * ccz) / (nql * ccl) > 0.15) { skippedWall++; continue; }
         }
+        /* 四角都是地面的四边形交给**世界坐标方格网**（见下），
+           不要留在极坐标扇形里 —— 扇形在近处是放射状长条，贴图沿径向被拉成
+           一丝丝条纹（手机上贴着地面看特别明显）。混合四边形（地面↔物体交界）
+           仍然保留，避免交界处出现缝。 */
+        if (opt.groundGrid !== false
+          && gGround[a0] && gGround[a1] && gGround[b0] && gGround[b1]) {
+          skippedGround++; continue;
+        }
         idx.push(a0, b0, a1, a1, b0, b1);
       }
+    }
+
+    /* 4b) 世界坐标地面方格网（v1.20）
+       地面像素的 y 恒为 0（射线与 y=0 求交），所以几何上它就是一张平面；
+       问题只在**拓扑**：极坐标扇形在近处是放射状长条，UV 沿径向被拉长。
+       这里改成规则方格：每个格子 1m 出头，UV 直接取「该点反投影到照片的 uv」
+       （从地面顶点烘一张 uv 场，双线性采样），于是贴图在世界里是均匀的、
+       从任何角度看都不会有放射状拉丝。 */
+    const baseLinG = [
+      Math.max(1e-4, Math.pow(clamp(analysis.ground[0], 0, 1), 2.2)),
+      Math.max(1e-4, Math.pow(clamp(analysis.ground[1], 0, 1), 2.2)),
+      Math.max(1e-4, Math.pow(clamp(analysis.ground[2], 0, 1), 2.2))
+    ];
+    let groundGrid = null;
+    if (opt.groundGrid !== false) {
+      const GS = 1.25;                        // 格子边长（米）
+      const NX = Math.ceil((2 * A) / GS) + 1;
+      const NZ = Math.ceil(B / GS) + 1;
+      /* 1) UV 用**解析反投影**，不要 sprinkla 取整：
+         地面点 (x, 0, z) 相对照片相机 (0, eye, 0) 的方向 dir，
+         转到相机空间得到 dy0 = dy·cosP − dz·sinP，再按针孔投影反解
+            v = 0.5 − dy0/(2·tanV)，u = 0.5 + dirX/(2·tanH)
+         这样 uv 在网格上是连续光滑的；按格内平均烘场会在近处退化成
+         人字纹（每格跨越很大的 uv 变化）。
+         1b) 起雾/边界淡出仍按到相机的水平距离。 */
+      function uvOfGround(x, z) {
+        const l = Math.hypot(x, eye, z) || 1;
+        const dx = x / l, dy = -eye / l, dz = z / l;
+        const dy0 = dy * cosP - dz * sinP;
+        return [0.5 + dx / (2 * Math.max(0.05, tanH)),
+          clamp(0.5 - dy0 / (2 * Math.max(0.05, tanV)), 0.0, 0.995)];
+      }
+      // 3) 建网格
+      const gpos = new Float32Array(NX * NZ * 3);
+      const gnrm = new Float32Array(NX * NZ * 3);
+      const guv = new Float32Array(NX * NZ * 2);
+      const gcol = new Float32Array(NX * NZ * 4);
+      const gedge = new Float32Array(NX * NZ * 2);
+      const gidx = [];
+      for (let gj = 0; gj < NZ; gj++) {
+        for (let gi = 0; gi < NX; gi++) {
+          const id = gj * NX + gi;
+          const x = -A + gi * GS;
+          const z = -gj * GS;
+          gpos[id * 3] = x; gpos[id * 3 + 1] = -0.005; gpos[id * 3 + 2] = z;
+          gnrm[id * 3 + 1] = 1;
+          /* UV 用世界坐标平铺（4.5m 一次），**不要**用照片投影 uv：
+             照片投影在视锥外会饱和（v→1 被 clamp），整片采样同一行 → 条纹；
+             而且掠射角下的各向异性放大在手机 GPU 上更明显。
+             照片地面的"颜色"由顶点色带入（groundColorAt/base），细节交给平铺贴图。 */
+          guv[id * 2] = x / 4.5;
+          guv[id * 2 + 1] = z / 4.5;
+          {
+            /* 顶点色 = 照片地面色 / 地面贴图基色（与延伸块的算法同口径）。
+               注意这里不能用 `world.*`：buildCartesianWorld 里还没有 world 对象，
+               第一版写了 world.baseLin 直接 ReferenceError → 整个世界建不出来。 */
+            const gc = groundColorAt(x, z);
+            gcol[id * 4] = clamp(gc[0] / Math.max(1e-4, baseLinG[0]), 0.25, 6);
+            gcol[id * 4 + 1] = clamp(gc[1] / Math.max(1e-4, baseLinG[1]), 0.25, 6);
+            gcol[id * 4 + 2] = clamp(gc[2] / Math.max(1e-4, baseLinG[2]), 0.25, 6);
+          }
+          gcol[id * 4 + 3] = 1;
+          gedge[id * 2 + 1] = smoothstep(8, 34, Math.hypot(x, z)) * 0.92;
+        }
+      }
+      for (let gj = 0; gj < NZ - 1; gj++) {
+        for (let gi = 0; gi < NX - 1; gi++) {
+          const a0 = gj * NX + gi, a1 = a0 + 1;
+          const b0 = (gj + 1) * NX + gi, b1 = b0 + 1;
+          gidx.push(a0, b0, a1, a1, b0, b1);
+        }
+      }
+      groundGrid = {
+        pos: gpos, normal: gnrm, uv: guv, color: gcol, edge: gedge, index: gidx
+      };
     }
 
     /* 5) 行走高度场：把反投影顶点烘进 1m 的 XZ 网格（取格内最高点），
@@ -1922,7 +2006,7 @@
     const quadTotal = Math.max(1, (GW - 1) * (GH - 1));
     return {
       pos, normal: nrmS, uv, color: col, edge, index: idx,
-      vfov, tris: idx.length / 3, skipped,
+      vfov, tris: idx.length / 3, skipped, groundGrid,
       calibration: cal ? { p: cal.p, zNear: cal.zNear, rNear: cal.rNear, rFar: cal.rFar } : null,
       heightField,
       bbox: { A, B },
@@ -1943,6 +2027,7 @@
         kept: idx.length / 6, total: quadTotal,
         keepRate: (idx.length / 6) / quadTotal,
         culledAlpha, culledArea, skipped, skippedCard, skippedObjEdge, skippedSteep, skippedWall,
+        skippedGround,
         objectCards: instInfo.instances.length
       },
       /* 质检用：把顶点位置暴露出来（?dbgpos=1），tools/probe.mjs 可以据此
@@ -2239,6 +2324,8 @@
 
     const m = {
       relief: relief ? PWGL.createMesh(gl, relief) : null,
+      // 世界坐标地面方格网（替代极坐标扇形的地面部分，消掉放射状拉丝）
+      groundGrid: (relief && relief.groundGrid) ? PWGL.createMesh(gl, relief.groundGrid) : null,
       // 照片底行向下的连续裙边（消掉照片底边的几何断口）
       skinSkirt: (relief && relief.skirt) ? PWGL.createMesh(gl, relief.skirt) : null,
       // 单体十字账单牌（v1.16）：替代被拉成鳍的对象四边形
