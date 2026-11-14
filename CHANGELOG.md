@@ -195,7 +195,33 @@ node tools/test_clarity.mjs             # 6/6
 node tools/bump_cache.mjs --check       # 17 处 ?v= 全部 1.26.0
 ```
 
-## [评估记录] - 2026-11-15  · 两条 3DGS 路线在本机的可行性（未通过）
+## [评估记录] - 2026-11-15  · 两条 3DGS 路线：已在本机跑通并对比
+
+### 关键前提：torch 必须 cu128+
+
+RTX 5070 Laptop 是 **sm_120（Blackwell）**，cu126 官方 wheel 最高 sm_90 →
+`no kernel image is available`。换 `torch 2.11.0+cu128 / torchvision 0.26.0+cu128` 后正常。
+
+### 结果对比（同一张雪山照片）
+
+| | PocketWorld-3D | ml-sharp |
+| --- | --- | --- |
+| 流程 | SDXL inpainting 全景 → DepthAnything → 球面反投影 | ViT-L/16 前馈 → 3DGS 参数 |
+| 权重 | SDXL 6.8GB（+深度 99MB） | 2.5GB（Apple CDN，秒级） |
+| 耗时 | 全景 **43.7s** + 深度 **21.8s** + PLY 0.5s = **66s** | 推理 **37s** + 后处理 7s ≈ **44s** |
+| 产物 | `pw_out.ply` 72MB / **1,048,576 点** / 20 属性（伪 3DGS：球面点云 + 旋转缩放） | `sharp_out/input.ply` 64MB / **1,179,648 点** / 21 属性（**标准 3DGS**，含 `f_dc` 球谐） |
+| 质量 | 全景外推是瓶颈：`strength=0.99` 把中心压成沙漏，`0.82` 中心保留但四周是灰糊 | 待渲染对比（真高斯 + 球谐，参数更完整） |
+
+### 结论
+
+- **两条都能跑通**，`ml-sharp` 更快（44s vs 66s）、点更密、输出是标准 3DGS；
+  `PocketWorld` 的瓶颈在 SDXL 全景外推（8GB 显存只能 512 输入，补不出合理 360°）。
+- 本机的现实用法：**离线跑 ml-sharp 出 `.ply`，前端接 splat viewer**；
+  不建议在浏览器里实时跑（2.5GB 权重 + 37s 推理）。
+- PocketWorld 的补丁（都在测试脚本/外部仓库，未入库）：新 diffusers 删了
+  `enable_vae_slicing`；深度模型名要换成 `depth-anything/Depth-Anything-V2-Small-hf`。
+
+## [评估记录] - 2026-11-15  · 两条 3DGS 路线在本机的可行性（初测未通过）
 
 目标：对比 `PocketWorld-3D`（SDXL 全景 + DepthAnything + 3DGS）与
 `sharp-3d-web`（Apple ml-sharp，2.5GB 权重）。
