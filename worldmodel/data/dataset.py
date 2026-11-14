@@ -58,11 +58,26 @@ def collate(batch: list[dict]) -> dict:
     """DataLoader collate_fn：list[dict] → batched tensor dict。
 
     图片分片给 (init, hist, target)，预编码分片给 (z_init, z_hist, z_target)；
-    trainer 按 "z_init" in batch 判断走哪条路径，两者可混合在同一 DataLoader 之外分别使用。
+    trainer 按 "z_init" in batch 判断走哪条路径。
+
+    v1.26 修 B11#5：旧实现只看 batch[0] 的类型，混合批次会对后面的样本
+    `KeyError: 'z_init'`。两种输入表示（(4,32,48) latent 与 (3,256,384) 图像）
+    无法堆成同一张量，也不允许在一个 batch 里走两条 VAE 路径，所以这里
+    明确拒绝并给出可操作的指引，而不是抛一个看不懂的 KeyError。
     """
     import torch  # 延迟导入：数据集与切分不依赖 torch
-    keys = (("z_init", "z_hist", "z_target") if "z_init" in batch[0]
+    latent = ["z_init" in b for b in batch]
+    if any(latent) and not all(latent):
+        raise ValueError(
+            "collate 收到混合批次（%d 个预编码 latent / %d 张图片，共 %d）。"
+            "两种输入表示无法堆成同一张量，训练语义也不允许同一 batch 走两条 VAE 路径。"
+            "请把两类分片放到不同目录，用 data.prefer_latent 切换。"
+            % (sum(latent), len(batch) - sum(latent), len(batch)))
+    keys = (("z_init", "z_hist", "z_target") if all(latent)
             else ("init", "hist", "target"))
+    for k in keys:
+        if any(k not in b for b in batch):
+            raise ValueError("样本缺少 %r 键，分片格式不完整" % k)
     out = {key: torch.from_numpy(_stack(batch, key)).float() for key in keys}
     out["action"] = torch.from_numpy(_stack(batch, "action")).float()
     return out
@@ -171,6 +186,16 @@ class TarWindows:
                 "确认 prepare_data.py 的 N_HIST 与配置 n_hist 一致。"
                 % (self.shard_dir, self.n_hist - 1)
             )
+        # v1.26：启动阶段就把「同目录混合两种分片」挡住。留到 collate 才炸，
+        # 用户看到的是训练到一半的 KeyError；这里直接给出分片数与修复方式。
+        n_lat = sum(1 for s in self.samples if s[3])
+        if 0 < n_lat < len(self.samples):
+            raise ValueError(
+                "分片目录 %s 同时含 %d 个预编码 latent 样本与 %d 个图片样本。"
+                "两种输入表示不能进同一个 DataLoader（B11#5）。"
+                "请把它们分到两个目录，用 data.prefer_latent / data.latent_dir 切换；"
+                "preencode_latents.py 可把整个图片目录转成 latent 目录。"
+                % (self.shard_dir, n_lat, len(self.samples) - n_lat))
 
     def __len__(self):
         return len(self.samples)

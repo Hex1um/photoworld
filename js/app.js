@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '1.25.0';
+  const VERSION = '1.26.0';
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -193,20 +193,20 @@
       let depthMap = null;
       try {
         setProgress(32, '加载深度模型（27MB，仅首次）…');
-        // 流式下载：p 是真实字节进度，label 由 depth.js 给出（含 MB/s 与阶段名），
-        // 没有 label 时才退回旧文案。卡在「下载深度模型 15%」就是旧实现的症状。
-        await window.PW.depth.init((p, label) => {
+        /* v1.26：不再无条件 await init()。
+           estimate() 内部只在 L1/L2 都未命中时才调 init(onProgress)；
+           旧写法即使深度图命中 IndexedDB，也照样下载 27MB 模型 + 编译 WASM 内核，
+           把持久化的收益吃掉一大半。进度回调交给 estimate 传递，冷启动文案不变。 */
+        const onDepthProgress = (p, label) => {
           setProgress(32 + p * 32, label || ('下载深度模型 ' + Math.round(p * 100) + '%（27MB）'));
-        });
-        setProgress(65, '模型就绪，准备推理');
-        await sleep(60);
-        setProgress(67, '推理：估计每个像素的距离…');
-        await sleep(30);
+        };
         depthMap = await Promise.race([
-          window.PW.depth.estimate(img),
+          window.PW.depth.estimate(img, onDepthProgress),
           new Promise((_, rej) => setTimeout(() => rej(new Error('深度估计超时')), 60000))
         ]);
-        setProgress(72, '深度图后处理（分位归一化 / 极性）');
+        setProgress(72, (depthMap && (depthMap.cached || depthMap.persisted))
+          ? (depthMap.persisted ? '深度图命中本地缓存（跳过推理）' : '深度图命中内存缓存')
+          : '深度图后处理（分位归一化 / 极性）');
         drawDepthPreview(depthMap);
       } catch (e) {
         console.warn('深度模型不可用，回退到天际线方案：', e && e.message);
@@ -341,6 +341,9 @@
            修掉低纹理崖面上那一片白色方块。?skyfill=0 回到纯深度判定
            （真值基准高 1.05dB，但真实照片会有洞）。 */
         skyFill: params.get('skyfill') !== '0',
+        /* 平坦地面顶点法线早退（v1.26，默认开，严格数学等价）：
+           ?fastnorm=0 关掉逐元素 A/B。 */
+        fastNorm: params.get('fastnorm') !== '0',
         // 竖直夸张（只作用于地平线以上）：?ygain=2 做 A/B
         yGain: params.has('ygain') ? Math.max(0.6, Math.min(4, parseFloat(params.get('ygain')) || 1.35)) : undefined,
         // 照片投影 UV 地面层（默认关，?groundphoto=1 打开；掠射角会拉丝）
@@ -1028,7 +1031,15 @@
     const c = nav.connection || {};
     if (c.saveData || c.effectiveType === 'slow-2g' || c.effectiveType === '2g') return;
     if (!window.PW || !window.PW.depth) return;
-    const run = () => { window.PW.depth.init(() => {}).catch(() => {}); };
+    const run = () => {
+      // v1.26：本次会话若已命中 L1/L2 深度缓存，就不需要 ONNX 会话。
+      // 旧逻辑无条件预取，会把「同图重开跳过推理」省下的时间又花在
+      // 27MB 模型加载 + WASM 内核编译上。用户之后换一张新图时，
+      // estimate() 会自己 init()，只是少了一次提前下载。
+      const st = window.PW.depth.cacheStats ? window.PW.depth.cacheStats() : {};
+      if (st.idbHits > 0 || st.memHits > 0) return;
+      window.PW.depth.init(() => {}).catch(() => {});
+    };
     if (window.requestIdleCallback) window.requestIdleCallback(run, { timeout: 5000 });
     else setTimeout(run, 2600);
   }

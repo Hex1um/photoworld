@@ -5,6 +5,16 @@
 #   data.prefer_latent     预编码 latent 分片直读，训练循环内 0 次 VAE encode
 #   train.val_max_samples  验证固定 64 条子集（曲线方差更小，验证开销 -88%）
 #   train.ema_every        每 4 步更新 EMA（衰减按 4 次方补偿，行为等价）
+#
+# v1.26 追加的吞吐开关（全部 opt-in，下面都注释掉 = 保持旧行为）：
+#   model.pad_to_multiple: 64        L=2305 → 2368，dummy 列不被有效 token 看见
+#   train.activation_checkpointing: true   重算 12 个 Block 的中间激活，换更大 batch
+#   train.num_workers: 4 / prefetch_factor: 2 / pin_memory: true / persistent_workers: true
+#   train.compile: true / compile_mode: reduce-overhead
+#   train.fused_adam: true           CUDA 下默认已开，数学等价
+# 这些项只改系统级调度，不改权重形状 / checkpoint 键 / 损失 / CFG；
+# 但 padding 会改变 bf16 kernel 分块，收益与数值需在训练机 A/B 后确认，
+# 本机无 torch/CUDA，一律标「解析估算、未实测」。
 data:
   shard_dir: data/wm
   prefer_latent: true

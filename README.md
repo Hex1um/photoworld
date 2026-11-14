@@ -149,10 +149,12 @@ node tools/smoke.mjs --base … --shots /tmp/smoke --only alpine
 一行改名（例如 `opts`→`opt`）就能让主路径 100% 进不去世界，这个脚本 20 秒能抓到。
 
 不开浏览器也能跑算法回归（地面平面 / 断崖补洞 / 深度预处理 / 验收门 / 训练数据层 /
-动作编码 / RoPE 等变性 / 预编码 latent / 重复定义与死代码 / 深度图缓存 / 缓存串）：
+动作编码 / RoPE 等变性 / 预编码 latent / 重复定义与死代码 / 深度图缓存 / 缓存串 /
+数值等价性 / IndexedDB 推理缓存 / v1.26 训练与推理开关）：
 
 ```bash
 node tools/test_regression.mjs
+node tools/test_inference_cache.mjs     # 三路 ONNX 结果的持久化缓存与刷新命中
 python tools/test_regression.py            # 末尾会自动跑 P2 回归
 python tools/test_regression_p2.py         # 也可单独跑世界模型部分
 node tools/bump_cache.mjs --check

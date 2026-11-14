@@ -43,7 +43,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pwsmoke-'));
 const proc = spawn(EDGE, ['--headless=new', `--remote-debugging-port=${PORT}`,
   `--user-data-dir=${profile}`, '--use-gl=angle', '--use-angle=swiftshader',
-  '--enable-unsafe-swiftshader', '--hide-scrollbars', '--no-first-run',
+  '--enable-unsafe-swiftshader', '--no-proxy-server', '--hide-scrollbars', '--no-first-run',
   `--window-size=${W},${H}`, 'about:blank'], { stdio: 'ignore' });
 
 async function wsUrl() {

@@ -263,6 +263,17 @@
       const key = contentKey(img) + ':' + gw + 'x' + gh;
       const hit = CACHE.get(key);
       if (hit) return Object.assign({}, hit, { cached: true, ms: 0 });
+      /* v1.26 L2：刷新页面后跳过 SegFormer 会话与推理。
+         ns 带版本号，模型 / decode 分组表变更必须升 ns，避免命中旧语义图。 */
+      const idb = global.PW && global.PW.inferenceCache;
+      if (idb) {
+        const rec = await idb.get('sem-v1', key);
+        if (rec && rec.groups && rec.classes) {
+          CACHE.set(key, rec);
+          if (CACHE.size > 4) CACHE.delete(CACHE.keys().next().value);
+          return Object.assign({}, rec, { cached: true, persisted: true, ms: 0 });
+        }
+      }
     }
     let result = null;
     if (img) {
@@ -299,6 +310,10 @@
       const key = contentKey(img) + ':' + gw + 'x' + gh;
       CACHE.set(key, result);
       if (CACHE.size > 4) CACHE.delete(CACHE.keys().next().value);
+      /* 只持久化模型推理成功的结果：启发式回退依赖 depth / analysis / objInfo，
+         参数一变就应该重算，缓存它反而会锁住旧结论。 */
+      const idb = global.PW && global.PW.inferenceCache;
+      if (idb && result.source === 'segformer') idb.put('sem-v1', key, result);
     }
     return Object.assign({}, result, { cached: false });
   }

@@ -494,6 +494,152 @@ def test_macs_estimate() -> None:
           % (fwd / 1e9, step_base / 1e12, extra_ss / 1e12))
 
 
+def test_v123_train_guards() -> None:
+    """v1.26 训练侧吞吐优化：默认全关、padding 数学等价、混合分片不再 KeyError。
+
+    本机没有 torch/CUDA，这里只做纯 numpy + AST 结构断言；吞吐与收敛收益
+    一律是「解析估算 / 待训练机 A/B」，不在本机声称实测。
+    """
+    dit = _src("worldmodel/model/dit.py")
+    tr = _src("worldmodel/train/trainer.py")
+    ds = _src("worldmodel/data/dataset.py")
+
+    # ---- 1) L=2305 → 2368 的掩码必须与未 padding 严格等价 ----
+    L, per, nf, P = 2305, 384, 6, 63
+    fid = np.minimum(np.arange(L) // per, nf - 1)
+    allow = fid[:, None] >= fid[None, :]
+    top = np.concatenate([allow, np.zeros((L, P), dtype=bool)], axis=1)
+    bot = np.zeros((P, L + P), dtype=bool)
+    bot[:, L:] = np.eye(P, dtype=bool)
+    padded = np.concatenate([top, bot], axis=0)
+    assert padded.shape == (2368, 2368), "padding 后不是 64 的倍数"
+    assert np.array_equal(padded[:L, :L], allow), "有效 token 之间的因果掩码被改动"
+    assert not padded[:L, L:].any(), "有效行看到了 dummy 列"
+    assert not padded[L:, :L].any(), "dummy 行看到了有效 token"
+    assert int(padded[L:, L:].sum()) == P, "dummy 行必须各自只看自己"
+    assert padded.any(axis=1).all(), "存在全 False 行，SDPA 会产生 NaN"
+    start = (nf - 1) * per + 1
+    assert start == 1921 and start + per == L, "目标帧输出切片下标算错"
+    assert int(allow.sum()) == 3099265, "未 padding 的有效注意力对数漂移"
+
+    # ---- 2) 所有吞吐开关默认关闭（B9：默认行为不变） ----
+    tree = ast.parse(dit)
+    cw = next(n for n in tree.body
+              if isinstance(n, ast.ClassDef) and n.name == "CausalWorldDiT")
+    init = next(n for n in cw.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+    defaults = {a.arg: ast.literal_eval(d)
+                for a, d in zip(init.args.args[2:], init.args.defaults)}
+    assert defaults == {"pad_multiple": 0, "activation_checkpointing": False}, \
+        "DiT 新增开关的默认值变了：%s" % defaults
+    for frag in ('cfg["model"].get("pad_to_multiple", 0)',
+                 'cfg["train"].get("activation_checkpointing", False)',
+                 'cfg["train"].get("num_workers", 0)',
+                 'cfg["train"].get("compile", False)'):
+        assert frag in tr, "吞吐开关默认值漂移：%s" % frag
+    assert "self._rope_cache = {}" in dit and "self.register_buffer(" not in dit, \
+        "RoPE 缓存必须是普通属性，register_buffer 会改 state_dict 键"
+    assert "self.head(x[:, -cfg.per_frame:])" in dit, "未 padding 的默认输出切片被改动"
+
+    # ---- 3) 混合分片：明确的 ValueError，而不是训练中途的 KeyError ----
+    import types
+    fake = types.ModuleType("torch")
+
+    class _FakeTensor:
+        def __init__(self, a): self.a = a
+
+        def float(self): return self
+
+    fake.from_numpy = lambda a: _FakeTensor(a)
+    old = sys.modules.get("torch")
+    sys.modules["torch"] = fake
+    try:
+        from worldmodel.data.dataset import collate
+        img = {"init": np.zeros((3, 4, 4), np.float32),
+               "hist": np.zeros((4, 3, 4, 4), np.float32),
+               "target": np.zeros((3, 4, 4), np.float32),
+               "action": np.zeros(7, np.float32)}
+        lat = {"z_init": np.zeros((4, 4, 4), np.float32),
+               "z_hist": np.zeros((4, 4, 4, 4), np.float32),
+               "z_target": np.zeros((4, 4, 4), np.float32),
+               "action": np.zeros(7, np.float32)}
+        assert set(collate([img, img])) == {"init", "hist", "target", "action"}
+        assert set(collate([lat, lat])) == {"z_init", "z_hist", "z_target", "action"}
+        try:
+            collate([img, lat])
+            raise AssertionError("混合批次没有被拒绝")
+        except ValueError as e:
+            assert "混合批次" in str(e), "错误信息没有指出根因：%s" % e
+    finally:
+        if old is None:
+            sys.modules.pop("torch", None)
+        else:
+            sys.modules["torch"] = old
+    assert "同时含" in ds and "ValueError" in ds, "数据集层缺少启动期混合分片检查"
+    print("PASS  v1.26 训练侧：2368 padding 掩码逐元素等价（有效对 3099265 不变）、"
+          "吞吐开关默认全关、混合分片改抛可操作的 ValueError")
+
+
+def test_v123_rollout_budget() -> None:
+    """v1.26 推理：CFG 批量合并的两种计数口径必须分清楚。
+
+    FLOPs 正比于「等效单样本前向数」(B=2 记 2)，而「model 调用数」只反映
+    kernel 启动 / 权重读取。4 步 Heun 并不省 FLOPs（每步 2 次评估），
+    它的收益是同等评估预算下轨迹更准；真正省算力的是减步 Euler 与分段 CFG。
+    """
+    roll = _src("worldmodel/infer/rollout.py")
+    # CFG 统一走标准式 v = v_null + (1+w)(v_cond - v_null)（T9-4：w=4 实际 s=5）。
+    # 批量合并与串行回退两条路径都必须用同一个式子，否则 A/B 会混入公式差异。
+    for frag in ("uncond=True", "(s + 0.5) * dt", "uncond=u2",
+                 "vn + s_guid * (vc - vn)", "v_null + s_guid * (v_cond - v_null)",
+                 "s_guid = 1.0 + float(cfg_scale)", "solver == \"heun\"",
+                 "batch_cfg: bool = True", "cfg_interval: float = 1.0"):
+        assert frag in roll, "推理链路关键结构漂移：%s" % frag
+    assert roll.count("s_guid = 1.0 + float(cfg_scale)") == 2, \
+        "批量合并与串行回退两条路径必须共用同一个 CFG 强度定义"
+
+    tree = ast.parse(roll)
+    fn = next(n for n in tree.body
+              if isinstance(n, ast.FunctionDef) and n.name == "rollout")
+    positional = [a.arg for a in fn.args.args]
+    defaults = {a.arg: ast.literal_eval(d)
+                for a, d in zip(fn.args.args[len(fn.args.args) - len(fn.args.defaults):],
+                                fn.args.defaults)}
+    assert positional[:8] == ["image", "actions", "ckpt_path", "steps", "cfg_scale",
+                              "device", "use_ema", "hist_frames"], \
+        "rollout 旧位置参数被改动，eval.py 会错传"
+    for k, v in (("solver", "euler"), ("cfg_interval", 1.0), ("batch_cfg", True)):
+        assert defaults.get(k) == v, "%s 默认值变了：%r" % (k, defaults.get(k))
+
+    def budget(steps, solver, cfg_scale=4.0, interval=1.0, batch_cfg=True):
+        calls = equiv = 0
+        for s in range(steps):
+            want_cfg = ((s + 0.5) / steps) <= interval
+            for _ in range(2 if solver == "heun" else 1):
+                if not want_cfg or cfg_scale <= 1.0:
+                    calls += 1
+                    equiv += 1
+                elif batch_cfg:
+                    calls += 1
+                    equiv += 2
+                else:
+                    calls += 2
+                    equiv += 2
+        return calls, equiv
+
+    assert budget(8, "euler", batch_cfg=False) == (16, 16), "旧串行 CFG 基线"
+    assert budget(8, "euler", batch_cfg=True) == (8, 16), \
+        "batch 合并只省 kernel 启动，不应改变 FLOPs"
+    assert budget(5, "euler", batch_cfg=True) == (5, 10), "5 步 Euler 应省 37.5% FLOPs"
+    assert budget(4, "heun", batch_cfg=True) == (8, 16), \
+        "4 步 Heun 与 8 步 Euler 的 FLOPs 相同，不能声称省算力"
+    assert budget(4, "heun", interval=0.6, batch_cfg=True) == (8, 12), "分段 CFG 计数"
+    cli = _src("scripts/rollout.py")
+    assert "--solver" in cli and "--cfg-interval" in cli and "--serial-cfg" in cli, \
+        "CLI 缺少 A/B 开关"
+    print("PASS  v1.26 推理：8 步 Euler 调用 16→8 次（FLOPs 不变）、"
+          "5 步 Euler 等效前向 16→10（−37.5%）、4 步 Heun 不省 FLOPs；默认参数兼容 eval.py")
+
+
 def main() -> None:
     test_action_codec()
     test_rope()
@@ -505,6 +651,8 @@ def main() -> None:
     test_no_deprecated_drop_keys()
     test_noise_proxy_distribution()
     test_macs_estimate()
+    test_v123_train_guards()
+    test_v123_rollout_budget()
     print("\nP2 回归全部通过")
 
 

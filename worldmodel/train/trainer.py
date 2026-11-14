@@ -15,6 +15,15 @@ from worldmodel.model.dit import CausalWorldDiT, DiTConfig, count_params
 from worldmodel.model.tokenizer import Tokenizer
 
 
+def raw_model(m: torch.nn.Module) -> torch.nn.Module:
+    """torch.compile 包装后 state_dict 会带 '_orig_mod.' 前缀。
+
+    EMA shadow、checkpoint 与续训必须始终操作裸模型，否则旧 last.pt 读不出来
+    （B9：不改 checkpoint 格式）。
+    """
+    return getattr(m, "_orig_mod", m)
+
+
 class EMA:
     """带 warmup 的 EMA。
 
@@ -29,7 +38,8 @@ class EMA:
         self.max_decay = decay
         self.every = max(1, int(every))
         self.step = 0
-        self.shadow = {k: v.detach().clone().float() for k, v in model.state_dict().items()}
+        self.shadow = {k: v.detach().clone().float()
+                       for k, v in raw_model(model).state_dict().items()}
 
     @property
     def decay(self):
@@ -41,7 +51,7 @@ class EMA:
         if self.every > 1 and (self.step % self.every) != 0:
             return
         d = self.decay ** self.every
-        for k, v in model.state_dict().items():
+        for k, v in raw_model(model).state_dict().items():
             s = self.shadow[k]
             if v.dtype.is_floating_point:
                 s.mul_(d).add_(v.detach().float(), alpha=1 - d)
@@ -49,8 +59,9 @@ class EMA:
                 s.copy_(v)
 
     def copy_to(self, model: torch.nn.Module):
-        sd = model.state_dict()
-        model.load_state_dict({k: self.shadow[k].to(sd[k].dtype) for k in sd})
+        m = raw_model(model)
+        sd = m.state_dict()
+        m.load_state_dict({k: self.shadow[k].to(sd[k].dtype) for k in sd})
 
 
 def make_model(cfg: dict, device: str) -> CausalWorldDiT:
@@ -60,7 +71,12 @@ def make_model(cfg: dict, device: str) -> CausalWorldDiT:
         dim=cfg["model"]["dim"], depth=cfg["model"]["depth"], heads=cfg["model"]["heads"],
         n_hist=cfg["data"]["n_hist"],
     )
-    return CausalWorldDiT(mcfg).to(device)
+    # v1.26 吞吐开关全部 opt-in（默认 0/False）：不改权重形状、不改 checkpoint 键。
+    return CausalWorldDiT(
+        mcfg,
+        pad_multiple=int(cfg["model"].get("pad_to_multiple", 0) or 0),
+        activation_checkpointing=bool(cfg["train"].get("activation_checkpointing", False)),
+    ).to(device)
 
 
 @torch.no_grad()
@@ -129,9 +145,18 @@ def coerce_train_cfg(cfg: dict) -> dict:
         if T.get(k) is not None:
             T[k] = float(T[k])
     for k in ("steps", "batch_size", "grad_accum", "warmup", "log_every", "val_every",
-              "val_max_samples", "ema_every"):
+              "val_max_samples", "ema_every", "num_workers", "prefetch_factor"):
         if T.get(k) is not None:
             T[k] = int(T[k])
+    # v1.26 新增开关：YAML 里写成 "true" 字符串时也按布尔处理
+    for k in ("pin_memory", "persistent_workers", "activation_checkpointing",
+              "compile", "fused_adam"):
+        v = T.get(k)
+        if isinstance(v, str):
+            T[k] = v.strip().lower() in ("1", "true", "yes", "on")
+    M = cfg.get("model", {})
+    if M.get("pad_to_multiple") is not None:
+        M["pad_to_multiple"] = int(M["pad_to_multiple"])
     return cfg
 
 
@@ -152,9 +177,18 @@ def train(cfg: dict) -> None:
                     action_scale=cfg["data"].get("action_scale"))
     tr, va = split_dataset(ds, cfg["data"].get("val_ratio", 0.05), seed)
     bs = cfg["train"]["batch_size"]
-    dl = DataLoader(tr, batch_size=bs, shuffle=True, num_workers=0,
-                    collate_fn=collate, drop_last=True)
-    dl_va = DataLoader(va, batch_size=bs, shuffle=False, num_workers=0, collate_fn=collate)
+    # v1.26 opt-in：多进程预取把 data 阶段（作者机器实测 0.11s/step）摊到后台。
+    # 默认 num_workers=0 与旧行为逐字一致；pin_memory 只在 CUDA 下有意义。
+    nw = int(cfg["train"].get("num_workers", 0) or 0)
+    loader_kw = dict(
+        batch_size=bs, collate_fn=collate, num_workers=nw,
+        pin_memory=bool(cfg["train"].get("pin_memory", True)) and device == "cuda",
+        persistent_workers=bool(cfg["train"].get("persistent_workers", False)) and nw > 0,
+    )
+    if nw > 0:
+        loader_kw["prefetch_factor"] = int(cfg["train"].get("prefetch_factor", 2) or 2)
+    dl = DataLoader(tr, shuffle=True, drop_last=True, **loader_kw)
+    dl_va = DataLoader(va, shuffle=False, **loader_kw)
 
     # VAE 惰性加载：全量使用 .latent 预编码分片时，训练机完全不需要 VAE 权重
     tok = None
@@ -166,10 +200,26 @@ def train(cfg: dict) -> None:
         return tok
 
     model = make_model(cfg, device)
+    # torch.compile：融合 adaLN 的逐元素算子。默认关闭 —— 本机无 CUDA/torch，
+    # 未实测数值与吞吐；reduce-overhead 还需固定的输入形状，训练机需自行 A/B。
+    if device == "cuda" and cfg["train"].get("compile", False):
+        try:
+            mode = str(cfg["train"].get("compile_mode", "reduce-overhead"))
+            model = torch.compile(model, mode=mode)
+            print("[train] torch.compile 已启用（mode=%s）" % mode, flush=True)
+        except Exception as e:                       # 老版本 torch / 不支持的后端
+            print("[train] torch.compile 不可用，回退 eager：%s" % e, flush=True)
     print("参数量 %.1fM  训练样本 %d  验证 %d" % (count_params(model) / 1e6, len(tr), len(va)))
 
-    opt = torch.optim.AdamW(model.parameters(), lr=cfg["train"]["lr"],
-                            betas=(0.9, 0.95), weight_decay=0.01)
+    opt_kw = dict(lr=cfg["train"]["lr"], betas=(0.9, 0.95), weight_decay=0.01)
+    if device == "cuda" and cfg["train"].get("fused_adam", True):
+        try:
+            # fused AdamW 与逐参数 AdamW 数学等价，只是把上百次小 kernel 合成一次
+            opt = torch.optim.AdamW(model.parameters(), fused=True, **opt_kw)
+        except TypeError:                            # 旧 torch 没有 fused 参数
+            opt = torch.optim.AdamW(model.parameters(), **opt_kw)
+    else:
+        opt = torch.optim.AdamW(model.parameters(), **opt_kw)
     total = cfg["train"]["steps"]
     warm = cfg["train"]["warmup"]
     sched = torch.optim.lr_scheduler.LambdaLR(
@@ -192,7 +242,7 @@ def train(cfg: dict) -> None:
         order = list(range(len(va)))
         _random.Random(int(seed) * 7919 + 17).shuffle(order)
         va = Subset(va, order[:val_max])
-        dl_va = DataLoader(va, batch_size=bs, shuffle=False, num_workers=0, collate_fn=collate)
+        dl_va = DataLoader(va, shuffle=False, **loader_kw)
         print("[val] 固定子集 %d / %d 条" % (val_max, len(ds) - len(tr)), flush=True)
 
     # 联合条件 dropout：训练与 CFG 的无条件分支共用同一条前向路径。
@@ -211,7 +261,10 @@ def train(cfg: dict) -> None:
         path = os.path.join(out_dir, "last.pt")
         if os.path.exists(path):
             ck = torch.load(path, map_location=device, weights_only=False)
-            model.load_state_dict(ck["model"])
+            if hasattr(model, "_orig_mod"):
+                raw_model(model).load_state_dict(ck["model"])
+            else:
+                model.load_state_dict(ck["model"])
             if "ema" in ck:
                 ema.shadow = {k: v.to(device).float() for k, v in ck["ema"].items()}
                 ema.step = ck.get("step", 0)
@@ -311,7 +364,7 @@ def train(cfg: dict) -> None:
             val_gen.manual_seed(val_seed)
             # val loss 必须与 rollout 同源：临时换上 EMA 权重，评估完恢复训练权重。
             # 旧代码用非 EMA 模型算 val，而 rollout 默认加载 EMA，指标不同源。
-            train_sd = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            train_sd = {k: v.detach().clone() for k, v in raw_model(model).state_dict().items()}
             try:
                 ema.copy_to(model)
                 with torch.no_grad():
@@ -339,8 +392,8 @@ def train(cfg: dict) -> None:
                         vl.append(F.mse_loss(vv.float(), (z1 - z0).float()).item())
                     print("  val loss %.4f (EMA)" % (sum(vl) / max(1, len(vl))), flush=True)
             finally:
-                model.load_state_dict(train_sd)
-            ck = {"model": model.state_dict(), "ema": ema.shadow, "cfg": cfg, "step": step}
+                raw_model(model).load_state_dict(train_sd)
+            ck = {"model": raw_model(model).state_dict(), "ema": ema.shadow, "cfg": cfg, "step": step}
             torch.save(ck, os.path.join(out_dir, "last.pt"))
             torch.save(ck, os.path.join(out_dir, "step-%06d.pt" % step))
             model.train()

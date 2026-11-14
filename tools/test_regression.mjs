@@ -431,4 +431,38 @@ assert.notEqual(cs.PW.depth.__internals.contentKey(fakeImg),
   cs.PW.depth.__internals.contentKey(other), '尺寸不同必须落在不同的缓存 key');
 console.log('PASS  P3  深度图缓存：重复进入免推理（runs 1→2），清空后重算，尺寸进入 key');
 
+// ---- 6) v1.26：可分离 3×3 均值 + 平坦地面法线早退必须逐元素等价 ----
+/* 早退是「严格等价」而不是近似：掩码覆盖 5×5 全平地面区域后，
+   叉积与 3×3 平滑两趟都可以直接写 (0,1,0)。这里用带尖刺的合成深度图
+   跑两次（开 / 关），六组输出必须逐元素完全相同（含 index 顺序）。 */
+{
+  const S3 = 300, GW3 = 160, GH3 = 100;
+  const d = new Float32Array(S3 * S3);
+  for (let y = 0; y < S3; y++) {
+    for (let x = 0; x < S3; x++) {
+      let v = (y / S3) * 0.9;
+      if (y > S3 * 0.55 && x > S3 * 0.40 && x < S3 * 0.60) v += 0.25;  // 近景块
+      if ((x + y) % 37 === 0) v += 0.4;                                  // 单像素尖刺
+      d[y * S3 + x] = v;
+    }
+  }
+  const dm = { data: d, width: S3, height: S3, size: S3 };
+  let stats = null;
+  const on = ctx.PW.world.buildCartesianWorld(analysis, dm, {
+    gw: GW3, gh: GH3, fastNorm: true, onStats: (s) => { stats = s; }
+  });
+  const off = ctx.PW.world.buildCartesianWorld(analysis, dm, {
+    gw: GW3, gh: GH3, fastNorm: false
+  });
+  assert.ok(stats && stats.flatVertices > 0, '早退掩码没有覆盖任何平坦地面顶点');
+  for (const key of ['pos', 'normal', 'uv', 'color', 'edge', 'index']) {
+    assert.equal(on[key].length, off[key].length, key + ' 长度不一致');
+    for (let i = 0; i < on[key].length; i++) {
+      assert.equal(on[key][i], off[key][i], key + '[' + i + '] 优化前后不等价');
+    }
+  }
+  console.log(`PASS  P1  v1.26 可分离滤波 + 法线早退：${stats.flatVertices}/${stats.totalVertices}`
+    + ` 顶点早退（${(100 * stats.flatVertices / stats.totalVertices).toFixed(1)}%），六组输出逐元素完全等价`);
+}
+
 console.log('\n全部回归通过');

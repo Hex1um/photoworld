@@ -131,6 +131,17 @@
     const key = contentKey(img);
     const hit = CACHE.get(key);
     if (hit) return Object.assign({}, hit, { cached: true, ms: 0 });
+    /* v1.26 L2：刷新页面后跳过 YOLOv8n-seg 会话与推理。
+       ns 带版本号，模型 / 后处理（NMS、mask 尺寸）变更必须升 ns。 */
+    const idb = global.PW && global.PW.inferenceCache;
+    if (idb) {
+      const rec = await idb.get('obj-v1', key);
+      if (rec && rec.fgMask && rec.instances) {
+        CACHE.set(key, rec);
+        if (CACHE.size > 4) CACHE.delete(CACHE.keys().next().value);
+        return Object.assign({}, rec, { cached: true, persisted: true });
+      }
+    }
     const session = await init(onProgress);
     const ort = S.ort;
     const lb = letterbox(img);
@@ -216,6 +227,8 @@
     };
     CACHE.set(key, result);
     if (CACHE.size > 4) CACHE.delete(CACHE.keys().next().value);
+    const idb2 = global.PW && global.PW.inferenceCache;
+    if (idb2) idb2.put('obj-v1', key, result);
     return Object.assign({}, result, { cached: false });
   }
 

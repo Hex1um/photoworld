@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as _activation_checkpoint
 
 
 @dataclass
@@ -119,9 +120,15 @@ class Block(nn.Module):
 class CausalWorldDiT(nn.Module):
     """输入：初始帧、历史帧、动作、噪声目标帧；输出：速度场。"""
 
-    def __init__(self, cfg: DiTConfig):
+    def __init__(self, cfg: DiTConfig, pad_multiple: int = 0,
+                 activation_checkpointing: bool = False):
         super().__init__()
         self.cfg = cfg
+        # v1.26 opt-in，全部是普通属性（不是 buffer/Parameter），不进 state_dict：
+        # 旧 checkpoint 的权重键逐字不变，B9 的「不改 checkpoint 格式」硬性成立。
+        self.pad_multiple = int(pad_multiple or 0)
+        self.use_checkpoint = bool(activation_checkpointing)
+        self._rope_cache = {}
         self.patch = nn.Conv2d(cfg.in_ch, cfg.dim, kernel_size=cfg.patch, stride=cfg.patch)
         self.t_embed = nn.Sequential(nn.Linear(cfg.dim, cfg.dim), nn.SiLU(), nn.Linear(cfg.dim, cfg.dim))
         self.act_embed = nn.Sequential(nn.Linear(cfg.act_dim, cfg.dim), nn.SiLU(),
@@ -181,21 +188,66 @@ class CausalWorldDiT(nn.Module):
             dom = torch.zeros_like(c)
         c = c + (1.0 - u) * dom + u * self.null_dom.view(1, -1)
 
-        cos, sin = rope_cache(cfg.dim // cfg.heads, n_frames, cfg.gh, cfg.gw, dev, seq.dtype,
-                              extra=1)
+        cos, sin = self._rope(n_frames, dev, seq.dtype)
         mask = self._causal_mask(n_frames, cfg.per_frame, dev, seq.dtype)
+
+        # v1.26 opt-in：把 L=2305 补零对齐到 pad_multiple 的倍数（64 → 2368）。
+        # 有效 token 的位置、RoPE 角度与因果掩码逐字不变；dummy 列对所有有效行
+        # 不可见，dummy 行只看自己（避免 SDPA 全 False 行产生 NaN）。
+        # 数学等价但 bf16 kernel 分块可能改变舍入，必须训练机 A/B 后才能默认开。
+        pad = (-seq.shape[1]) % self.pad_multiple if self.pad_multiple > 0 else 0
+        if pad:
+            seq = F.pad(seq, (0, 0, 0, pad))
+            cos = torch.cat([cos, cos[-1:].expand(pad, -1)], dim=0)
+            sin = torch.cat([sin, sin[-1:].expand(pad, -1)], dim=0)
+            mask = self._pad_mask(mask, pad, dev)
 
         x = seq
         for blk in self.blocks:
-            x = blk(x, c, cos, sin, mask)
+            # 选择性激活检查点：只重算 12 个 Block 的中间激活，权重形状 / 损失不变。
+            if self.use_checkpoint and self.training:
+                x = _activation_checkpoint(blk, x, c, cos, sin, mask, use_reentrant=False)
+            else:
+                x = blk(x, c, cos, sin, mask)
         x = self.norm(x)
         # 目标帧是序列最后 per_frame 个 token；动作 token 在其前面一位。
         # 旧写法 -(per_frame+1):-1 会把动作 token 当第 0 个输出 patch，
         # 并丢掉目标帧最后一个 patch（shape 恰好不变，静默错位）。
-        out = self.head(x[:, -cfg.per_frame:])
+        if pad:
+            start = (n_frames - 1) * cfg.per_frame + 1
+            out = self.head(x[:, start:start + cfg.per_frame])
+        else:
+            out = self.head(x[:, -cfg.per_frame:])
         out = out.view(B, cfg.gh, cfg.gw, cfg.patch, cfg.patch, C)
         out = out.permute(0, 5, 1, 3, 2, 4).reshape(B, C, H, W)
         return out
+
+    def _rope(self, n_frames: int, device, dtype):
+        """缓存 (cos, sin)：角度表与输入无关，每次前向重算三角函数是纯浪费。
+
+        用普通 dict 缓存而不是 register_buffer —— buffer 会写进 state_dict，
+        旧 last.pt 就会因键不匹配加载失败（违反 B9）。device/dtype 进 key，
+        模型 .to() 迁移后自动重建。
+        """
+        key = (str(device), str(dtype), n_frames)
+        hit = self._rope_cache.get(key)
+        if hit is not None and hit[0].device == device and hit[0].dtype == dtype:
+            return hit
+        cfg = self.cfg
+        hit = rope_cache(cfg.dim // cfg.heads, n_frames, cfg.gh, cfg.gw,
+                         device, dtype, extra=1)
+        self._rope_cache[key] = hit
+        return hit
+
+    @staticmethod
+    def _pad_mask(mask: torch.Tensor, pad: int, device) -> torch.Tensor:
+        """(1,1,L,L) → (1,1,L+P,L+P)：有效行看不到 dummy 列，dummy 行只看自己。"""
+        L = mask.shape[-1]
+        col_pad = torch.zeros((*mask.shape[:-1], pad), dtype=torch.bool, device=device)
+        top = torch.cat([mask, col_pad], dim=-1)
+        bot = torch.zeros((1, 1, pad, L + pad), dtype=torch.bool, device=device)
+        bot[:, :, :, L:] = torch.eye(pad, dtype=torch.bool, device=device).view(1, 1, pad, pad)
+        return torch.cat([top, bot], dim=2)
 
     @staticmethod
     def _uncond_mask(uncond, B: int, device) -> torch.Tensor:

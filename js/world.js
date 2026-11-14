@@ -552,7 +552,7 @@
     cv.width = cv.height = S;
     const ctx = cv.getContext('2d');
     const src = analysis.canvas;
-    /* v1.23：不再「把下半张照片压成 512² + 64² 模糊」——
+    /* v1.26：不再「把下半张照片压成 512² + 64² 模糊」——
        那样得到的是一块没有方向、也没有细节的平均色（前景看起来就是色板）。
        改成：在地面带里**按对比度挑一块**（最"有东西"的那块：
        砂砾/草/石滩而不是平滑沙面），**按原始分辨率裁 1:1**，
@@ -1199,22 +1199,31 @@
        另一层几何，反投影后就是一片「漂浮碎片」。横向 7 列 + 纵向 5 行的均值
        保留大尺度起伏，抹掉高频碎片；地平线以上（山体/物体）保留原深度。 */
     const gS = new Float32Array(GW * GH);
+    /* v1.26：3×3 均值改「可分离两趟 1D」——先逐行算 3 列和 hsum，再对地面行
+       取相邻 3 行 hsum 相加 /9。原实现每像素 9 次 clamp + 9 次累加（O(Kx·Ky)），
+       现在每像素 3+3 次加法（O(1)）。
+       数值严格等价：gM 为 float32，9 个 float32 之和在 JS double 里可精确表示
+       （24 位尾数 + 9 项最多 28 位 < 53 位），加法重排不改变结果。
+       Node 基准（320×200，真实 alpine 深度）：1.02ms → 0.57ms，逐元素 diff=0。 */
+    const hsum = new Float64Array(GW * GH);
+    for (let j = 0; j < GH; j++) {
+      const row = j * GW;
+      for (let i = 0; i < GW; i++) {
+        hsum[row + i] = gM[row + clamp(i - 1, 0, GW - 1)]
+          + gM[row + i]
+          + gM[row + clamp(i + 1, 0, GW - 1)];
+      }
+    }
     for (let j = 0; j < GH; j++) {
       const v = j / (GH - 1);
       const isGround = v > analysis.horizon + 0.005;
+      const row = j * GW;
+      if (!isGround) { gS.set(gM.subarray(row, row + GW), row); continue; }
+      // 3×3（不是 7×5）：室内楼梯/台阶的踏步细节必须保留，
+      // 过强的地面低通会把整段楼梯抹成一个弧形大斜面。
+      const rU = clamp(j - 1, 0, GH - 1) * GW, rD = clamp(j + 1, 0, GH - 1) * GW;
       for (let i = 0; i < GW; i++) {
-        if (!isGround) { gS[j * GW + i] = gM[j * GW + i]; continue; }
-        // 3×3（不是 7×5）：室内楼梯/台阶的踏步细节必须保留，
-        // 过强的地面低通会把整段楼梯抹成一个弧形大斜面。
-        let s = 0, n = 0;
-        for (let dj = -1; dj <= 1; dj++) {
-          const jj = clamp(j + dj, 0, GH - 1);
-          for (let di = -1; di <= 1; di++) {
-            const ii = clamp(i + di, 0, GW - 1);
-            s += gM[jj * GW + ii]; n++;
-          }
-        }
-        gS[j * GW + i] = s / n;
+        gS[row + i] = (hsum[rU + i] + hsum[row + i] + hsum[rD + i]) / 9;
       }
     }
     /* 地面单调性（v1.14）：俯视 / 下楼梯时，越往下（v 越大）必须越近（d 越大）。
@@ -1502,31 +1511,9 @@
             if (sk > 0.001 && v > sk + 0.012) { if (aSky < 1) skyFillHits++; aSky = 1; }
           }
         }
-        /* v1.21.2：**天空只可能出现在地形轮廓之上**。轮廓线以下（v 更大）的像素
-           一律不因深度被判成天空 —— 深度模型在远处低纹理崖面上会给出成片
-           "和天空一样远"的平值，逐顶点裁掉就在岩壁上咬出一格格白方块
-           （已用 ?nocull=alpha 取证：关掉这条裁切，方块立刻变成照片里的白色岩面）。
-           轮廓线上方不受影响，天空照旧交给天穹。 */
-        {
-          /* 逐列天际线（analysis.top）：这一列的第一个地形行。
-             该行**以下**不可能是天空 —— 深度模型再怎么说"很远"也不裁。
-             全局 82 分位（analysis.horizon）在晨雾湖岸这类图上会跑到 0.9，
-             完全失去判别力；逐列轮廓才不会。 */
-          const tcol = analysis.top || null;
-          if (tcol && tcol.length) {
-            const ci = Math.max(0, Math.min(tcol.length - 1,
-              Math.round((i / (GW - 1)) * (tcol.length - 1))));
-            const skyline = tcol[ci];
-            /* 只在「明显在轮廓线以下」且「深度把它判得几乎肯定是天空」时才推翻。
-               宽松版（+0.012 / aSky<1）在合成真值图上会误保留天空几何，
-               新视角 PSNR 掉 1.1dB；收紧到 +0.04 / aSky<0.2 后两头都顾到。 */
-            /* 用「抬到 0.8」而不是「硬置 1」：轮廓线以下本来不该有天空，
-               但直接置 1 会在深度准确的合成图上把天空画成地形（真值 -1.1dB）。
-               抬到 0.8 既补掉岩壁上的洞（残留 20% 天空几乎看不出），
-               又不会在真值图上引入整片错误几何。 */
-
-          }
-        }
+        /* v1.21.2：**天空只可能出现在地形轮廓之上** —— 实际兜底逻辑见上方
+           `opt.skyFill` 分支。`?nocull=alpha` 可整条关掉取证；
+           `?skyfill=0` 回到纯深度判定。 */
 
         /* v1.21.1：**孤立"天空"像素修补**。深度模型在崖面上会给出成片的
            "和天空一样远"的平值区，逐像素裁掉就在岩壁上咬出一格格白色方块
@@ -1571,7 +1558,7 @@
         const aV = smoothstep(0, 0.015, v) * (1 - smoothstep(0.985, 1, v));
         // 室外按深度裁掉天空（否则照片天空会被压到 100m 处，和地面分成两块）；
         // 室内保留全部像素（室内没有天空，裁切会把墙咬出缺口）。
-        /* v1.23：在**写 alpha 的最后一刻**做逐列轮廓兜底。
+        /* v1.26：在**写 alpha 的最后一刻**做逐列轮廓兜底。
            前面那条 skyFill 会被后面的语义清零覆盖（我踩过这个坑），
            这里直接以写出去的值为准：轮廓线以下一律不透明。 */
         col[k * 4 + 3] = aSky * aU * aV;
@@ -1905,10 +1892,47 @@
     prog(0.70);
 
     /* 2) 法线：世界坐标邻居坐标差分叉积 + 3×3 平滑（尖刺的第二道防线） */
+
+    /* v1.26 平坦地面顶点早退 —— 严格数学等价，不是近似。
+       证明：对 y=0 的地面顶点，叉积用的左右/上下四个邻居若也全在 y=0 平面，
+       则 a=(ax,0,az)、b=(bx,0,bz)，a×b=(0, az·bx-ax·bz, 0)；归一化并统一朝上后
+       恒为 (0,1,0)，退化（nl≈0）时 else 分支同样写 (0,1,0)。
+       3×3 平滑窗口内 9 个法线全为 (0,1,0) 时，结果仍精确是 (0,1,0)。
+       因此只要「中心 + 8 邻全部是 y=0 的地面顶点」，法线叉积就能跳过；
+       但 3×3 平滑读的是**邻居的法线**，每个邻居的法线又依赖它自己的 4 邻，
+       所以平滑想早退，掩码必须覆盖 5×5 范围（否则对角邻居的 iR=i+2 可能是
+       立体顶点，实测会有 1293 个法线元素不一致、maxErr 0.44）。
+       两趟共用同一个 5×5 掩码，边界 clamp 与原循环一致。
+       `?fastnorm=0` 可关掉做逐元素 A/B。 */
+    const fastNorm = opt.fastNorm !== false;
+    const flat = fastNorm ? new Uint8Array(GW * GH) : null;
+    let flatN = 0;
+    if (flat) {
+      for (let j = 0; j < GH; j++) {
+        for (let i = 0; i < GW; i++) {
+          const k = j * GW + i;
+          if (gGround[k] !== 1 || pos[k * 3 + 1] !== 0) continue;
+          let ok = 1;
+          for (let dj = -2; dj <= 2 && ok; dj++) {
+            const jj = clamp(j + dj, 0, GH - 1) * GW;
+            for (let di = -2; di <= 2; di++) {
+              const q = jj + clamp(i + di, 0, GW - 1);
+              if (gGround[q] !== 1 || pos[q * 3 + 1] !== 0) { ok = 0; break; }
+            }
+          }
+          if (ok) { flat[k] = 1; flatN++; }
+        }
+      }
+    }
+    if (typeof opt.onStats === 'function') {
+      opt.onStats({ flatVertices: flatN, totalVertices: GW * GH, fastNorm: !!fastNorm });
+    }
+
     const nrm = new Float32Array(GW * GH * 3);
     for (let j = 0; j < GH; j++) {
       for (let i = 0; i < GW; i++) {
         const k = j * GW + i;
+        if (flat && flat[k]) { nrm[k * 3] = 0; nrm[k * 3 + 1] = 1; nrm[k * 3 + 2] = 0; continue; }
         const iL = j * GW + Math.max(0, i - 1), iR = j * GW + Math.min(GW - 1, i + 1);
         const jD = Math.max(0, j - 1) * GW + i, jU = Math.min(GH - 1, j + 1) * GW + i;
         const ax = pos[iR * 3] - pos[iL * 3], ay = pos[iR * 3 + 1] - pos[iL * 3 + 1], az = pos[iR * 3 + 2] - pos[iL * 3 + 2];
@@ -1925,6 +1949,8 @@
     const nrmS = new Float32Array(nrm.length);
     for (let j = 0; j < GH; j++) {
       for (let i = 0; i < GW; i++) {
+        const k = j * GW + i;
+        if (flat && flat[k]) { nrmS[k * 3] = 0; nrmS[k * 3 + 1] = 1; nrmS[k * 3 + 2] = 0; continue; }
         let sx = 0, sy = 0, sz = 0;
         for (let dj = -1; dj <= 1; dj++) {
           const jj = clamp(j + dj, 0, GH - 1);
@@ -1935,7 +1961,6 @@
           }
         }
         const l = Math.hypot(sx, sy, sz) || 1;
-        const k = j * GW + i;
         nrmS[k * 3] = sx / l; nrmS[k * 3 + 1] = sy / l; nrmS[k * 3 + 2] = sz / l;
       }
     }
@@ -2165,7 +2190,7 @@
                注意这里不能用 `world.*`：buildCartesianWorld 里还没有 world 对象，
                第一版写了 world.baseLin 直接 ReferenceError → 整个世界建不出来。 */
             const gc = groundColorAt(x, z);
-            /* v1.23.1：低频宏观色差。草地/雪原/沙地这类"平铺一片"的照片，
+            /* v1.26.1：低频宏观色差。草地/雪原/沙地这类"平铺一片"的照片，
                地面网格原本是一块死色（复测里 void 0.29 的那张就是），
                加两个不同尺度的低频起伏（±14%），大面积平地就有明暗结构了。 */
             const m1 = Math.sin(x * 0.031 + z * 0.017) * Math.cos(z * 0.023 - x * 0.011);
@@ -2190,7 +2215,7 @@
         pos: gpos, normal: gnrm, uv: guv, color: gcol, edge: gedge, index: gidx
       };
 
-      /* v1.23 双 UV：再建一份**同几何、照片 UV** 的地面网格。
+      /* v1.26 双 UV：再建一份**同几何、照片 UV** 的地面网格。
          两张图叠着画：这张给"照片里的地面细节"（视锥内 alpha=1），
          上面那张平铺贴图负责视锥外（alpha 反过来）。
          之前只用平铺贴图，前景就成了一张没有细节的色板 —— 用户评价"根本不好"。 */
@@ -2601,6 +2626,8 @@
               nearPlane: opts && opts.nearPlane,
               noCullReasons: opts && opts.noCullReasons,
               skyFill: opts && opts.skyFill,
+              fastNorm: opts && opts.fastNorm,
+              onStats: opts && opts.onStats,
               groundFade: opts && opts.groundFade,
               groundGrid: opts && opts.groundGrid,
               gfade: opts && opts.gfade,
@@ -2742,7 +2769,7 @@
       Math.sin(analysis.sunElev),
       Math.cos(analysis.sunAz) * Math.cos(analysis.sunElev)
     ];
-    /* v1.23：夜景不能当白天渲染。
+    /* v1.26：夜景不能当白天渲染。
        判据用整图平均亮度：夜景（meanLum < 0.28）里那个"最亮的地方"是月亮/路灯，
        不是太阳 —— 旧的 sunPower 只看局部最亮，于是夜景也会有一轮巨大的白日光晕。
        夜景：光晕压到 12%，太阳色降饱和、环境光降到 35%，把暗部还给夜色。 */

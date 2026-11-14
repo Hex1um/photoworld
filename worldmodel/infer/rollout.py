@@ -94,7 +94,25 @@ def action_scale_of(ckpt_path: str, device: str = "cpu") -> float | list | None:
 
 def rollout(image: torch.Tensor, actions: list[torch.Tensor], ckpt_path: str,
             steps: int = 8, cfg_scale: float = 4.0, device: str = "cuda",
-            use_ema: bool = True, hist_frames: int = 4):
+            use_ema: bool = True, hist_frames: int = 4,
+            solver: str = "euler", cfg_interval: float = 1.0,
+            batch_cfg: bool = True, stats: dict | None = None):
+    """自回归生成。
+
+    v1.26 三项推理优化，默认行为与 8 步中点 Euler × 串行 CFG 数学等价：
+
+    * ``batch_cfg=True``（默认）：把 v_cond / v_null 沿 batch 拼成 B=2 走一次
+      DiT 前向，替代串行两次 model(...)。权重只读取一次、kernel 启动减半，
+      uncond 仍走同一个 ``uncond`` 参数（[False, True]），CFG 语义不变。
+      A/B 用 ``batch_cfg=False`` 回到旧串行路径。
+    * ``solver="heun"``（opt-in）：4 步 Heun 预测-校正，每步 2 次评估；
+      配合 batch 合并后 4 步 = 8 次单样本等效前向（旧 8 步 Euler = 16 次）。
+    * ``cfg_interval``（opt-in，默认 1.0）：仅前 x 比例的步数启用 CFG，
+      末期只算 v_cond（B=1）。会改变采样轨迹，必须跑 scripts/eval.py 验证 PSNR。
+
+    ``stats`` 传入空 dict 可收每帧的模型调用数与等效单样本前向数。
+    本机无 torch/CUDA，这些次数是解析计数，不是实测耗时。
+    """
     model, tok, cfg = _load(ckpt_path, device, use_ema)
     # T9-3（v1.22）：hist_frames 必须与 checkpoint 训练时的历史长度一致。
     #   训练用 N 帧历史、推理给 4 帧，位置编码/因果掩码的时序长度就对不上，
@@ -106,30 +124,84 @@ def rollout(image: torch.Tensor, actions: list[torch.Tensor], ckpt_path: str,
     z_init = tok.encode(image.to(device))
     hist = [z_init.clone() for _ in range(hist_frames)]
     frames = []
+    solver = str(solver or "euler").lower()
+    if solver not in ("euler", "heun"):
+        raise ValueError("solver 只能是 euler / heun，收到 %r" % solver)
+    interval = max(0.0, min(1.0, float(cfg_interval)))
+    calls = 0        # 实际 model(...) 调用次数
+    equiv = 0        # 折算成 B=1 前向次数（B=2 记 2）
 
     for i, a in enumerate(actions):
         ab = a.view(1, 7).to(device)
         z = torch.randn_like(z_init)
         dt = 1.0 / steps
+        hb = torch.stack(hist, dim=1)
+        dom = torch.zeros(1, dtype=torch.long, device=device)
+
+        def velocity(zz, tt, want_cfg):
+            nonlocal calls, equiv
+            ac = torch.autocast("cuda", dtype=torch.bfloat16, enabled=(device == "cuda"))
+            if not want_cfg or cfg_scale <= 1.0:
+                calls += 1
+                equiv += 1
+                with ac:
+                    return model(z_init, hb, zz, tt, ab, dom).float()
+
+            if batch_cfg:
+                # 一次 B=2 前向取代两次 B=1：uncond 逐样本给 [False, True]
+                calls += 1
+                equiv += 2
+                u2 = torch.tensor([False, True], device=device)
+                with ac:
+                    vv = model(
+                        torch.cat([z_init, z_init], dim=0),
+                        torch.cat([hb, hb], dim=0),
+                        torch.cat([zz, zz], dim=0),
+                        torch.cat([tt, tt], dim=0),
+                        torch.cat([ab, ab], dim=0),
+                        torch.cat([dom, dom], dim=0),
+                        uncond=u2,
+                    ).float()
+                vc, vn = vv[:1], vv[1:]
+                # T9-4（v1.22）：统一到**标准 CFG 形式** v = v_null + s·(v_cond - v_null)，
+                #   s = 1 + cfg_scale。与旧写法 v_cond + w·(v_cond - v_null) 数学等价
+                #   （展开后 s = 1 + w），但语义不会被误读成 s=w。
+                s_guid = 1.0 + float(cfg_scale)
+                return vn + s_guid * (vc - vn)
+
+            # A/B 回退：保留串行 CFG 路径，uncond=True 与训练侧同源
+            calls += 2
+            equiv += 2
+            with ac:
+                v_cond = model(z_init, hb, zz, tt, ab, dom)
+                v_null = model(z_init, hb, zz, tt, ab, dom, uncond=True)
+            v_cond, v_null = v_cond.float(), v_null.float()
+            s_guid = 1.0 + float(cfg_scale)
+            return v_null + s_guid * (v_cond - v_null)
+
         for s in range(steps):
             # 中点代替左端点：最后一步 t 从 0.875 抬到 0.9375，更贴近积分区间末端
             t = torch.full((1,), (s + 0.5) * dt, device=device)
-            hb = torch.stack(hist, dim=1)
-            dom = torch.zeros(1, dtype=torch.long, device=device)
-            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=(device == "cuda")):
-                v_cond = model(z_init, hb, z, t, ab, dom)
-                if cfg_scale > 1.0:
-                    # T9-4（v1.22）：统一到**标准 CFG 形式** v = v_null + s·(v_cond - v_null)，
-                    #   其中 s = 1 + cfg_scale。旧写法 v_cond + w·(v_cond - v_null) 与标准式
-                    #   等价（展开后 s = 1 + w），但语义容易被误读成 s=w —— 例如
-                    #   cfg_scale=4 实际是 s=5，比"4 倍引导"更强。行为不变、语义明确。
-                    v_null = model(z_init, hb, z, t, ab, dom, uncond=True)
-                    s_guid = 1.0 + float(cfg_scale)
-                    v = v_null + s_guid * (v_cond - v_null)
-                else:
-                    v = v_cond
-            z = z + dt * v.float()
+            want_cfg = ((s + 0.5) / steps) <= interval
+            v1 = velocity(z, t, want_cfg)
+            if solver == "heun":
+                z_pred = z + dt * v1
+                t2 = torch.full((1,), min(1.0, (s + 1.5) * dt), device=device)
+                v2 = velocity(z_pred, t2, want_cfg)
+                z = z + dt * 0.5 * (v1 + v2)
+            else:
+                z = z + dt * v1
         hist = hist[1:] + [z.clone()]
         img = tok.decode(z)[0]
         frames.append(img.cpu())
+
+    if stats is not None:
+        n = max(1, len(frames))
+        stats.update({
+            "steps": steps, "solver": solver, "cfg_interval": interval,
+            "batch_cfg": bool(batch_cfg), "frames": len(frames),
+            "model_calls": calls, "equivalent_forwards": equiv,
+            "model_calls_per_frame": calls / n,
+            "equivalent_forwards_per_frame": equiv / n,
+        })
     return frames

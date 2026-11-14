@@ -16,13 +16,107 @@
 
   const S = { session: null, loading: null, failed: null, ort: null, listeners: [], stage: null };
 
-  /* 同一张照片重复进入世界时复用深度图，省掉一次约 5s 的 CPU 推理。
-     key 用「尺寸 + 16×16 缩略图内容指纹」而不是纯 URL：CDN 同名换图、
-     data URL 重建都会让纯 URL 缓存误命中。只做内存 LRU（最多 4 张）；
-     跨刷新持久化要 IndexedDB，会带来配额与异步复杂度，静态站点收益不确定，
-     留作后续 A/B，不在这版擅自引入。 */
+  /* v1.26：三路 ONNX 推理共用的两级缓存。
+     L1 内存 LRU（各模块 4 张）：同一次页面会话内重复进世界跳过推理。
+     L2 IndexedDB（全库最多 24 条）：刷新页面 / 重开浏览器同样跳过推理。
+     key = ns + ':' + contentKey(img)，contentKey 是「尺寸 + 16×16 内容指纹」。
+     ns 自带数据格式版本（depth-v2 / sem-v1 / obj-v1）：模型或后处理任一变更
+     都必须升 ns，否则同图会命中旧格式结果、几何静默回退到旧算法。
+     payload 直接结构化克隆（Float32Array / Uint8Array / 普通对象），
+     深度图 675KB/张、24 条约 12MB，配额内且零精度损失（不做 16-bit 量化）。
+     任何一步失败（隐私模式 / 配额 / 无 indexedDB）都静默退回纯内存缓存。
+     通用层挂在 PW.inferenceCache 上供 objects.js / semantics.js 复用；
+     index.html 加载顺序是 depth.js → objects.js → semantics.js，保证先就绪。 */
   const CACHE = new Map();
   const CACHE_MAX = 4;
+  const NS_DEPTH = 'depth-v2';
+  const DB_NAME = 'photoworld-inference-v1';
+  const DB_STORE = 'results';
+  const DB_VERSION = 1;
+  const DB_MAX = 24;
+  const dbKey = (ns, k) => ns + ':' + k;
+  let dbPromise = null;
+  let idbHits = 0, idbWrites = 0, memHits = 0;
+
+  function openDB() {
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise((resolve) => {
+      if (!global.indexedDB) return resolve(null);
+      let req;
+      try { req = global.indexedDB.open(DB_NAME, DB_VERSION); } catch (e) { return resolve(null); }
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(DB_STORE)) {
+          const os = db.createObjectStore(DB_STORE, { keyPath: 'key' });
+          os.createIndex('ts', 'ts');       // 按写入时间做 LRU 淘汰
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+      req.onblocked = () => resolve(null);
+    });
+    return dbPromise;
+  }
+
+  function tx(mode, fn) {
+    return openDB().then((db) => {
+      if (!db) return null;
+      return new Promise((resolve) => {
+        let t;
+        try { t = db.transaction(DB_STORE, mode); } catch (e) { return resolve(null); }
+        const os = t.objectStore(DB_STORE);
+        let out = null;
+        const r = fn(os);
+        if (r && typeof r.onsuccess !== 'undefined') {
+          r.onsuccess = () => { out = r.result; };
+        }
+        t.oncomplete = () => resolve(out);
+        t.onerror = () => resolve(null);
+        t.onabort = () => resolve(null);
+      });
+    });
+  }
+
+  function cacheGet(ns, key) {
+    if (!global.indexedDB) return Promise.resolve(null);
+    return tx('readonly', (os) => os.get(dbKey(ns, key)))
+      .then((rec) => (rec && rec.ns === ns && rec.payload) ? rec.payload : null)
+      .catch(() => null);
+  }
+
+  function cachePut(ns, key, payload) {
+    if (!global.indexedDB) return Promise.resolve();
+    return openDB().then((db) => {
+      if (!db) return;
+      return new Promise((resolve) => {
+        let t;
+        try { t = db.transaction(DB_STORE, 'readwrite'); } catch (e) { return resolve(); }
+        const os = t.objectStore(DB_STORE);
+        try {
+          os.put({ key: dbKey(ns, key), ns, ts: Date.now(), payload });
+        } catch (e) { return resolve(); }
+        // 按 ts 升序游标淘汰最旧的若干条，保留最新 DB_MAX 条
+        const idx = os.index('ts');
+        const cnt = idx.count();
+        cnt.onsuccess = () => {
+          let extra = cnt.result - DB_MAX;
+          if (extra <= 0) return;
+          const cur = idx.openCursor();
+          cur.onsuccess = () => {
+            const c = cur.result;
+            if (!c || extra <= 0) return;
+            c.delete(); extra--; c.continue();
+          };
+        };
+        t.oncomplete = () => { idbWrites++; resolve(); };
+        t.onerror = () => resolve();
+        t.onabort = () => resolve();
+      });
+    }).catch(() => {});
+  }
+
+  function cacheClear() { return tx('readwrite', (os) => os.clear()); }
+  function idbStats() { return { max: DB_MAX, idbHits, idbWrites }; }
 
   function contentKey(img) {
     const iw = img.naturalWidth || img.width;
@@ -46,8 +140,17 @@
     return iw + 'x' + ih + ':' + (fp >>> 0).toString(16);
   }
 
-  function clearCache() { CACHE.clear(); }
-  function cacheStats() { return { size: CACHE.size, max: CACHE_MAX }; }
+  // 清一次会清掉整库（depth + sem + obj 三个 ns）：这是「强制全部重算」的语义，
+  // 正常切换照片不会调用它，L2 缓存因此不会被换图冲掉。
+  function clearCache() {
+    CACHE.clear(); idbHits = 0; idbWrites = 0; memHits = 0; cacheClear();
+  }
+  function cacheStats() {
+    return {
+      size: CACHE.size, max: CACHE_MAX, ns: NS_DEPTH,
+      persistedMax: DB_MAX, idbHits, idbWrites, memHits
+    };
+  }
 
   /* 等比缩放 + 黑底 padding 到正方形（与 pipeline/depth.py::_pad_to_square 一致）。
      旧实现 drawImage(img, 0, 0, SIZE, SIZE) 会把横构图直接压扁，违反离线
@@ -301,7 +404,27 @@
     const key = contentKey(img);
     const hit = CACHE.get(key);
     // data 是只读约定：上层 buildRelief / drawDepthPreview 都只采样不写入
-    if (hit) return Object.assign({}, hit, { cached: true, ms: 0 });
+    if (hit) {
+      memHits++;
+      if (onProgress) onProgress(1, '深度图命中内存缓存（跳过推理）');
+      return Object.assign({}, hit, { cached: true, ms: 0 });
+    }
+
+    /* L2 持久化命中：刷新页面 / 重开浏览器也跳过整段 ONNX 加载与推理。
+       会话都不必初始化（27MB 模型下载 + WASM 内核编译一并省掉）。 */
+    const rec = await cacheGet(NS_DEPTH, key);
+    if (rec && rec.data && rec.data.BYTES_PER_ELEMENT === 4) {
+      const restored = {
+        data: new Float32Array(rec.data), width: rec.width, height: rec.height,
+        size: rec.size, inverted: rec.inverted, flippedByCorr: rec.flippedByCorr,
+        corr: rec.corr, ms: 0
+      };
+      CACHE.set(key, restored);
+      if (CACHE.size > CACHE_MAX) CACHE.delete(CACHE.keys().next().value);
+      idbHits++;
+      if (onProgress) onProgress(1, '深度图命中本地缓存（跳过推理）');
+      return Object.assign({}, restored, { cached: true, persisted: true });
+    }
 
     const session = await init(onProgress);
     const ort = S.ort;
@@ -344,14 +467,25 @@
     };
     CACHE.set(key, result);
     if (CACHE.size > CACHE_MAX) CACHE.delete(CACHE.keys().next().value);
-    return Object.assign({}, result, { cached: false });
+    // 异步写 L2，不 await：写入失败或配额不足都不影响本次出图
+    cachePut(NS_DEPTH, key, result);
+    return Object.assign({}, result, { cached: false, persisted: false });
   }
 
   global.PW.depth = {
     init, estimate, clearCache, cacheStats,
     // 暴露纯函数供 tools/test_regression.mjs 做前后端一致性与缓存回归
-    __internals: { squarePlan, postprocess, quantile, contentKey },
+    __internals: { squarePlan, postprocess, quantile, contentKey, cacheGet, cachePut },
     get ready() { return !!S.session; },
     get failed() { return S.failed; }
+  };
+
+  /* 三路推理共用：objects.js / semantics.js 通过这里读写各自的 ns。
+     放在 depth.js 里而不是新建脚本，是为了不动 index.html 的 17 处 ?v= 加载顺序。 */
+  global.PW.inferenceCache = {
+    get: cacheGet, put: cachePut, clear: cacheClear, stats: idbStats,
+    DB_MAX,
+    get hits() { return idbHits; },
+    get writes() { return idbWrites; }
   };
 })(window);
