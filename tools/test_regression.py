@@ -118,28 +118,37 @@ def test_eval_gates() -> None:
 
 
 def test_metric_depth() -> None:
-    h, w = 64, 96
+    h, w = 96, 160
     hfov = math.radians(62.0)
     cam = geom.Camera(hfov, exif.vfov_of(hfov, w, h), w, h)
-    yy = np.linspace(0, 1, h)[:, None]
-    xx = np.linspace(0, 1, w)[None, :]
-    d = np.clip(0.02 + 0.92 * yy + 0.02 * np.sin(xx * 12), 0, 1).astype(np.float32)
+    # v1.22（T2）：合成数据必须是**物理一致**的 z ∝ 1/r 场。
+    #   旧版用 yy 的线性梯度当"视差"，它根本不是 1/r —— 三参数拟合会把 p 顶到上限，
+    #   "近端锚点精确"这类断言就变成在验一个不成立的假设（实测 p=3.0、A·r^-p=154m
+    #   而 z_near=5.15m）。这里按相机几何造地面 + 天空，z 由 -eye/ry 给出。
+    rays = cam.rays()
+    ry = rays[..., 1]
+    ground = ry < -0.02
+    z_true = np.full((h, w), 1500.0, np.float32)
+    z_true[ground] = (-1.7 / np.minimum(ry, -0.004))[ground]
+    d = np.clip(2.0 / np.maximum(z_true, 1e-3), 1e-4, 0.999).astype(np.float32)
     cal = geom.calibrate_scale(d, cam, eye=1.7, horizon_far=1500.0)
     p = float(cal["p"])
     far = 1.2 * 1500.0
-    r_near = max(float(cal.get("r_near", 0.8)), 1e-3)
-    # 与 reconstruct.py 同一闭式解：z(0) = A·(1/r0 + 1/r_near)^p = far
-    denom = (far / cal["A"]) ** (1.0 / p) - 1.0 / r_near
-    r0 = 1.0 / denom if denom > 1e-6 else float((cal["A"] / far) ** (1.0 / p))
-    a_eff = cal["A"] * (1.0 + r0 / r_near) ** p
-    z_new = geom.metric_depth(d, a_eff, p=p, far=far, r0=r0)
+    # v1.22（T2）：标定/应用统一走 geom.apply_calibration —— 测试不再手抄内联公式，
+    # 否则生产改了式子、测试还在验旧式（这一版之前就是这样，一改 b 就炸）。
+    z_new, cal2 = geom.apply_calibration(d, cal, far=far)
+    r_near = max(float(cal2.get("r_near", 0.8)), 1e-3)
+    b_fit = float(cal2.get("b", 0.0))
+    r_near_eff = max(1e-3, r_near + b_fit)
+    r0 = float(cal2["r0"])
+    a_eff = float(cal2["a_effective"])
     z_old = np.clip(cal["A"] * np.maximum(d, 1e-3) ** (-p), 0.5, 600.0)
 
     assert np.isfinite(z_new).all(), "软饱和仍出现 inf/nan"
     new_top = float((z_new >= far - 0.5).mean())
     old_top = float((z_old >= 599.9).mean())
     assert new_top < old_top, "触顶比例没下降：%.3f → %.3f" % (old_top, new_top)
-    z_at_near = a_eff * (r_near + r0) ** (-p)
+    z_at_near = a_eff * (r_near_eff + r0) ** (-p)
     assert abs(z_at_near - cal["z_near"]) / max(cal["z_near"], 1e-6) < 1e-5, \
         "A 修正后近端锚点不再精确"
     # 旧 r0=(A/far)^(1/p) 是在这里被抓到的：z(0)=4137m 而 far=1800m

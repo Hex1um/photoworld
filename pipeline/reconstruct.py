@@ -95,6 +95,9 @@ def main() -> int:
         meta = {**meta, **m}
     vfov = vfov_of(hfov, img.size[0], img.size[1])
     cam = geom.Camera(hfov=hfov, vfov=vfov, w=img.size[0], h=img.size[1])
+    # T5（v1.22）：俯仰角由地面带拟合残差反解（旧实现恒 0，注释却声称会反解）。
+    #   深度估计在下面才做，所以真正的反解放到 [2/5] 之后（见 pitch_fit）。
+    pitch_fit = None
     print(f"[1/5] 输入 {img.size[0]}x{img.size[1]}  hfov={math.degrees(hfov):.1f}°  ({fov_src})")
 
     print(f"[2/5] 深度估计（{args.backend}）…")
@@ -102,29 +105,30 @@ def main() -> int:
     res = backend(img)
     print(f"      {res.backend}  metric={res.metric}  {time.time() - t0:.1f}s")
 
+    # T5：先反解俯仰，再标定（俯仰错了，地面带的位置就错，标定必然偏）
+    pitch_fit = geom.estimate_pitch(res.depth, cam, eye=args.eye)
+    if pitch_fit.get("ok") and abs(pitch_fit.get("delta_deg", 0.0)) >= 0.2:
+        cam = geom.Camera(hfov=cam.hfov, vfov=cam.vfov, w=cam.w, h=cam.h,
+                          pitch=pitch_fit["pitch"])
+        print(f"      俯仰反解：{pitch_fit['delta_deg']:+.2f}°（拟合 MAD {pitch_fit['mad']:.4f}）")
+
     print("[3/5] 尺度标定（近处地面带锚定，z = a / r）…")
     cal = geom.calibrate_scale(res.depth, cam, eye=args.eye, horizon_far=args.horizon_far)
     # 上限必须与远端锚点联动：旧实现用 far=600 配 horizon_far=1500，
     # 实测 46.1% 像素被压到同一平面。软饱和 r0 让 r→0 时收敛到 far 而不发散。
     far_m = args.far if args.far > 0 else (1.2 * args.horizon_far if args.horizon_far > 0 else 600.0)
     pv = float(cal["p"])
+    b_fit = float(cal.get("b", 0.0))
     r_near = max(float(cal.get("r_near", 0.8)), 1e-3)
-    # 联合求解 r0：metric_depth 收到的是 a_eff = A·(1+r0/r_near)^p，
-    # 于是 z(0) = A·(1/r0 + 1/r_near)^p。令 z(0) = far 得闭式解
-    #   r0 = 1 / ((far/A)^(1/p) - 1/r_near)
-    # 旧解 r0=(A/far)^(1/p) 用的是未修正的 A：实测 z(0)=4137m 而 far=1800m
-    # （2.298×），天空仍被 clip 成一块硬平面。分母非正时退回旧解，不发散。
-    denom = ((far_m / cal["A"]) ** (1.0 / pv) - 1.0 / r_near
-             if pv > 0 and cal["A"] > 0 else 0.0)
-    r0 = (1.0 / denom if denom > 1e-6 else
-          (float((cal["A"] / far_m) ** (1.0 / pv))
-           if pv > 0 and cal["A"] > 0 else 0.0))
-    a_eff = cal["A"] * (1.0 + r0 / r_near) ** pv   # 保持 z(r_near) = z_near
-    z_m = geom.metric_depth(res.depth, a_eff, cal.get("b", 0.0),
-                            p=pv, far=far_m, r0=r0)
+    # T2：标定/应用两段口径统一到 geom.apply_calibration（r0 闭式解 + a_eff 修正
+    #     + 加性偏移 b），测试与生产走同一条式子。
+    z_m, cal = geom.apply_calibration(res.depth, cal, far_m)
+    a_eff = float(cal["a_effective"])
+    r0 = float(cal["r0"])
     ground_rows = z_m[int(z_m.shape[0] * 0.95):]
     touched = float((z_m >= far_m - 0.5).mean() * 100)
-    print(f"      模式={cal.get('mode', '-')} A={a_eff:.2f}(标定 {cal['A']:.2f}) p={pv:.2f} "
+    print(f"      模式={cal.get('mode', '-')} A={a_eff:.2f}(标定 {cal['A']:.2f}) "
+          f"b={b_fit:.3f} p={pv:.2f} "
           f"上限={far_m:.0f}m r0={r0:.4f} 触顶={touched:.1f}% "
           f"近地中位距={float(np.median(ground_rows)):.2f}m "
           f"{'（退化：地平线假设可能不成立）' if cal.get('degenerate') else ''}")
@@ -161,15 +165,31 @@ def main() -> int:
     # 独立来源的相机内参：只有显式给 --verify-fov，或 CLI 覆盖了 EXIF
     # （此时 EXIF 就是独立来源）时才存在。没有独立信息就不声称能验视场。
     cam_verify = None
+    # T4（v1.22）：交叉门的 FOV 必须来自**可信来源**。
+    #   旧实现在"无 EXIF"时也拿 26mm 默认值去交叉，等于用一个猜的内参去验收，
+    #   永远"通过"。现在：只有 exif / cli / verify 三个来源才算有效，
+    #   default-26mm 一律判"无法验收视场"。
+    fov_conf = meta.get("fov_confidence")
+    fov_source = meta.get("fov_source")
+    fov_trusted = (args.verify_fov > 0) or (args.fov > 0) or (fov_conf == "high")
     hfov_ref = None
     if args.verify_fov > 0:
         hfov_ref = math.radians(args.verify_fov)
     elif args.fov > 0:
-        hfov_ref, _, _ = hfov_from_image(img)
-    if hfov_ref is not None:
-        vfov_ref = vfov_of(hfov_ref, img.size[0], img.size[1])
-        cam_verify = geom.Camera(hfov=cam2.hfov, vfov=vfov_ref,
+        hfov_ref = math.radians(args.fov)
+    elif fov_conf == "high":
+        hfov_ref = cam.hfov
+    if hfov_ref is not None and fov_trusted:
+        # T1：cam2 是**延拓后**的相机（w 变了、vfov 按方形像素重算），
+        # 交叉相机必须在同一套网格上重建 tan，否则横向误差显不出来。
+        tan_h_ref = math.tan(hfov_ref * 0.5)
+        vfov_ref = 2.0 * math.atan(tan_h_ref * (cam2.h / float(cam2.w)))
+        cam_verify = geom.Camera(hfov=hfov_ref, vfov=vfov_ref,
                                  w=cam2.w, h=cam2.h, pitch=cam.pitch)
+    else:
+        cam_verify = None
+        print("      交叉门：跳过（视场来源不可信：%s / %s）—— 无法验收视场"
+              % (fov_source or "-", fov_conf or "-"))
 
     chk = eval_mod.report(mesh["pos"], mesh["uv"], tex_f, cam2, ref_u8,
                           step=mstep, eye=args.eye, cam_verify=cam_verify, cal=cal)
@@ -256,6 +276,12 @@ def main() -> int:
                  "near_triangles": int(near_mask.sum()),
                  "split_m": args.split,
                  "skipped_quads": round(mesh["skipped"], 4)},
+        "camera": {"hfov_deg": round(math.degrees(cam2.hfov), 3),
+                   "vfov_deg": round(math.degrees(cam2.vfov), 3),
+                   "w": int(cam2.w), "h": int(cam2.h),
+                   "pitch_deg": round(math.degrees(cam2.pitch), 3),
+                   "pitch_source": ("fit" if (pitch_fit and pitch_fit.get("ok")) else "none"),
+                   "fov_source": fov_source, "fov_confidence": fov_conf},
         "check": chk,
         "walkable": {"span": span, "grid": gh, "height": grid.round(3).tolist()},
         "elapsed_s": round(time.time() - t0, 1),
@@ -263,6 +289,10 @@ def main() -> int:
     with open(os.path.join(args.out, "world.json"), "w", encoding="utf-8") as f:
         json.dump(meta_out, f, ensure_ascii=False, indent=1)
     print(f"完成，用时 {meta_out['elapsed_s']}s")
+    # T4：验收未过必须反映到退出码（旧实现恒 0，"全绿"其实没有约束力）
+    if not chk.get("ok", False):
+        print(f"验收未通过（exit=3）：{chk.get('reason', '')}")
+        return 3
     return 0
 
 

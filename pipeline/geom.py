@@ -49,6 +49,52 @@ class Camera:
 # 的双锚点方案取代；estimate_pitch / _fit_scale 全仓库无调用点，v1.10.0 移除。
 
 
+def fit_three_param(rr: np.ndarray, zt: np.ndarray, b_max: float = 0.5,
+                    b_step: float = 0.02) -> dict:
+    """T2（v1.22）：拟合 z = A·(r + b)^(-p)，b 用网格搜索。
+
+    为什么必须带 b：归一化后的相对视差与原图的乘性关系只在"不减 lo"时成立；
+    但模型输出本身常有偏置（天空/近景饱和），强行 b=0 会把这个偏置压进 p，
+    实测 p 从正确 1.0 偏到 1.58（近场误差中位 21%）。
+    做法：对每个 b 做对数空间线性最小二乘（ly = -p·lx + lnA），取残差 MAD 最小者。
+    """
+    rr = np.asarray(rr, dtype=np.float64)
+    zt = np.asarray(zt, dtype=np.float64)
+    ok = np.isfinite(rr) & np.isfinite(zt) & (zt > 1e-3) & (rr > -b_max + 1e-6)
+    rr, zt = rr[ok], zt[ok]
+    if rr.size < 500:
+        return {"A": 4.3, "p": 1.0, "b": 0.0, "n": int(rr.size), "mad": None,
+                "degenerate": True}
+    ly = np.log(zt)
+    best = None
+    for c in np.arange(0.0, b_max + 1e-9, b_step):
+        r = np.maximum(rr + c, 1e-6)
+        lx = np.log(r)
+        M = np.stack([-lx, np.ones_like(lx)], axis=1)
+        sol, *_ = np.linalg.lstsq(M, ly, rcond=None)
+        res = ly - M @ sol
+        mad = float(np.median(np.abs(res - np.median(res))))
+        if best is None or mad < best[0]:
+            best = (mad, float(sol[0]), float(sol[1]), float(c))
+    mad, p_, lnA, c = best
+    # 一轮 IRLS 去离群（3×MAD 之外的点权重 0），用定好的 b 再解一次
+    r = np.maximum(rr + c, 1e-6)
+    lx = np.log(r)
+    M = np.stack([-lx, np.ones_like(lx)], axis=1)
+    kept = np.ones_like(ly, dtype=bool)
+    for _ in range(2):
+        sol, *_ = np.linalg.lstsq(M[kept], ly[kept], rcond=None)
+        res = ly - M @ sol
+        mad2 = float(np.median(np.abs(res[kept] - np.median(res[kept])))) + 1e-6
+        kept = np.abs(res) < 3.0 * mad2
+        if kept.sum() < 500:
+            break
+    p_ = float(np.clip(sol[0], 0.25, 3.0))
+    A_ = float(math.exp(sol[1]))
+    return {"A": A_, "p": p_, "b": float(c), "n": int(kept.sum()), "mad": mad,
+            "degenerate": bool(mad > 0.5 or not np.isfinite(A_))}
+
+
 def calibrate_scale(depth_rel: np.ndarray, cam: Camera, eye: float = 1.7,
                     horizon_far: float = 0.0) -> dict:
     """相对视差 → 米，分两种模式：
@@ -92,48 +138,61 @@ def calibrate_scale(depth_rel: np.ndarray, cam: Camera, eye: float = 1.7,
         rr, zt = rr[good], zt[good]
         if rr.size < 500:
             return {"A": 4.3, "p": 1.0, "n": int(rr.size), "rms": None, "degenerate": True}
-        lx, ly = np.log(rr), np.log(zt)
-        M = np.stack([-lx, np.ones_like(lx)], axis=1)
-        sol, *_ = np.linalg.lstsq(M, ly, rcond=None)
-        p_, lnA = float(sol[0]), float(sol[1])
-        for _ in range(2):
-            res = ly - (-p_ * lx + lnA)
-            mad = float(np.median(np.abs(res - np.median(res)))) + 1e-6
-            keep = np.abs(res) < 3.0 * mad
-            if keep.sum() < 500:
-                break
-            sol, *_ = np.linalg.lstsq(M[keep], ly[keep], rcond=None)
-            p_, lnA = float(sol[0]), float(sol[1])
-        A_ = float(math.exp(lnA)); p_ = float(np.clip(p_, 0.25, 3.0))
-        rel = np.abs(A_ * np.power(rr, -p_) - zt) / np.maximum(zt, 1e-6)
-        return {"A": A_, "p": p_, "b": 0.0, "n": int(rr.size),
-                "rms": float(np.median(rel)), "mode": "ground-fit",
+        fit = fit_three_param(rr, zt)
+        if fit["degenerate"]:
+            return {"A": fit["A"], "p": fit["p"], "b": fit["b"], "n": fit["n"],
+                    "rms": fit["mad"], "mode": "ground-fit", "degenerate": True,
+                    "r_near": float(np.median(rr)) if rr.size else 0.8, "z_near": z_n}
+        A_, p_, b_ = fit["A"], fit["p"], fit["b"]
+        rel = np.abs(A_ * np.power(np.maximum(rr + b_, 1e-6), -p_) - zt) / np.maximum(zt, 1e-6)
+        return {"A": A_, "p": p_, "b": b_, "n": fit["n"],
+                "rms": float(np.median(rel)), "mode": "ground-fit-3p",
                 "r_near": float(np.median(rr)) if rr.size else 0.8, "z_near": z_n,
-                "degenerate": bool(np.median(rel) > 0.5)}
+                "degenerate": False}
 
-    # 模式 A：远端锚点取地平线附近的"最远地形"视差
-    sky_rows = np.zeros((h, 1), dtype=bool)
-    sky_rows[: int(h * 0.6)] = True
-    m_far = (ry >= -0.02) & (ry < 0.06) & sky_rows       # 贴着地平线的一条带
-    r_far = depth_rel[m_far]
-    r_far = r_far[np.isfinite(r_far) & (r_far > 1e-3)]
-    r_f = float(np.percentile(r_far, 20)) if r_far.size > 50 else max(0.05, r_n * 0.3)
+    # 模式 A：远端锚点 = **视差最小的一批像素**（= 最远）。
+    #   T2/T5（v1.22）：旧实现按"贴着地平线的射线带（|ry|<0.06）"选像素，
+    #   一旦俯仰角非 0，这条带会落到**地面**上（+8° 时对应 35m 的地面），
+    #   于是把"35m 的东西当成 1500m"，A 被放大 42×（实测 85.4 vs 正确 2.0）。
+    #   按视差排序与俯仰无关，才是"最远"的正确判据；同时剔除天空以外的
+    #   近景（r 太大）不必要 —— 取 5 分位即可。
+    upper = np.zeros((h, 1), dtype=bool)
+    upper[: int(h * 0.75)] = True
+    r_cand = depth_rel[upper & np.isfinite(depth_rel)]
+    r_cand = r_cand[r_cand > 1e-4]
+    r_f = float(np.percentile(r_cand, 5)) if r_cand.size > 200 else max(0.02, r_n * 0.1)
 
     r_n = max(1e-3, r_n)
     r_f = max(1e-4, min(r_f, r_n * 0.85))
-    if abs(math.log(r_n / r_f)) < 1e-3:
-        return {"A": 4.3, "p": 1.0, "n": 0, "rms": None, "degenerate": True}
-    p_ = math.log(horizon_far / max(z_n, 0.1)) / math.log(r_n / r_f)
-    p_ = float(np.clip(p_, 0.1, 4.0))
-    A_ = z_n * (r_n ** p_)
-    return {"A": A_, "p": p_, "b": 0.0, "n": int(r_n), "rms": None,
-            "mode": "two-anchor", "r_near": r_n, "z_near": z_n,
+
+    # T2：形状（p、b）由**地面带逐像素**拟合决定，远锚只提供绝对尺度。
+    #   旧的 "两点解 p" 把 p 绑死在两个中位值上，任何一个中位被天空/近景污染
+    #   都会让整幅深度系统性偏斜（实测 p 1.073→1.584）。
+    rows = np.zeros((h, 1), dtype=bool)
+    rows[int(h * 0.42):int(h * 0.97)] = True
+    gm = (ry < -0.02) & rows
+    zt_g = -eye / np.minimum(ry[gm], -0.004)
+    rr_g = depth_rel[gm]
+    good_g = np.isfinite(zt_g) & np.isfinite(rr_g) & (zt_g > 1.0) & (rr_g > 0.02)
+    fit = fit_three_param(rr_g[good_g], zt_g[good_g])
+    if fit["degenerate"] or r_f <= 1e-3:
+        p_ = float(np.clip(math.log(horizon_far / max(z_n, 0.1))
+                           / max(1e-6, math.log(r_n / r_f)), 0.1, 4.0))
+        A_ = z_n * (r_n ** p_)
+        return {"A": A_, "p": p_, "b": 0.0, "n": int(r_n), "rms": None,
+                "mode": "two-anchor", "r_near": r_n, "z_near": z_n,
+                "r_far": r_f, "z_far": horizon_far, "degenerate": False}
+    p_, b_ = fit["p"], fit["b"]
+    # 让 z(r_f) = horizon_far：A = horizon_far·(r_f + b)^p
+    A_ = float(horizon_far * math.pow(r_f + b_, p_))
+    return {"A": A_, "p": p_, "b": b_, "n": fit["n"], "rms": fit["mad"],
+            "mode": "ground-3p+far-anchor", "r_near": r_n, "z_near": z_n,
             "r_far": r_f, "z_far": horizon_far, "degenerate": False}
 
 
 def metric_depth(depth_rel: np.ndarray, a: float, b: float = 0.0,
                  near: float = 0.5, far: float = 1800.0, p: float = 1.0,
-                 r0: float | None = None) -> np.ndarray:
+                 r0: float | None = None, radd: float = 0.0) -> np.ndarray:
     """相对视差 → 米：带软饱和的幂律 z = A·(r + r0)^(-p)。
 
     旧的 `clip(A·r^(-p), near, far)` 有两个问题：
@@ -146,13 +205,88 @@ def metric_depth(depth_rel: np.ndarray, a: float, b: float = 0.0,
     这样中间段随 r 连续变化而不是硬平面，且 r >> r0 时与原有标定一致。
     r0=None 的分支只用于没有近端锚点的独立调用（a 未修正，口径不同）。
     """
-    d = np.maximum(depth_rel - b, 0.0)
+    # radd（T2）：三参数拟合得到的加性偏移 b_fit，对应 z = A(r + b_fit)^(-p)。
+    # 保留旧的 b（减性）语义不动，避免影响既有调用；两者同时存在时先加后减。
+    d = np.maximum(depth_rel + radd - b, 0.0)
     if p > 0 and a > 0 and far > 0:
         r0 = float(np.power(a / far, 1.0 / p)) if r0 is None else float(r0)
         z = a * np.power(d + r0, -p)
     else:
         z = a * np.power(np.maximum(d, 1e-3), -p)
     return np.clip(z, near, far).astype(np.float32)
+
+
+def estimate_pitch(depth_rel: np.ndarray, cam: Camera, eye: float = 1.7,
+                   span_deg: float = 12.0, coarse: float = 1.0,
+                   fine: float = 0.1) -> dict:
+    """T5（v1.22）：用地面带拟合残差反解俯仰角（旧实现 pitch 恒 0）。
+
+    原理：俯仰角错 θ 时，"地平线以下像素的物理距离 -eye/ry" 会整体错位，
+    于是 z = A(r+b)^-p 对地面带的拟合残差显著变大。所以**最小化拟合 MAD**
+    就是最直接的判据，不需要额外假设地面在哪一行。
+    粗搜 ±12°（步长 1°）→ 细搜 ±1°（步长 0.1°），代价约 O(2·h·w) 每档。
+    """
+    base = cam.pitch
+    h, w = depth_rel.shape
+    rows = np.zeros((h, 1), dtype=bool)
+    rows[int(h * 0.42):int(h * 0.97)] = True
+
+    def mad_at(pitch: float) -> float | None:
+        c = Camera(hfov=cam.hfov, vfov=cam.vfov, w=cam.w, h=cam.h, pitch=pitch)
+        ry = c.rays()[..., 1]
+        m = (ry < -0.02) & rows
+        if m.sum() < 500:
+            return None
+        zt = -eye / np.minimum(ry[m], -0.004)
+        rr = depth_rel[m]
+        ok = np.isfinite(zt) & np.isfinite(rr) & (zt > 1.0) & (rr > 0.02)
+        if ok.sum() < 500:
+            return None
+        fit = fit_three_param(rr[ok], zt[ok])
+        return fit.get("mad")
+
+    best, best_mad = base, None
+    lim = math.radians(span_deg)
+    p = base - lim
+    while p <= base + lim + 1e-9:
+        m = mad_at(p)
+        if m is not None and (best_mad is None or m < best_mad):
+            best, best_mad = p, m
+        p += math.radians(coarse)
+    if best_mad is None:
+        return {"pitch": base, "mad": None, "ok": False, "reason": "地面带不足，无法反解"}
+    p2 = best - math.radians(coarse)
+    end = best + math.radians(coarse) + 1e-9
+    while p2 <= end:
+        m = mad_at(p2)
+        if m is not None and m < best_mad:
+            best, best_mad = p2, m
+        p2 += math.radians(fine)
+    return {"pitch": float(best), "mad": float(best_mad), "ok": True,
+            "delta_deg": round(math.degrees(best - base), 2)}
+
+
+def apply_calibration(depth_rel: np.ndarray, cal: dict, far: float,
+                      near: float = 0.5) -> tuple[np.ndarray, dict]:
+    """把标定结果套到深度图上：z = a_eff·(r + b + r0)^(-p)，并返回更新后的 cal。
+
+    T2（v1.22）：这段以前内联在 reconstruct.py 里（r0 闭式解 + a_eff 修正），
+    测试再手抄一遍 —— 两边一旦不同步，"验收通过"就没有意义。抽成函数后
+    reconstruct 和 verify_*.py 走同一条式子。
+    """
+    p = float(cal["p"])
+    A = float(cal["A"])
+    b = float(cal.get("b", 0.0))
+    r_near = max(float(cal.get("r_near", 0.8)), 1e-3)
+    r_near_eff = max(1e-3, r_near + b)
+    denom = ((far / A) ** (1.0 / p) - 1.0 / r_near_eff) if (p > 0 and A > 0) else 0.0
+    r0 = (1.0 / denom if denom > 1e-6 else
+          ((A / far) ** (1.0 / p) if (p > 0 and A > 0) else 0.0))
+    a_eff = A * (1.0 + r0 / r_near_eff) ** p if p > 0 else A
+    z = metric_depth(depth_rel, a_eff, 0.0, near=near, far=far, p=p, r0=r0, radd=b)
+    out = dict(cal)
+    out.update({"far": far, "r0": r0, "a_effective": a_eff, "b": b})
+    return z, out
 
 
 def extend_fov(img: np.ndarray, depth_m: np.ndarray, cam: Camera,
@@ -165,10 +299,16 @@ def extend_fov(img: np.ndarray, depth_m: np.ndarray, cam: Camera,
     if cam.hfov >= target_hfov:
         return img, depth_m, cam
 
-    extra = (target_hfov - cam.hfov) * 0.5
-    # 每侧新增列数：按角度线性映射（近似，局部角度小）
-    n_side = int(round(cam.w * (math.tan(extra) / cam.tan_h) * 0.5))
-    n_side = max(1, min(n_side, cam.w * 2))
+    # T1（v1.22）：每侧新增列数必须按**切向**算，不是按角度线性近似。
+    #   旧的 w·(tan(extra)/tan_h)·0.5 在 60°→120° 时给 800 列（正确 1600），
+    #   缺口被「把原内容拉宽」填上：左缘角度 -30°→-40.9°，切向放大 1.500×。
+    #   像素网格在切向上是均匀的（u-0.5 ∝ tanθ），原内容的列在新网格里只是
+    #   居中平移、不需要重采样；两侧补 n_side 列即可：
+    #       tan(target/2) = (w/2 + n_side) / (w/2) · tan_h
+    #   解得 n_side = w·(tan(target/2)/tan_h − 1)/2。
+    scale_t = math.tan(target_hfov * 0.5) / cam.tan_h
+    n_side = int(round(cam.w * (scale_t - 1.0) * 0.5))
+    n_side = max(1, min(n_side, cam.w * 4))
 
     h, w = depth_m.shape
     left_d = np.repeat(depth_m[:, :1], n_side, axis=1)
@@ -187,7 +327,11 @@ def extend_fov(img: np.ndarray, depth_m: np.ndarray, cam: Camera,
     img2 = np.concatenate([col_l, img, col_r], axis=1)
     d2 = np.concatenate([depth_ext_l, depth_m, depth_ext_r], axis=1)
     new_w = img2.shape[1]
-    cam2 = Camera(hfov=target_hfov, vfov=cam.vfov, w=new_w, h=h, pitch=cam.pitch)
+    # T1：宽度变了，竖直角分辨率必须跟着重算（方形像素：tan_v/h = tan_h/w），
+    # 否则横竖角度每像素不一致，天空/远景会被横向压扁。
+    tan_v2 = math.tan(target_hfov * 0.5) * (h / float(new_w))
+    vfov2 = 2.0 * math.atan(tan_v2)
+    cam2 = Camera(hfov=target_hfov, vfov=vfov2, w=new_w, h=h, pitch=cam.pitch)
     return img2, d2, cam2
 
 

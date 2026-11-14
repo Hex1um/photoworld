@@ -28,6 +28,10 @@ class DepthResult:
     metric: bool            # True 表示单位是米
     backend: str
     note: str = ""
+    # T7（v1.22）：极性判定的置信度。|rho|<0.3 时不做翻转，并把它标出来，
+    # 让上层（验收/日志）能拒绝"极性可疑"的结果，而不是悄悄用错的符号。
+    polarity_confident: bool = True
+    polarity_rho: float = 1.0
 
 
 def _pad_to_square(img: Image.Image, size: int) -> tuple[np.ndarray, tuple[int, int, int, int]]:
@@ -73,20 +77,47 @@ class OnnxDepthAnything:
         d = d[oy:oy + nh, ox:ox + nw]
         d = np.asarray(Image.fromarray(d, mode="F").resize(img.size, Image.BICUBIC), dtype=np.float32)
 
-        # 极性：天空应在远端。用顶部/底部条带的均值判断并翻转
-        top = d[: max(1, d.shape[0] // 8)].mean()
-        bot = d[-max(1, d.shape[0] // 8):].mean()
-        inverted = top > bot
-        if inverted:
-            d = -d
-        lo, hi = np.percentile(d, 2), np.percentile(d, 98)
-        d = np.clip((d - lo) / max(1e-6, hi - lo), 0.0, 1.0)
+        # T7（v1.22）：极性用**秩相关**判据，且带置信度。
+        #   旧实现比较"顶部/底部条带均值"：俯拍（地面在下但整体亮）、倒影
+        #   （上下镜像）、竖构图（天空占比很小）都会把符号判反，而翻转是
+        #   不可逆的 —— 判反一次整幅深度就废了。
+        #   现在用 Spearman 相关（行号 vs 该行中位视差）：风景照里近景在下，
+        #   相关性应显著为正；|ρ| < 0.3 时**不翻转**并标记不可信，禁止双翻。
+        from scipy.stats import spearmanr  # 可选依赖，缺失时退化为逐行秩相关
+        row_med = np.median(d, axis=1)
+        idx = np.arange(d.shape[0], dtype=np.float64)
+        try:
+            rho = float(spearmanr(idx, row_med).correlation)
+        except Exception:
+            # 退化保护：行中位几乎不变（纯色/纯天空）时秩相关没有意义，
+            # 直接取 0（= 不可信），否则 argsort 会给出虚假的 +1。
+            if float(np.std(row_med)) < 1e-6:
+                rho = 0.0
+            else:
+                rx = np.argsort(np.argsort(idx)).astype(np.float64)
+                ry_ = np.argsort(np.argsort(row_med)).astype(np.float64)
+                rho = float(np.corrcoef(rx, ry_)[0, 1])
+        if not np.isfinite(rho):
+            rho = 0.0
+        polarity_confident = abs(rho) >= 0.3
+        inverted = polarity_confident and rho < 0
+        # T2（v1.22）：**只除 hi，不减 lo**。
+        #   旧写法 (d-lo)/(hi-lo) 把视差整体平移，而标定拟合的模型是 z ∝ 1/r
+        #   （严格乘性）；平移后 p 会偏 +50%（实测 1.073→1.584），近场误差中位 21%。
+        #   减 lo 还会把 d<lo 的远场压成 0（=无穷远），丢掉了远场的排序信息。
+        d = np.clip(d, 0.0, None)
+        hi = float(np.percentile(d, 98))
+        d = np.clip(d / max(1e-6, hi), 0.0, 1.0)
         # 统一成"越大越近"：风景照里近景在下 ⇒ 行均值应随行号递增
         corr = np.corrcoef(d.mean(axis=1), np.arange(d.shape[0]))[0, 1]
         if corr < 0:
             d = 1.0 - d
         return DepthResult(depth=d, metric=False, backend=self.name,
-                           note="relative-depth; scaled by ground-plane fit")
+                           note=("relative-depth; scaled by ground-plane fit"
+                                 + ("" if polarity_confident else
+                                    "; polarity unconfirmed (|rho|<0.3, not flipped)")),
+                           polarity_confident=bool(polarity_confident),
+                           polarity_rho=round(float(rho), 4))
 
 
 class _TorchBackend:

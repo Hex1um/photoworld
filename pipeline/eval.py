@@ -106,7 +106,30 @@ def ground_scale_check(pos, uv, eye: float = 1.7, v_min: float = 0.88,
     }
 
 
-def report(pos, uv, tex, cam, ref, coverage_min=0.55, step=1,
+def ground_band_check(pos, uv, eye: float = 1.7, v_lo: float = 0.55,
+                      v_hi: float = 0.86, tol: float = 0.20) -> dict:
+    """T4（v1.22）：**非锚带**尺度检查。
+
+    尺度门只看画面最底部（v≈0.9+），那一段正是标定锚点本身 —— 用它验收等于
+    自己证明自己。这里改看中景行（v 0.55~0.86）：这些行的地面点没有参与标定，
+    如果 p 偏了，它们的 y 会系统性地偏离 -eye。
+    """
+    v = np.asarray(uv)[:, 1]
+    y = np.asarray(pos)[:, 1]
+    m = (v >= v_lo) & (v <= v_hi) & np.isfinite(y)
+    n = int(m.sum())
+    if n < 50:
+        return {"n": n, "ok": True, "rel_error": None, "tol": tol,
+                "reason": ""}          # 中景没有地面（纯天空/水面）就不判失败
+    med = float(np.median(y[m]))
+    rel = abs(med + eye) / max(eye, 1e-6)
+    return {"n": n, "band_y_median": round(med, 3), "expected": round(-eye, 3),
+            "rel_error": round(rel, 4), "tol": tol, "ok": bool(rel <= tol),
+            "reason": "" if rel <= tol else
+                      "非锚带（中景）地面偏离眼高 %.1f%%（p 或尺度疑似偏置）" % (rel * 100)}
+
+
+def report(pos, uv, tex, cam, ref, coverage_min=0.85, step=1,
            cam_verify=None, eye=None, cal=None, scale_tol=0.25,
            psnr_min=14.0) -> dict:
     """PSNR/SSIM + 覆盖率 + 尺度门 + 可选独立相机交叉门。
@@ -136,13 +159,22 @@ def report(pos, uv, tex, cam, ref, coverage_min=0.55, step=1,
         reasons.append("psnr below %.1f" % psnr_min)
     ok = not reasons
 
-    out = {"coverage": round(cov, 4), "psnr": round(p, 2), "ssim": round(s, 4)}
+    # T4：再报一个**全图口径**的 PSNR（旧实现只在覆盖区域内算，
+    # 覆盖 40% 也能刷出高分）。
+    p_full = psnr(img, ref_f)
+    out = {"coverage": round(cov, 4), "psnr": round(p, 2), "ssim": round(s, 4),
+           "psnr_full": round(p_full, 2)}
 
     if eye is not None:
         out["scale"] = ground_scale_check(pos, uv, eye, tol=scale_tol)
         if not out["scale"]["ok"]:
             ok = False
             reasons.append(out["scale"]["reason"])
+        # T4：非锚带（中景）尺度检查，锚点自证的问题在这里被堵住
+        out["scale_band"] = ground_band_check(pos, uv, eye)
+        if not out["scale_band"]["ok"]:
+            ok = False
+            reasons.append(out["scale_band"]["reason"])
 
     if cam_verify is not None:
         img2 = splat_render(pos, uv, tex, cam_verify, (h, w))
