@@ -639,3 +639,5 @@ button.primary:hover { background: #f0e2c0; }
 @media (max-width: 760px) {
   .live-panel { right: 12px; left: 12px; width: auto; bottom: 108px; }
 }
+
+.live-meta { margin-top: 6px; color: var(--dim); font-family: var(--mono); font-size: 10px; }

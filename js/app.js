@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '1.18.1';
+  const VERSION = '1.18.2';
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -1012,6 +1012,18 @@
     bind('liveChaos', 'chaos');
     bind('liveMemory', 'memory');
     applyLiveState(false);
+    // 训练规模直接写在面板上：这版的地貌原型来自图集聚类，用户能一眼看到用了多少张
+    const lp = window.PW && window.PW.liveParams;
+    const meta = el('liveMeta');
+    if (meta) {
+      if (lp && lp.report) {
+        const r = lp.report;
+        meta.textContent = '地貌原型 · 图集 ' + r.samples + ' 张（训练 ' + r.train + ' / 验证 '
+          + r.val + '）· ' + r.k + ' 类 · 颜色 MAE ' + r.valColorMae;
+      } else {
+        meta.textContent = '地貌原型未载入（js/live_params.js 缺失），退回 hash 主题';
+      }
+    }
   }
 
   /* ---------------- 启动 ---------------- */

@@ -1079,7 +1079,17 @@
     const vfov = 2 * Math.atan(tanV);
     /* 相机俯仰角：从地平线位置反解。照片是俯拍（楼梯/桌面）时地平线在上方，
        若仍按水平相机反投影，地面会被卷成弧形（鱼眼）——这是室内照片崩掉的根因。 */
-    const pitch = Math.atan(clamp((0.5 - analysis.horizon) * 2 * tanV, -0.9, 0.9));
+    /* 相机俯仰：用「地面消失线」而不是「天际线」反解。
+       analysis.horizon 是地形轮廓的 82 分位 —— 画幅被台地/山体占满时会明显偏高
+       （赤岩峡谷 0.364，而真正的地面线在 ~0.50）。用天际线反解 pitch 会让俯仰角
+       高估 ~10°，台地像素的 dirY 被压低 → y = eye + dirY·t 变成负数，
+       整片台地沉到地面以下，看起来就是"扁平的一条"。
+       地面线取天际线的下分位（12%）：那是"没有凸起物遮挡的那部分地平线"，
+       对风景照比 82 分位稳得多；仍用 horizon 原名给 sky alpha。 */
+    const topSorted = Array.from(analysis.top).sort((a, b) => a - b);
+    const groundLineRaw = topSorted[Math.floor(NCOL * 0.12)] || 0.5;
+    const groundLine = clamp(groundLineRaw, 0.28, 0.82);
+    const pitch = Math.atan(clamp((0.5 - groundLine) * 2 * tanV, -0.9, 0.9));
     const cosP = Math.cos(pitch), sinP = Math.sin(pitch);
     /* 室内 / 俯拍检测：地平线被顶到画面上方 42% 以外（或压到 72% 以下）。
        户外风景的地平线基本在 0.45~0.60。室内走短基线测距、不夸张高度、
@@ -1322,11 +1332,17 @@
           // 这是「天花板被当成天空/地面」的直接修复。
           t = clamp(metric(d0), 0.6, 220);
           y = Math.max(eye + dirY * t, eye + 0.45);
-        } else if (v > analysis.horizon + 0.005 && !isFg) {
-          // 地面：按「平地 + 眼高」反解，严格落在 y=0。
-          // 这里**只用几何判据**（地平线以下 + 不比同行基线更近），不用语义的
-          // 地面 mask：语义地面是斑块状的，把散点强压到 y=0 会在斑块边界立起
-          // 无数薄墙，整片雪坡变成竖条（A/B 实测）。语义只负责天空/天花板/单体。
+        } else if (v > groundLine + 0.005 && !isFg && dirY < -0.012) {
+          /* 地面：按「平地 + 眼高」反解，严格落在 y=0。
+             这里**只用几何判据**（地平线以下 + 不比同行基线更近），不用语义的
+             地面 mask：语义地面是斑块状的，把散点强压到 y=0 会在斑块边界立起
+             无数薄墙，整片雪坡变成竖条（A/B 实测）。语义只负责天空/天花板/单体。
+
+             v1.18.2：加 `dirY < -0.012` —— 射线必须**朝下**才可能是地面。
+             `analysis.horizon` 是**天际线**（画面里地形轮廓的 82 分位），不是地面
+             消失线：赤岩峡谷的天际线在 0.364（因为台地占了大半幅面），于是整段台地
+             被判定成"地面"，`-dirY` 被 0.06 兜底 → t=28m、y=0 → 台地压成远处一条
+             扁带（用户看到的就是"扁平"）。朝上的射线落到地面分支在物理上就不成立。 */
           t = Math.min(eye / Math.max(0.06, -dirY), 220);
           y = 0;
           gGround[k] = 1;
