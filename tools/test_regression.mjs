@@ -373,8 +373,16 @@ assert.ok(!/const w = smoothstep\(-0\.03, 0\.02, sp\)/.test(worldSrc),
   'buildRelief 里仍留有算完不用的死变量 w');
 assert.ok(!/skyBottom/.test(worldSrc), 'build() 里仍留有算完不用的 skyBottom');
 assert.ok(!/^\s*idx = \[\]/m.test(geomSrc), 'geom.build_mesh 里仍留有死变量 idx');
-assert.ok(!/def estimate_pitch|def _fit_scale/.test(geomSrc),
-  'geom.py 里仍有主流程不调用的历史标定函数');
+/* v1.24（管线 v1.22 T5）：estimate_pitch 现在是**主流程在用**的函数
+   （reconstruct.py 反解俯仰并写进 world.json），不能再用"名字出现即失败"。
+   改成真正要守的东西：凡是标定类函数，都必须有调用点。 */
+const reconSrc = read('pipeline/reconstruct.py');
+assert.ok(!/def _fit_scale/.test(geomSrc),
+  'geom.py 里仍有主流程不调用的历史标定函数 _fit_scale');
+if (/def estimate_pitch/.test(geomSrc)) {
+  assert.ok(/estimate_pitch\(/.test(reconSrc),
+    'geom.estimate_pitch 存在但 reconstruct.py 没有调用（死代码）');
+}
 assert.ok(!/eye: \[0, 1\.7, 0\]/.test(appSrc),
   '曝光预热相机仍写死 y=1.7，与 asset 模式烘出的地面高度不一致');
 const expoLoops = (appSrc.match(/入景前先做一次曝光收敛/g) || []).length;
