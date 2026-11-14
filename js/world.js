@@ -1089,8 +1089,8 @@
     const topSorted = Array.from(analysis.top).sort((a, b) => a - b);
     const groundLineRaw = topSorted[Math.floor(NCOL * 0.12)] || 0.5;
     const groundLine = clamp(groundLineRaw, 0.28, 0.82);
-    const pitch = Math.atan(clamp((0.5 - groundLine) * 2 * tanV, -0.9, 0.9));
-    const cosP = Math.cos(pitch), sinP = Math.sin(pitch);
+    let pitch = Math.atan(clamp((0.5 - groundLine) * 2 * tanV, -0.9, 0.9));
+    let cosP = Math.cos(pitch), sinP = Math.sin(pitch);
     /* 室内 / 俯拍检测：地平线被顶到画面上方 42% 以外（或压到 72% 以下）。
        户外风景的地平线基本在 0.45~0.60。室内走短基线测距、不夸张高度、
        不裁天空，否则会被户外双锚点拉到几十米、卷成弧形。
@@ -1261,6 +1261,42 @@
         ? opt.sem.stats.ceiling : 0;
       if (ceilShare < 0.18) indoor = false;
     }
+
+    /* v1.21（P0）：用**画面底部行**反解俯仰角，替代"天际线"估计。
+       为什么必须换：groundLine 取天际线的下分位，而"主体高耸"的照片（雪山群、
+       红岩尖峰、树林、建筑）天际线就是主体顶缘 —— 主体整片落在"地面线以下"，
+       被判成地面 → y=0 → 压成远处一条扁带。
+       做法：底部 20% 一定踩在地面上，求使 `metric(深度) ≈ 眼高/(-dirY)` 残差最小的
+       pitch（一维搜索 65 档）。残差过大就不用这个解，退回原估计 —— 宁可保守。 */
+    (function fitPitchFromGround() {
+      const rowMed = new Float32Array(GH);
+      const buf = [];
+      for (let j = 0; j < GH; j++) {
+        buf.length = 0;
+        for (let i = 0; i < GW; i += 2) buf.push(gS[j * GW + i]);
+        buf.sort((a2, b2) => a2 - b2);
+        rowMed[j] = buf.length ? buf[buf.length >> 1] : 0;
+      }
+      let best = pitch, bestErr = Infinity, bestN = 0;
+      for (let cand = -0.35; cand <= 0.62; cand += 0.015) {
+        const s2 = Math.sin(cand), c2 = Math.cos(cand);
+        let err = 0, n = 0;
+        for (let j = Math.floor(GH * 0.80); j < GH; j++) {
+          const vv = j / (GH - 1);
+          const dy0 = (0.5 - vv) * 2 * tanV;
+          const dy = dy0 * c2 - s2;
+          if (dy > -0.06) continue;
+          const tPlane = eye / -dy;
+          const tD = metric(rowMed[j]);
+          if (!(tD > 0.4)) continue;
+          const r = Math.log(tD / Math.max(0.2, tPlane));
+          err += r * r; n++;
+        }
+        if (n >= 6 && err / n < bestErr) { bestErr = err / n; best = cand; bestN = n; }
+      }
+      if (bestN >= 6 && bestErr < 0.45) pitch = best;
+      cosP = Math.cos(pitch); sinP = Math.sin(pitch);
+    })();
 
     /* 1) 反投影：世界坐标点（相机朝 -Z，yaw=0，眼高 1.7m） */
     const pos = new Float32Array(GW * GH * 3);
