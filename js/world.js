@@ -1126,7 +1126,11 @@
     /* 天空占比兜底（v1.26.1）：horizon 是「天际线下分位」，整片树林/芦苇会把
        它顶到 0.34，和室内俯拍撞车。语义 sky > 18% 一定是户外，直接否掉 indoor，
        否则秋林图会被室内短基线裁成「一片棕地 + 一丛枯枝」。 */
-    let indoor = (analysis.horizon < 0.42 || analysis.horizon > 0.72)
+    /* 再加一条语义墙判据：墙面占比 > 55% 也是室内，哪怕地平线落在 0.42~0.72
+       的「正常」区间（深色墙 + 白色家具的那张图 horizon=0.445、wall=0.762，
+       被判成户外后墙面被竖墙剔除删掉一万个面，画面碎成黑块）。 */
+    let indoor = ((analysis.horizon < 0.42 || analysis.horizon > 0.72)
+        || (opt.sem && opt.sem.stats && opt.sem.stats.wall > 0.55))
       && !(opt.sem && opt.sem.stats && opt.sem.stats.sky > 0.18);
 
     const dw = depth.width || depth.size;
@@ -1309,6 +1313,7 @@
          ceiling=0 时 indoor 被翻成 false，skippedWall 一路涨到 12372，
          整张画面碎成黑块。 */
       if (ceilShare < 0.18
+        && !(opt.sem && opt.sem.stats && opt.sem.stats.wall > 0.55)
         && analysis.horizon >= 0.42 && analysis.horizon <= 0.72) indoor = false;
     }
 
@@ -2717,7 +2722,7 @@
     const m = {
       relief: relief ? PWGL.createMesh(gl, relief) : null,
       splat: (relief && relief.grid) ? PWGL.createMesh(gl, buildSplat(relief, gl, 2)) : null,
-      flat: (analysis.meanLum < 0.18
+      flat: (analysis.meanLum < 0.25
         || (opts && opts.sem && opts.sem.stats && opts.sem.stats.water > 0.5))
         ? PWGL.createMesh(gl, buildFlatCard(analysis, gl)) : null,
       splatHole: (relief && relief.grid && opts && opts.fgMask && analysis.bgPhotoCanvas)
@@ -2759,10 +2764,10 @@
       walkRadius: 0,
       /* 点云只用于室外风景：室内是密集小几何 + 大俯角，点云会把墙面和楼梯
          撕成黑块/白块（楼梯图实测），室内仍走三角网格（v1.15 的完整效果）。 */
-      flatMode: analysis.meanLum < 0.18
+      flatMode: analysis.meanLum < 0.25
         || !!(opts && opts.sem && opts.sem.stats
           && (opts.sem.stats.water > 0.5 || opts.sem.stats.vegetation > 0.5)),
-      splatMode: !!(opts && opts.splat) && !(analysis.meanLum < 0.18)
+      splatMode: !!(opts && opts.splat) && !(analysis.meanLum < 0.25)
         && !(analysis.horizon < 0.42 || analysis.horizon > 0.72),
       splatScale: (opts && opts.splatScale) || 30,
       /* v1.17：重建表面是单层薄壳，从背面看就是糊成一片的拉花。
