@@ -1123,7 +1123,11 @@
        **但这只是初判**：低地平线的大画幅风景（赤岩峡谷 horizon=0.364）
        会命中这条规则，然后被 indoor 的 0.6~18m 短基线压成半径 18m 的碗
        —— 手机上看到的就是"整个地面只有一个圆弧"。等 hasSky 算出来后要纠正。 */
-    let indoor = analysis.horizon < 0.42 || analysis.horizon > 0.72;
+    /* 天空占比兜底（v1.26.1）：horizon 是「天际线下分位」，整片树林/芦苇会把
+       它顶到 0.34，和室内俯拍撞车。语义 sky > 18% 一定是户外，直接否掉 indoor，
+       否则秋林图会被室内短基线裁成「一片棕地 + 一丛枯枝」。 */
+    let indoor = (analysis.horizon < 0.42 || analysis.horizon > 0.72)
+      && !(opt.sem && opt.sem.stats && opt.sem.stats.sky > 0.18);
 
     const dw = depth.width || depth.size;
     const dh = depth.height || depth.size;
@@ -1445,7 +1449,10 @@
           y = eye + dirY * t * ((hasSky && dirY > 0) ? yGain : 1);
           // 室内不做近景限幅：室内深度范围只有 18m，按行中位判定会把
           // 半面墙/天花板误标成「近景」，压到近处后画面被咬出锯齿缺口。
-          if (isFgDepth && !indoor) {
+          /* 植被（枯枝/草丛/芦苇）不做近景限幅：整片树枝每根都被判成前景，
+             限幅会把它们挤到同一深度、堆成竖条瀑布（秋林图实测）。
+             放开限幅让它们按各自深度散开，噪声反而被摊薄。 */
+          if (isFgDepth && !indoor && grp !== SGRP.VEG) {
             const tBase = clamp(metric(rowBaseD), 0.8, 220);
             t = clamp(t, tBase * 0.5, tBase * 1.6);
             y = clamp(y, -0.5, 12);   // 近景物体（树/石头/人）不会长成几十米的尖塔
@@ -2753,7 +2760,8 @@
       /* 点云只用于室外风景：室内是密集小几何 + 大俯角，点云会把墙面和楼梯
          撕成黑块/白块（楼梯图实测），室内仍走三角网格（v1.15 的完整效果）。 */
       flatMode: analysis.meanLum < 0.18
-        || !!(opts && opts.sem && opts.sem.stats && opts.sem.stats.water > 0.5),
+        || !!(opts && opts.sem && opts.sem.stats
+          && (opts.sem.stats.water > 0.5 || opts.sem.stats.vegetation > 0.5)),
       splatMode: !!(opts && opts.splat) && !(analysis.meanLum < 0.18)
         && !(analysis.horizon < 0.42 || analysis.horizon > 0.72),
       splatScale: (opts && opts.splatScale) || 30,
