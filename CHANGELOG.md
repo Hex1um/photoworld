@@ -3,6 +3,24 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [评估记录] - 2026-11-15  · 两条 3DGS 路线在本机的可行性（未通过）
+
+目标：对比 `PocketWorld-3D`（SDXL 全景 + DepthAnything + 3DGS）与
+`sharp-3d-web`（Apple ml-sharp，2.5GB 权重）。
+
+环境：RTX 5070 Laptop **8GB（sm_120 / Blackwell）**、Windows、Python 3.13。
+
+| 路线 | 结果 | 原因 |
+| --- | --- | --- |
+| **ml-sharp** | 装得上，**跑不了** | `gsplat 1.5.3` + `sharp` 都装成功；但 PyTorch 2.14.1 官方 wheel 最高 **sm_90**，没有 sm_120 内核 → `CUDA error: no kernel image is available`（提示指向 cu134，镜像站无对应 wheel） |
+| **PocketWorld-3D** | **未完成** | 依赖 SDXL inpainting（7GB）+ `enable_model_cpu_offload`；8GB 显存 + 受限网络下 **20 分钟未跑完**（权重下载/offload 推理过慢） |
+
+**结论**：这台机器不适合跑这两条 3DGS 路线。当前零依赖方案
+（照片 + DepthAnything + 点云 + MI-GAN）在 8GB / 浏览器内已经能跑，是更现实的选择。
+若要走 3DGS，需要 **CUDA 13 的 torch（含 sm_120）+ ≥12GB 显存 + 稳定 HF 直连**。
+
+产物：`gs_test/`（两个仓库、`pw_run.py`、`sharp_in/`），未入库。
+
 ## [1.25.0] - 2026-11-14  · 图集第二批（16 张）+ 低信息量场景降级
 
 ### 第二批 16 张逐图质检（`reports/mv17.json`，12 视角/图）
