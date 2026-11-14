@@ -3,6 +3,41 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [1.24.7] - 2026-11-14  · 点云 / surfel 渲染（默认开）
+
+### 先搜了一圈 GitHub，四类方案
+
+| 方案 | 代表仓库 | 结论 |
+| --- | --- | --- |
+| **点云 / splat**（每像素一个点，无三角形连接） | `miggyh27/ImgCloud`（p5 WEBGL batched POINTS）、`warhammer50K/WebPointCloud`（Three.js 点云 viewer，EDL/SSAO）、`Hazingoo/Project5-WebGPU-Gaussian-Splat-Viewer` | **最适合本项目**：零模型、纯 WebGL、天然没有「沿射线拉长条」的问题 |
+| **分层平面**（按深度切 2~20 层，每层一个透明面） | `activeguild/render-image-depth`（Depth Anything + 分层视差） | 实现简单，但层间会露缝、大角度穿帮，适合"视差窗户"而非可行走世界 |
+| **LDI + 学习式 inpainting**（CVPR 2020） | `yushan777/3d-photo-inpainting`（PyTorch，2~3 分钟/图） | 能补遮挡区，但需 GPU/大权重，与零依赖冲突；方法可借鉴（分层+补洞），实现另做 |
+| **单图 → 全景 → 3DGS** | `yih1827686127/PocketWorld-3D`（SDXL 全景外推 + DepthAnything + 3DGS）、`MindDock/sharp-3d-web`（Apple ml-sharp，2.5GB） | 质量上限最高，但必须本地 GPU，不能进浏览器 |
+
+选了第一类，落地成一条可切换的渲染路径。
+
+### 实现
+
+- `js/glutil.js` 新增 `VS_SPLAT / FS_SPLAT`：点大小 `clamp(uScale/dist, 3.2, 20)`，
+  圆形 `gl_PointCoord` 羽化 + 雾混合；每点带自己的照片 UV 与顶点色。
+- `js/world.js` 新增 `buildSplat()`：把反投影顶点降采样（step 2，约 16k 点）成点云 mesh。
+- `js/renderer.js` 新增 `drawSplat()`，主表面按 `world.splatMode` 走点云或原网格。
+- 默认 `?splat=1`（可用 `?splat=0` 回网格，`?splats=40` 调点大小）。
+
+### A/B（截图）
+
+| 题材 | 网格版 | 点云版 |
+| --- | --- | --- |
+| 赤岩峡谷 | 台地被切成立柱 + 灰带 | **轮廓完整、地面有砂砾、无灰带**（`ab/splat_desert.png`） |
+| 雪山 | 中景一排竖条幕、雪地流线 | **竖条幕消失、雪地有纹理**（`ab/splat_edd4.png`） |
+| 高山湖 | 竖直条纹方块 | 连续岩壁，但**岩壁仍有竖纹**（深度在陡面上的误差，点云修不了） |
+| 玻璃幕墙 | 全屏放射碎片 | 仍差（深度对玻璃无效，竖直"冰柱"） |
+
+### 已知
+
+- 岩壁竖纹 / 玻璃幕墙：单目深度在**陡面与反光面**上的误差，点云只能消除「三角形连接」造成的拉伸，
+  不能修正深度本身。下一步是分层（LDI）或对陡面做深度梯度限幅。
+
 ## [1.24.6] - 2026-11-14  · 语料批量质检（2895 张抽样）+ 地面误判修复
 
 第一次把「另一个工作区的 2895 张风景语料」接进 32 视角质检流程，抽样 12 张跑

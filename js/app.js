@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '1.24.6';
+  const VERSION = '1.24.7';
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -273,6 +273,11 @@
         vg: params.has('vg') ? parseFloat(params.get('vg')) : undefined,
         yGain,
         fgMask: objInfo && objInfo.fgMask,
+        // v1.24.7：点云/surfel 渲染**默认开**。A/B 结论：自然风景（峡谷/雪山/
+        // 湖岸）明显优于三角网格（无竖条幕、无薄片、地面有照片颗粒），
+        // 建筑/玻璃这类深度失效的题材仍然差。?splat=0 回到网格。
+        splat: params.get('splat') !== '0',
+        splatScale: params.has('splats') ? parseFloat(params.get('splats')) : undefined,
         // 语义分组：天空/地面/天花板/植被/建筑/人车，决定几何策略与单体卡片
         sem: sem,
         // 质检：?dbgpos=1 时把 relief 顶点位置暴露到 world.dbgPos（排查竖条/鳍）

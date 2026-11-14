@@ -20,7 +20,8 @@
       main: PWGL.createProgram(gl, PWGL.VS_MAIN, PWGL.FS_MAIN),
       sky: PWGL.createProgram(gl, PWGL.VS_FULL, PWGL.FS_SKY),
       post: PWGL.createProgram(gl, PWGL.VS_FULL, PWGL.FS_POST),
-      points: PWGL.createProgram(gl, PWGL.VS_POINTS, PWGL.FS_POINTS)
+      points: PWGL.createProgram(gl, PWGL.VS_POINTS, PWGL.FS_POINTS),
+      splat: PWGL.createProgram(gl, PWGL.VS_SPLAT, PWGL.FS_SPLAT)
     };
 
     // 全屏四边形
@@ -170,6 +171,29 @@
       else gl.drawArrays(mesh.mode || gl.TRIANGLES, 0, mesh.count);
     }
 
+    /* 点云 / surfel 绘制（v1.24.7）：照片像素反投影成点，每点带自身 UV 与顶点色。
+       没有三角形连接，所以不存在「沿射线拉成长条/竖幕」这种 mesh 病。 */
+    function drawSplat(world, mesh, opt) {
+      if (!mesh || !mesh.aPos) return;
+      const p = progs.splat;
+      gl.useProgram(p.prog);
+      PWGL.bindMesh(gl, p, mesh);
+      PWGL.setUniforms(gl, p, {
+        uVP: vp,
+        uEye: camera.eye,
+        uScale: opt.scale || 30,
+        uTex: 0,
+        uFogColor: world.fogColor,
+        uFogDensity: world.lights.fogDensity,
+        uFogAmt: opt.fog === undefined ? 0.5 : opt.fog
+      });
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, opt.tex || null);
+      const tl = gl.getUniformLocation(p.prog, 'uTex');
+      if (tl) gl.uniform1i(tl, 0);
+      gl.drawArrays(gl.POINTS, 0, mesh.count);
+    }
+
     const camera = { eye: [0, 2, 0], yaw: 0, pitch: 0, fov: 66 * Math.PI / 180, aspect: 1 };
 
     function render(world, cam, opts) {
@@ -305,13 +329,21 @@
            读起来比雾还假；剔除后露出低频世界幕 + 雾，观感连续。
            混合与剔除可以并存（alpha 只用于天空渐隐），不影响正面边缘。
            ?cull=0 可回到 v1.16 的双面行为做 A/B。 */
-        const cullRelief = world.reliefCull !== false;
-        if (cullRelief) { gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); }
-        else gl.disable(gl.CULL_FACE);
-        drawMesh(world, world.meshes.relief, {
-          tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.26, mipBias: 0,
-          backdrop: [0, 0]
-        });
+        if (world.splatMode && world.meshes.splat) {
+          /* 点云路径（?splat=1）：三角形网格在掠射角会拉丝、单层壳侧面是竖幕，
+             点云没有「连接」，天然不会出现这两类病。 */
+          drawSplat(world, world.meshes.splat, {
+            tex: world.tex.photo, fog: 0.5, scale: world.splatScale || 30
+          });
+        } else {
+          const cullRelief = world.reliefCull !== false;
+          if (cullRelief) { gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); }
+          else gl.disable(gl.CULL_FACE);
+          drawMesh(world, world.meshes.relief, {
+            tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.26, mipBias: 0,
+            backdrop: [0, 0]
+          });
+        }
         gl.disable(gl.BLEND);
         gl.enable(gl.CULL_FACE);
       }

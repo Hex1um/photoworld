@@ -288,6 +288,53 @@ void main() {
   fragColor = vec4(col, a * (1.0 - f * 0.85));
 }`;
 
+  /* ---- 点云 / surfel 渲染（v1.24.7）----
+   * 参考 GitHub 上的纯前端方案（miggyh27/ImgCloud 的 batched POINTS、
+   * warhammer50K/WebPointCloud 的点云 viewer、activeguild/render-image-depth 的
+   * 分层透视）：三角形网格在掠射角必然拉伸、单层薄壳侧面就是「竖条幕」，
+   * 而点云没有「连接」，每个像素独立成点，天然不会拉丝。
+   * 这里用照片 + 深度反投影出 surfel，点大小随距离衰减、圆形 alpha 羽化。 */
+  const VS_SPLAT = `#version 300 es
+precision highp float;
+in vec3 aPos;
+in vec2 aUV;
+in vec4 aColor;
+uniform mat4 uVP;
+uniform vec3 uEye;
+uniform float uScale;
+out vec2 vUV;
+out vec4 vC;
+out float vDist;
+void main() {
+  gl_Position = uVP * vec4(aPos, 1.0);
+  vUV = aUV;
+  vC = aColor;
+  vDist = length(aPos - uEye);
+  // 下限 3.2px：远处点太小会在竖面上露出「点列之间」的背景，读起来像栅栏；
+  // 3.2px 覆盖足够密，代价是远景稍微糊一点。
+  gl_PointSize = clamp(uScale / max(vDist, 1.0), 3.2, 20.0);
+}`;
+
+  const FS_SPLAT = `#version 300 es
+precision highp float;
+in vec2 vUV;
+in vec4 vC;
+in float vDist;
+uniform sampler2D uTex;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+uniform float uFogAmt;
+out vec4 fragColor;
+void main() {
+  vec2 d = gl_PointCoord - 0.5;
+  float r = length(d) * 2.0;
+  if (r > 1.0) discard;
+  vec3 col = texture(uTex, vUV).rgb * vC.rgb;
+  float f = clamp(1.0 - exp(-pow(vDist * uFogDensity, 2.2)), 0.0, 1.0);
+  col = mix(col, uFogColor, f * uFogAmt);
+  fragColor = vec4(col, (1.0 - r * r) * 0.9 * vC.a);
+}`;
+
   function compile(gl, type, src) {
     const sh = gl.createShader(type);
     gl.shaderSource(sh, src);
@@ -431,6 +478,7 @@ void main() {
 
   global.PW.GL = {
     VS_MAIN, FS_MAIN, VS_FULL, FS_SKY, FS_POST, VS_POINTS, FS_POINTS,
+    VS_SPLAT, FS_SPLAT,
     createProgram, setUniforms, createMesh, bindMesh, createTexture
   };
 })(window);

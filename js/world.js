@@ -2438,6 +2438,28 @@
     };
   }
 
+  /* 点云 / surfel（v1.24.7）：把反投影后的顶点降采样成点，供 renderer 的
+     POINTS 路径绘制。参考 ImgCloud / WebPointCloud 的做法 —— 点云没有三角形
+     连接，掠射角不会把贴图拉成条，也不会出现单层壳的「竖幕」。 */
+  function buildSplat(relief, gl, step) {
+    const GW = relief.grid.GW, GH = relief.grid.GH;
+    const st = step || 2;
+    const pos = [], uv = [], col = [];
+    for (let j = 0; j < GH; j += st) {
+      for (let i = 0; i < GW; i += st) {
+        const k = j * GW + i;
+        pos.push(relief.pos[k * 3], relief.pos[k * 3 + 1], relief.pos[k * 3 + 2]);
+        uv.push(relief.uv[k * 2], relief.uv[k * 2 + 1]);
+        col.push(relief.color[k * 4], relief.color[k * 4 + 1], relief.color[k * 4 + 2],
+          relief.color[k * 4 + 3]);
+      }
+    }
+    return {
+      pos: new Float32Array(pos), uv: new Float32Array(uv), color: new Float32Array(col),
+      mode: gl.POINTS
+    };
+  }
+
   /* 程序化地平环：视锥外的延续（不是照片内容，是"推测"出的远景雾带）
    * 实验特性，默认关闭（?ring=1）。做法上只保证"不突兀"：
    * 顶边 alpha 渐隐到 0、颜色从地平线色渐变到天顶色，否则会出现一条硬边灰带。 */
@@ -2600,6 +2622,7 @@
 
     const m = {
       relief: relief ? PWGL.createMesh(gl, relief) : null,
+      splat: (relief && relief.grid) ? PWGL.createMesh(gl, buildSplat(relief, gl, 2)) : null,
       // 世界坐标地面方格网（替代极坐标扇形的地面部分，消掉放射状拉丝）
       groundGrid: (relief && relief.groundGrid) ? PWGL.createMesh(gl, relief.groundGrid) : null,
       // 照片 UV 版地面（叠在平铺版之上，视锥内有细节）
@@ -2635,6 +2658,8 @@
       // v1.19：所有模式都不限制移动（0 = 不限制）。旧 fallback 的 116m 半径
       // 就是用户遇到的「空气墙」。
       walkRadius: 0,
+      splatMode: !!(opts && opts.splat),
+      splatScale: (opts && opts.splatScale) || 30,
       /* v1.17：重建表面是单层薄壳，从背面看就是糊成一片的拉花。
          默认关闭背面（?cull=0 保留旧双面），转到侧后方时看到的是
          360° 低频世界幕 + 雾，而不是「纸片背面」。 */
