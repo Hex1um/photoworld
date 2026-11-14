@@ -385,8 +385,29 @@ void main() {
     else gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
   }
 
+  /* texImage2D 遇到超过 MAX_TEXTURE_SIZE 的源会静默失败（黑贴图而不报错）。
+     v1.20.3 起主照片贴图升到 2048，手机常见上限 4096、桌面 16384；
+     这里统一把超限源等比收进上限，程序化画布与对象裁片也一并受保护。 */
+  function fitSource(gl, source) {
+    let max = 0;
+    try { max = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 0; } catch (e) { return source; }
+    const sw = source.width || source.videoWidth || 0;
+    const sh = source.height || source.videoHeight || 0;
+    if (!max || !sw || !sh || (sw <= max && sh <= max)) return source;
+    const s = Math.min(max / sw, max / sh);
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.floor(sw * s));
+    cv.height = Math.max(1, Math.floor(sh * s));
+    const ctx = cv.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(source, 0, 0, cv.width, cv.height);
+    return cv;
+  }
+
   function createTexture(gl, source, opts) {
     opts = opts || {};
+    source = fitSource(gl, source);
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, opts.flipY !== false);

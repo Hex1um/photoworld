@@ -2312,7 +2312,10 @@
     const particles = buildParticles(analysis, rng, analysis.isSnow ? 1100 : 700);
 
     const tex = {
-      photo: PWGL.createTexture(gl, analysis.canvas, { wrap: 'clamp', clampV: true, aniso: 8, flipY: false }),
+      // v1.20.3：主照片贴图改用全分辨率 photoCanvas（2048 上限），不再用 420px
+      // 分析画布。其余程序化纹理（sky / ground / backdrop）仍取 analysis.canvas，
+      // 它们本来就是低频色带，且与语义采样口径绑定，不能跟着换源。
+      photo: PWGL.createTexture(gl, analysis.photoCanvas || analysis.canvas, { wrap: 'clamp', clampV: true, aniso: 8, flipY: false }),
       // 区域外地面用程序化色斑（A/B：改用照片底部延展会在边界外出现大面积
       // 照片纹理重复，比纯色更糟，已回退）。
       ground: PWGL.createTexture(gl, relief ? makeProceduralGroundTexture(analysis, seed + 3) : makeGroundTexture(analysis, seed + 3), { wrap: 'mirror', aniso: 8 }),

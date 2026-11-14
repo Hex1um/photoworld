@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '1.20.2';
+  const VERSION = '1.20.3';
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -165,7 +165,18 @@
       await sleep(80);
       setProgress(12, '分析天空 / 地平线…');
       await sleep(60);
-      const analysis = window.PW.reconstruct.analyze(img, def.name);
+      // 照片贴图分辨率 A/B：?tex=0 回到旧的 420px 分析画布；?tex=4096 抬高上限。
+      // 不传时走 DEFAULTS.displayMaxEdge（2048），仍受 GL 的 MAX_TEXTURE_SIZE 保护。
+      const texArg = new URLSearchParams(location.search).get('tex');
+      const texOpts = (texArg === null) ? undefined : {
+        displayMaxEdge: Math.max(0, Math.min(8192, parseInt(texArg, 10) || 0))
+      };
+      const analysis = window.PW.reconstruct.analyze(img, def.name, texOpts);
+      // 运行时可验证：质检探针读 body.dataset.tex* 即可确认贴图链路与分辨率
+      if (document.body) {
+        document.body.dataset.texW = String(analysis.photoCanvas.width);
+        document.body.dataset.texH = String(analysis.photoCanvas.height);
+      }
       setProgress(20, '提取天际线与太阳方位');
       await sleep(60);
       setProgress(24, '采样雾色 / 地面调色板');
