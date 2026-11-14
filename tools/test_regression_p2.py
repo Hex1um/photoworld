@@ -404,7 +404,7 @@ def test_dit_structure_and_state_dict_keys() -> None:
         "forward 签名变了，CFG 等价性无法保证"
     for frag in ("torch.clamp(idx // per_frame, max=n_frames - 1)",
                  "fid.view(-1, 1) >= fid.view(1, -1)",
-                 "self.head(x[:, -(cfg.per_frame + 1):-1])",
+                 "self.head(x[:, -cfg.per_frame:])",
                  "rope_cache(", "nn.init.normal_(self.head.weight"):
         assert frag in dit, "DiT 关键结构被改动：%s" % frag
 

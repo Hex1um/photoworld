@@ -163,7 +163,11 @@
       gl.bindTexture(gl.TEXTURE_2D, opt.tex || null);
       const tl = gl.getUniformLocation(p.prog, 'uTex');
       if (tl) gl.uniform1i(tl, 0);
-      gl.drawElements(mesh.mode || gl.TRIANGLES, mesh.count, gl.UNSIGNED_INT, 0);
+      // 无索引网格（例如深度模型失败回退时的 rocks）必须走 drawArrays；
+      // 否则 ELEMENT_ARRAY_BUFFER 绑定为 null 还调 drawElements 会每帧报
+      // INVALID_OPERATION，几何整个不显示。
+      if (mesh.index) gl.drawElements(mesh.mode || gl.TRIANGLES, mesh.count, gl.UNSIGNED_INT, 0);
+      else gl.drawArrays(mesh.mode || gl.TRIANGLES, 0, mesh.count);
     }
 
     const camera = { eye: [0, 2, 0], yaw: 0, pitch: 0, fov: 66 * Math.PI / 180, aspect: 1 };
