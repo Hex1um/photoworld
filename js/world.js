@@ -1058,6 +1058,9 @@
     const yGain = opt.yGain || 1.35;     // 只作用于地平线以上：把山体/树木的高度立起来
     const prog = opt.onProgress || function () {};
     const eye = 1.7;
+    /* 近场平面半径（米）：这个距离内一律当平地（用户要求"前面区域就是地面，
+       地貌生成起点靠后"）。?near= 可调，0 = 关闭。 */
+    const NEAR_PLANE = (opt.nearPlane === undefined) ? 8 : Math.max(0, opt.nearPlane);
 
     /* 语义分组（js/semantics.js）：几何策略按「组」而不是按具体类别走。
        没有语义图时全部退化为 UNKNOWN，行为与 v1.15 完全一致。 */
@@ -1399,6 +1402,33 @@
             y = clamp(y, -0.5, 12);   // 近景物体（树/石头/人）不会长成几十米的尖塔
           }
         }
+        /* v1.21.1(a)：接近**水平**的射线（|dirY| 很小）压到地面。
+           这类像素以前走地形分支，`y = eye + dirY·t` ≈ **1.7m** —— 等于在眼睛
+           高度造出一圈延伸到地平线的环形平台；因为 t 很大、水平位移很小，
+           它沿径向被拉成一片放射状条纹（赤岩峡谷截图里那 40% 的拉丝就是这个）。
+           物理上它们就是"远处的地表"，应当压在地面上。 */
+        if (!indoor && Math.abs(dirY) < 0.038) {
+          y = 0;
+          gGround[k] = 1;
+        } else if (!indoor && Math.abs(y) < 0.45) {
+          /* 归一化后落在 ±0.45m 内的顶点本来就在地面附近（近景物体的底座、
+             水面、沙地），一并算地面：既消掉它们自己的放射拉伸，
+             也让地面方格网接管这块屏幕面积最大的区域。 */
+          y = 0;
+          gGround[k] = 1;
+        }
+
+        /* v1.21.1(b)：**近场一律是地面**（用户要求："前面区域就是地面，把地貌生成
+           起点靠后"）。理由不只是好看：近场（< NEAR_PLANE 米）的深度最不可靠，
+           而它的屏幕面积最大 —— 一点深度噪声会被放大成整屏的放射状拉丝
+           （赤岩峡谷那张截图里 40% 的画面都是这种拉伸）。
+           代价：离眼睛 8m 内的石头/灌木不再有立体感。这个交换是划算的。 */
+        const horizD = Math.hypot(dirX * t, dirZ * t);
+        if (!indoor && horizD < NEAR_PLANE) {
+          t = Math.min(t, NEAR_PLANE * 1.6);
+          y = 0;
+          gGround[k] = 1;
+        }
         // 只给「确实更近」的单体做卡片候选；远处的森林/山脉不切
         if (isNearObj) gNear[k] = 1;
         gDirX[k] = dirX; gDirY[k] = dirY; gDirZ[k] = dirZ;
@@ -1414,7 +1444,34 @@
            比天空基线明显更近的像素才保留（地面/山体/树木/建筑），
            天空 alpha=0 交给程序化天穹。深度图是连续的，所以树冠边缘
            不会出现锯齿状青边或一条水平切线。 */
+        /* v1.21.2：深度判天空**只在轮廓线以上**生效。
+           深度模型在远处低纹理的崖面上会给出一片"和天空一样远"的平值，
+           逐像素裁掉就在岩壁中间咬出一格格白方块（晨雾湖岸那张最明显）。
+           但天空按定义只可能出现在**地形轮廓之上** —— 所以加一条
+           `v < 天际线` 的硬约束，轮廓以下的像素永不因深度被判成天空。 */
         let aSky = (indoor || !hasSky) ? 1 : smoothstep(skyD + 0.03, skyD + 0.14, d0);
+
+        /* v1.21.1：**孤立"天空"像素修补**。深度模型在崖面上会给出成片的
+           "和天空一样远"的平值区，逐像素裁掉就在岩壁上咬出一格格白色方块
+           （晨雾湖岸的"色块被抛弃、留下空白"就是这个）。
+           判据：这块像素若被地形包围（5×5 邻域里 >45% 比天空更近），
+           就认为它是崖面的一部分，保留 alpha=1。真正的天空区域邻域里
+           绝大多数仍是天空，不受影响。 */
+        if (aSky < 0.5 && !indoor && hasSky) {
+          const ci = (k % GW), cj = ((k / GW) | 0);
+          let terr = 0, tot = 0;
+          for (let dj = -2; dj <= 2; dj++) {
+            const jj = cj + dj;
+            if (jj < 0 || jj >= GH) continue;
+            for (let di = -2; di <= 2; di++) {
+              const ii = ci + di;
+              if (ii < 0 || ii >= GW) continue;
+              tot++;
+              if (gS[jj * GW + ii] > skyD + 0.16) terr++;
+            }
+          }
+          if (tot > 8 && terr / tot > 0.32) aSky = 1;
+        }
         // 语义天空直接清零交给天穹；天花板（CEILING）保持 alpha=1，
         // 不再被深度判据误当成天空切掉——「天空/地面/天花板混淆」的关键修复。
         /* 但语义天空只在**地平线以上**才清零（v1.16.1）：
@@ -1422,7 +1479,12 @@
            一刀清零会在画面中间咬出一条贯穿左右的灰带——洞后面就是天穹，
            读起来像「风景和地面混淆」（alpine 湖岸实测，24k 面被这样清掉）。
            地平线以下的像素交给深度判据，它只认「比天空更近」。 */
-        if (sem && grp === SGRP.SKY && v < analysis.horizon - 0.004) aSky = 0;
+        /* v1.21.1：语义天空的清零边界改用 **groundLine（拟合出的地面线）**，
+           不再用天际线。沙漠这张图的天际线在 0.36（台地顶缘），旧条件只清
+           `v < 0.356` 的像素，于是台地上方那一条 **云/亮天空** 被当成几何保留，
+           在视点抬高后摊成一排白蓝色的碎片（截图里横贯画面的那排）。
+           groundLine 更靠下、更接近真实天空分界，清得干净。 */
+        if (sem && grp === SGRP.SKY && v < Math.max(groundLine - 0.01, analysis.horizon - 0.004)) aSky = 0;
         const aU = smoothstep(0, 0.02, u) * (1 - smoothstep(0.98, 1, u));
         const aV = smoothstep(0, 0.015, v) * (1 - smoothstep(0.985, 1, v));
         // 室外按深度裁掉天空（否则照片天空会被压到 100m 处，和地面分成两块）；
@@ -1813,7 +1875,7 @@
        不再需要视锥掩码或镜像平铺。 */
     const idx = [];
     let skipped = 0, skippedCard = 0, skippedObjEdge = 0, skippedSteep = 0, skippedWall = 0,
-      skippedGround = 0,
+      skippedGround = 0, skippedTorn = 0,
       culledAlpha = 0, culledArea = 0;
     for (let j = 0; j < GH - 1; j++) {
       for (let i = 0; i < GW - 1; i++) {
@@ -1842,7 +1904,10 @@
         // 会在画面里咬出一排方块缺口（楼梯图 A/B 实测），已移除。
         // 区域裁剪只作用于近景：远景（>60m 的山）交给雾，不硬切，
         // 否则「远处的物体放得比较远」会被边界一刀切掉。
-        const tNear = Math.min(gT[a0], gT[a1], gT[b0], gT[b1]) < 60;
+        /* v1.21.1：区域裁剪从 60m 收到 22m。旧阈值把 22~60m 的地面/水面
+           也算"近景"，只要顶点稍微越出照片投影的矩形就整片丢掉 ——
+           晨雾湖岸那张"色块被抛弃、留下空白"就是这一段被切掉的。 */
+        const tNear = Math.min(gT[a0], gT[a1], gT[b0], gT[b1]) < 22;
         if (tNear) {
           let inside = true;
           for (const k of [a0, a1, b0, b1]) {
@@ -1882,7 +1947,12 @@
              代价是把**近景石头/灌木的侧面**也一起剪掉了 —— 那块几何一没，
              物体就变成悬空的片（手机竖屏的"悬空感"）。3m 以下保留：那点高度
              读作物体自身的侧壁，不构成横贯画面的竖幕。 */
-          if (vSpan > 3.0 && vSpan > hMin * 2.5) { skippedWall++; continue; }
+          /* v1.21.2：**只剪远处的竖幕**（tMin > 60m）。
+             竖幕是远场"深度顶到上限、水平位移却极小"造成的贴图拉伸；
+             而中近处的真实崖面（晨雾湖岸那块岩壁，40~120m）竖向跨度本来就大，
+             旧规则连它一起剪，在岩壁上咬出一格格白色方块。
+             距离条件把两者分开：远处该剪的照剪，近处崖面保留。 */
+          if (vSpan > 3.0 && vSpan > hMin * 2.5 && tMin > 60) { skippedWall++; continue; }
           /* v1.19.1：法线朝下的四边形一律丢掉。
              单层薄壳在照片「天际线附近」会连出一批**底面朝上的长条**：
              四角深度差异大、竖直跨度却不到 3m，躲过了竖墙筛，转身看过去就是
@@ -1914,6 +1984,17 @@
         if (opt.groundGrid !== false
           && gGround[a0] && gGround[a1] && gGround[b0] && gGround[b1]) {
           skippedGround++; continue;
+        }
+        /* 混合四边形（一部分角被归为地面、一部分不是）如果**跨得很深**，
+           会从地面一路拉到一个高处的顶点，摊成一片白蓝色的撕裂碎片
+           （赤岩峡谷截图里横贯画面的那排）。这类直接丢掉：缺口由地面方格网
+           与天穹填上，比留一片撕裂的贴图干净。 */
+        if (opt.groundGrid !== false) {
+          const gsum = gGround[a0] + gGround[a1] + gGround[b0] + gGround[b1];
+          if (gsum > 0 && gsum < 4) {
+            const tHi = Math.max(gT[a0], gT[a1], gT[b0], gT[b1]);
+            if (tHi > 22) { skippedTorn++; continue; }
+          }
         }
         idx.push(a0, b0, a1, a1, b0, b1);
       }
@@ -2063,7 +2144,7 @@
         kept: idx.length / 6, total: quadTotal,
         keepRate: (idx.length / 6) / quadTotal,
         culledAlpha, culledArea, skipped, skippedCard, skippedObjEdge, skippedSteep, skippedWall,
-        skippedGround,
+        skippedGround, skippedTorn,
         objectCards: instInfo.instances.length
       },
       /* 质检用：把顶点位置暴露出来（?dbgpos=1），tools/probe.mjs 可以据此
@@ -2292,6 +2373,7 @@
               areaX: opts && opts.areaX, areaZ: opts && opts.areaZ,
               gw: opts && opts.gw, gh: opts && opts.gh,
               yGain: opts && opts.yGain,
+              nearPlane: opts && opts.nearPlane,
               fgMask: opts && opts.fgMask,
               sem: opts && opts.sem,
               dbgPos: opts && opts.dbgPos,
@@ -2463,7 +2545,10 @@
         : { x0: -55, z0: -100, spanX: 110, spanZ: 100 },
       /* 程序化地面贴图的基色（线性）：tile 的顶点色是「目标色 / 基色」的增益 */
       groundBaseLin: lin3(analysis.ground),
-      lights: { sunDir, sunColor: sunL, ambient: ambientL, fogColor: fogL, fogDensity: 0.0040 },
+      /* v1.21.1：雾密度 0.0040 → 0.0026。0.004 在 150m 处就把台地糊掉一半，
+         用户对赤岩峡谷的评价是"雾气很浓厚"。晴天照片（天空亮、对比高）
+         再额外减半，见下面的 hazeFactor。 */
+      lights: { sunDir, sunColor: sunL, ambient: ambientL, fogColor: fogL, fogDensity: 0.0026 },
       meshes: m,
       // 扇环延伸生成的动态 tile（js/extend.js 往里塞，渲染器逐块绘制）
       extraMeshes: [],

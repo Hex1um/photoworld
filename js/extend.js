@@ -72,10 +72,15 @@
     const insideRect = (x, z) => (x >= -A && x <= A && z >= -B && z <= 0);
 
     /* 基础地貌的边界高度：把点钳到重建矩形内再取高度，作为延伸的起点 */
+    /* v1.21.1：边界高度**限幅**到 4m。
+       旧实现直接继承照片边界处的高度，而赤岩峡谷的边界正好压在台地顶上（~20m），
+       于是紧贴矩形的生成地形被抬到 20m，形成一圈"高墙"—— 从里面看就是
+       那条白蓝色的碎片带（隐藏 extraMeshes 可复现消失）。
+       限幅后生成地形从地面附近缓慢起坡，接不上台地就让雾去接。 */
     function edgeHeight(x, z) {
       const cx = clamp(x, -A + 0.01, A - 0.01);
       const cz = clamp(z, -B + 0.01, -0.01);
-      return baseHeight(cx, cz);
+      return Math.min(baseHeight(cx, cz), 4.0);
     }
 
     /* ---------------- 主题：扇区 × 纪元 ----------------
@@ -286,15 +291,16 @@
     /* 原型色 → 叠加在贴图上的三通道增益（线性空间）。
        增益的口径与 tile 顶点色一致：`贴图 × 增益 ≈ 目标色`。
        chaos=0 → 恒 1（照片地面色原样延伸）；chaos=1 → 整块变成该生物群系的颜色。 */
-    function tintOf(sector, epoch) {
+    function tintOf(sector, epoch, chaosMul) {
       const th = themeFor(sector, epoch);
       const base = (world.groundBaseLin && world.groundBaseLin.length === 3)
         ? world.groundBaseLin : [0.18, 0.18, 0.18];
       const suit = th.proto ? th.proto.tint : null;
+      const c = live.chaos * (chaosMul === undefined ? 1 : chaosMul);
       const out = [1, 1, 1];
       for (let q = 0; q < 3; q++) {
         const target = suit ? clamp(suit[q] / Math.max(1e-4, base[q]), 0.2, 6) : 1;
-        out[q] = lerp(1, target, live.chaos);
+        out[q] = lerp(1, target, c);
       }
       return out;
     }
@@ -333,7 +339,14 @@
             const ddx = Math.max(-A - x, 0, x - A);
             const ddz = Math.max(-B - z, 0, z - 0);
             const kFar = smoothstep(30, 150, Math.hypot(ddx, ddz));
-            const gin = live.enabled ? tintOf(sectorOf(x, z), epochOfSector(x, z)) : [1, 1, 1];
+            /* 混乱度按**到照片矩形的距离**渐变：贴着照片的地形用照片自己的配色
+               （否则会在照片远边之后突然出现一片冷蓝/冷绿的地形，读作"色块被抛弃"），
+               离开 15~90m 之后才逐渐变成该扇区的生物群系。 */
+            const ddx0 = Math.max(-A - x, 0, x - A);
+            const ddz0 = Math.max(-B - z, 0, z - 0);
+            const chaosMul = smoothstep(15, 90, Math.hypot(ddx0, ddz0));
+            const gin = live.enabled
+              ? tintOf(sectorOf(x, z), epochOfSector(x, z), chaosMul) : [1, 1, 1];
             for (let q = 0; q < 3; q++) {
               const gain = clamp(c[q] / base[q], 0.25, 6);
               const v = lerp(gain, 1, kFar * 0.75) * gin[q] * shade;
@@ -549,7 +562,18 @@
           const key = tileKey(tx, tz);
           if (tiles.has(key)) continue;
           const x0 = tx * TS, z0 = tz * TS, x1 = x0 + TS, z1 = z0 + TS;
-          if (x0 >= -A && x1 <= A && z0 >= -B && z1 <= 0) continue;   // 照片几何覆盖区
+          /* v1.21.1：**与照片矩形相交的 tile 一律不生成**，不再只跳过"完全在内部"的。
+             接壤那一圈 tile 会和照片几何抢地盘：它们按 edgeHeight 起坡，抬起来就
+             从照片表面上方 poke 出来，叠成一条白蓝色的撕裂碎片带
+             （`shots/layer6/hide_extraMeshes.png` 证明：把这些 tile 隐藏，碎片带立刻消失）。
+             照片矩形的地面由世界坐标方格网负责，这里让开正好。 */
+          /* 用户要求："将地貌生成起点靠后" —— 距离照片矩形 45m 以内不生成，
+             让照片自己的边缘（+雾）收尾，而不是紧接着长出一圈带棱的生成地形。
+             实测这圈生成地形就是赤岩峡谷那条白蓝色碎片带的来源。 */
+          const START_BACK = 45;
+          const dcx = Math.max(-A - (x0 + TS / 2), 0, (x0 + TS / 2) - A);
+          const dcz = Math.max(-B - (z0 + TS / 2), 0, (z0 + TS / 2) - 0);
+          if (Math.hypot(dcx, dcz) < START_BACK) continue;
           const wx = x0 + TS / 2, wz = z0 + TS / 2;
           const ft = fovTest(wx, wz, px, pz, fx, fz, lastFov, live.enabled ? 0.30 : Math.PI);
           const near = ft.dist <= TS * 1.6;

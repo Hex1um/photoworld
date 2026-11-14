@@ -28,6 +28,12 @@ const proc = spawn(EDGE, [
   '--headless=new',
   `--remote-debugging-port=${PORT}`,
   `--user-data-dir=${profile}`,
+  /* 关键：禁用 HTTP 缓存并起一个随机 profile。曾经因为 JS 按 ?v= 被缓存，
+     改了代码但截图完全不变，白跑了好几轮排查（看到"改了没用"其实没加载）。
+     这里三保险：新 profile、--disk-cache-size=0/--disable-application-cache、
+     以及调用方传 ?cb=。 */
+  '--disk-cache-dir=/dev/null', '--disk-cache-size=1',
+  '--disable-application-cache', '--disable-features=NetworkServiceInProcess',
   '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader',
   '--hide-scrollbars', '--no-first-run', '--no-default-browser-check',
   `--window-size=${W},${H}`,

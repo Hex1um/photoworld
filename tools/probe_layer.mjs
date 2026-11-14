@@ -65,13 +65,21 @@ const names = await ev(`JSON.stringify(Object.keys((window.__pw&&window.__pw.wor
 console.log('可用层：' + names);
 
 for (const layer of LAYERS) {
-  await ev(`(function(){var m=window.__pw.world.meshes; if(m) window.__pw.saved_${layer}=m.${layer}||null, m.${layer}=null; return 1})()`);
+  if (layer === 'extraMeshes') {
+    await ev(`(function(){window.__pw.savedExtra=window.__pw.world.extraMeshes||[]; window.__pw.world.extraMeshes=[]; return 1})()`);
+  } else {
+    await ev(`(function(){var m=window.__pw.world.meshes; if(m) window.__pw.saved_${layer}=m.${layer}||null, m.${layer}=null; return 1})()`);
+  }
   await sleep(700);
   const shot = await send('Page.captureScreenshot', { format: 'png' });
   const f = path.join(OUTDIR, `hide_${layer}.png`);
   fs.writeFileSync(f, Buffer.from(shot.data, 'base64'));
   console.log('  ' + f);
-  await ev(`(function(){var m=window.__pw.world.meshes; if(m) m.${layer}=window.__pw.saved_${layer}||null; return 1})()`);
+  if (layer === 'extraMeshes') {
+    await ev(`(function(){window.__pw.world.extraMeshes=window.__pw.savedExtra||[]; return 1})()`);
+  } else {
+    await ev(`(function(){var m=window.__pw.world.meshes; if(m) m.${layer}=window.__pw.saved_${layer}||null; return 1})()`);
+  }
   await sleep(300);
 }
 const shot = await send('Page.captureScreenshot', { format: 'png' });
