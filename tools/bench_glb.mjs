@@ -33,6 +33,7 @@ const H = parseInt(arg('h', '420'), 10);
 const OUT = arg('out', 'reports/bench_glb.json');
 const SHOTS = arg('shots', 'shots/bench');
 const WAIT = parseInt(arg('wait', '13000'), 10);
+const Q = (arg('q', '') || '').trim();   // 追加查询串，例如 --q "sem=0"
 
 fs.mkdirSync(SHOTS, { recursive: true });
 fs.mkdirSync(path.join(ROOT, 'corpus/bench'), { recursive: true });
@@ -171,13 +172,14 @@ const rec = await launch();
 const rows = [];
 try {
   // 1) 真值 A（作照片）
-  await open(truth, `${BASE}/?glb=${encodeURIComponent(GLB)}&instant=1`);
+  const qs = Q ? '&' + Q : '';
+  await open(truth, `${BASE}/?glb=${encodeURIComponent(GLB)}&instant=1${qs}`);
   const photoFile = path.join(ROOT, 'corpus/bench', name + '-a.jpg');
   const photoImg = await shot(truth, photoFile);
   console.log('照片（真值 A）已存：' + path.relative(ROOT, photoFile));
 
   // 2) 重建（用刚才那张照片）
-  await open(rec, `${BASE}/?img=${encodeURIComponent('corpus/bench/' + name + '-a.jpg')}&instant=1`);
+  await open(rec, `${BASE}/?img=${encodeURIComponent('corpus/bench/' + name + '-a.jpg')}&instant=1${qs}`);
   rows.push({ pose: 'A (输入视角)', truthFile: path.relative(ROOT, photoFile), recon: null });
   const recA = await shot(rec, path.join(SHOTS, `${name}_A_rec.jpg`));
   const tA = await shot(truth, path.join(SHOTS, `${name}_A_truth.jpg`));
