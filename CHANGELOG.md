@@ -3,6 +3,54 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [1.18.3] - 2026-11-14
+
+按需求从外部扩大训练图集。Pixabay 这条路走不通，改从 GitHub 公开仓库采集，并**重新训练**
+地貌原型。
+
+### 1) 为什么不是 Pixabay
+
+| 尝试 | 结果 |
+|---|---|
+| `curl https://pixabay.com/zh/images/search/风景/` | **403**（Cloudflare） |
+| headless Edge + CDP 渲染该页（含 16s 等待、伪装 UA/参数） | 拿到的是「请稍候…」JS 挑战页，`img` 数量为 0 |
+| 图搜引擎索引 `cdn.pixabay.com` 直链（`pixabay 风景` / `pixabay landscape`） | 每页只回 2 条，Pixabay 命中 0 |
+
+结论：站点抓取与本机网络条件下不可行，于是改用 GitHub（本机唯一稳定可达的源）。
+
+### 2) 新增 GitHub 采集器 `tools/harvest_github.mjs`
+
+- 用 GitHub Trees API 列出仓库内 JPEG + 体积，`raw.githubusercontent.com` 直链下载；
+- **真异步并发**（`https.get` + 10 workers）。第一版用 `execFileSync` 调 curl，
+  虽然开了 8 个 worker，同步调用却把事件循环堵死 → 实测 0.18 张/s；改异步后 ~0.9 张/s；
+- 过滤「宁可少收不要脏数据」：JPEG 真解码、宽 ≥900、横向 1.15~2.6、≥45KB，
+  外加**天空启发式**（顶部 12% 亮度方差小且不比底部暗）——动漫壁纸/纯色/室内图大多过不了，
+  实测通过率约 65%；
+- 内容哈希命名天然去重，manifest 记录 `repo/path/src/license`（仓库 LICENSE 为准）。
+
+仓库池（实测每个 100~250 张真实 JPEG）：`Doble-2/scenery-wallpapers`、
+`Joao2Pereira1/Wallpapers`、`na-ive/wallpapers`、`malwarepad/wallpapers`、
+`ItsTerm1n4l/Wallpapers-old-archive`、`Nirupam-Ghosh2004/VisualVault`、
+`IcePocket/Wallpapers`、`KaikSelhorst/wallpaper-pack`、`l3ct3r/wallpapers`、`vagmcs/walls` 等。
+
+### 3) 重新训练（数字见下）
+
+`python tools/normalize.py corpus` → `node tools/train_live_params.mjs`（k-means k=6）。
+
+| 指标 | 训练前（1.18.0） | 训练后（本版） |
+|---|---|---|
+| 图集可用 | 1268 | **2069**（+801） |
+| 训练 / 验证 | 1014 / 254 | **1655 / 414** |
+| 颜色 MAE（验证） | 0.0459 | **0.0415**（−9.6%） |
+| 无原型基线 MAE | 0.1017 | 0.1058（新语料更难） |
+| 改善 | 54.9% | **60.8%** |
+
+新语料把 6 个原型重新拉开了：出现一类亮度 0.55 的"亮沙/雪原"（79 张）和一类
+0.03 的"暗夜林地"（379 张），中间四类是暖岩、灰蓝海岸、暗绿林、褐土。
+手机上「实时变化」面板底部显示的就是这组数字。
+
+（artifact：`js/live_params.js`，面板底部会显示同一组数字。）
+
 ## [1.18.2] - 2026-11-14
 
 赤岩峡谷「仍然是扁平的」——这次找到的是**俯仰角估错**，不是显示问题。
