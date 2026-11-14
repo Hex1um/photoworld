@@ -355,15 +355,28 @@ def build_mesh(depth_m: np.ndarray, cam: Camera, edge_ratio: float = 2.4,
     uv[..., 1] = ((np.arange(hh) * step + 0.5) / cam.h)[:, None]
 
     # 法线：用邻居差分（不跨界）
+    # T8（v1.22）：**边界用单侧差分**。原来左右/上下第一列保持全 0，
+    # cross(0, 0) = 0 → 归一化后是零法线，glTF 里这类顶点会导致黑边/抖动。
     dzdx = np.zeros_like(P)
     dzdx[:, 1:-1] = P[:, 2:] - P[:, :-2]
+    dzdx[:, 0] = P[:, 1] - P[:, 0]
+    dzdx[:, -1] = P[:, -1] - P[:, -2]
     dzdy = np.zeros_like(P)
     dzdy[1:-1] = P[2:] - P[:-2]
+    dzdy[0] = P[1] - P[0]
+    dzdy[-1] = P[-1] - P[-2]
     n = np.cross(dzdx, dzdy)
     ln = np.linalg.norm(n, axis=-1, keepdims=True)
+    # 退化面（三点共线）保底：给一个朝向相机的常量法线，别留零向量
+    bad = (ln[..., 0] < 1e-8)
+    if bad.any():
+        n[bad] = np.array([0.0, 0.0, 1.0], dtype=n.dtype)
+        ln = np.linalg.norm(n, axis=-1, keepdims=True)
     n = n / np.maximum(ln, 1e-8)
     # 朝向相机
-    flip = np.sum(n * P, axis=-1) > 0
+    # T8：阈值从 0 抬到 1e-4 —— 近似切向的面（n·P≈0）会在两个符号之间抖动，
+    # 相邻顶点一翻一不翻就出现"法线闪烁"。留一条死区。
+    flip = np.sum(n * P, axis=-1) > 1e-4
     n[flip] *= -1.0
 
     # --- 断崖判定：结构张量（见《传统视觉与深度学习视觉的数学基础》ch.07）---

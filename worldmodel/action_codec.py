@@ -93,6 +93,24 @@ def rel_action(T0: np.ndarray, T1: np.ndarray, fov0: float, fov1: float,
     ]).astype(np.float32)
 
 
+def apply_action_scale(vec, action_scale):
+    """T6（v1.22）：把 dataset 侧的 action_scale 施加到 7 维动作上（逐维同序）。
+
+    抽成纯 numpy 函数的目的：让"训推幅度一致"这条能在**没有 torch** 的环境里被
+    回归测试钉住（旧实现这段逻辑只存在于 rollout 里，测试一缺 torch 就整段跳过）。
+    """
+    import numpy as np
+    v = np.asarray(vec, dtype=np.float32)
+    if action_scale is None:
+        return v
+    sc = np.asarray(action_scale, dtype=np.float32).reshape(-1)
+    if sc.size == 1:
+        return v * float(sc[0])
+    if sc.size != v.size:
+        raise ValueError("action_scale 必须是标量或长度 %d 的向量" % v.size)
+    return v * sc
+
+
 def dsl_action(name: str, *, speed: float = DEFAULT_SPEED,
                move_step: float = DEFAULT_MOVE, yaw_step: float = DEFAULT_YAW,
                pitch_step: float = DEFAULT_PITCH,

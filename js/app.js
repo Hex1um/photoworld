@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '1.24.0';
+  const VERSION = '1.24.1';
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -1136,6 +1136,11 @@
        一张张喂进同一条在线链路，不经过画廊/上传。只接受同源相对路径，
        远程地址会被画布污染（getImageData 抛错），且无 CORS 头时本来也读不到像素。 */
     const imgUrl = q.get('img');
+    /* G4（v1.24.1）：这里要记录**流程是否真的启动了**，而不是"参数在不在"。
+       旧写法下面用 `!imgUrl` 判断是否进 `?w=` 分支，于是 `?img=%ZZ&w=alpine`
+       （畸形编码被忽略、什么都没启动）会把 `?w=alpine` 一并挡掉 —— 页面空白。
+       现在只有真的 schedule 了 enterWorld 才算占用。 */
+    let imgStarted = false;
     if (imgUrl && !glbUrl) {
       // ?img=%ZZ 这类畸形编码会让 decodeURIComponent 抛 URIError 并中断 boot()
       // （__pw 不赋值、?w= 分支不执行）。降级为忽略该参数，保住其余启动流程。
@@ -1145,6 +1150,7 @@
       const sameOrigin = !!src && src.indexOf('//') < 0 && src.indexOf('data:') !== 0;
       if (sameOrigin) {
         const nm = q.get('name') || src.split('/').pop().replace(/\.[a-z0-9]+$/i, '');
+        imgStarted = true;
         setTimeout(() => enterWorld({ id: 'corpus:' + nm, name: nm, sub: '语料 · 批量质检', src: src }), 120);
       } else if (src) {
         console.warn('?img= 只接受同源相对路径，已忽略：' + src);
@@ -1153,7 +1159,7 @@
     // 一条 URL 只启动一个 enter 流程：旧代码 ?glb=&w= / ?img=&w= 会各自
     // setTimeout 并交叠创建 world/player 与 rAF 链，先建的 GL 资源直接泄漏。
     const wid = q.get('w');
-    if (wid && !glbUrl && !imgUrl) {
+    if (wid && !glbUrl && !imgStarted) {
       const def = WORLDS.find((w) => w.id === wid);
       if (def) setTimeout(() => enterWorld(def), 120);
     }

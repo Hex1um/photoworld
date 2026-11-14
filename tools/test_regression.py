@@ -161,10 +161,61 @@ def test_metric_depth() -> None:
           % (far, old_top * 100, new_top * 100, cal["z_near"]))
 
 
+def test_action_scale() -> None:
+    """T6（v1.22）：推理侧 parse_actions 必须按训练侧的 action_scale 缩放。"""
+    from worldmodel.action_codec import apply_action_scale, dsl_action
+    import numpy as np
+    base = np.asarray(dsl_action("forward"), dtype=np.float32)
+    assert base.size == 7, "dsl_action 维度不是 7（%d）" % base.size
+    s2 = apply_action_scale(base, 2.5)
+    assert np.allclose(s2, base * 2.5, atol=1e-6), "标量 action_scale 未生效"
+    v2 = apply_action_scale(base, [1, 2, 3, 4, 5, 6, 7])
+    assert np.allclose(v2, base * np.arange(1, 8), atol=1e-6), "7 维 action_scale 未逐维生效"
+    assert np.allclose(apply_action_scale(base, None), base), "action_scale=None 不应改动"
+    try:
+        apply_action_scale(base, [1, 2, 3])
+        raise AssertionError("长度不匹配的 action_scale 应当报错")
+    except ValueError:
+        pass
+    print("PASS  T6  action_scale：标量/7 维逐维相乘、None 不动、长度不符报错（纯 numpy，无需 torch）")
+
+
+def test_ckpt_mark() -> None:
+    """G3（v1.22）：旧 checkpoint 必须被判出来（不静默使用）。"""
+    from worldmodel.ckpt_meta import checkpoint_warning
+    assert checkpoint_warning({"data": {}}) is not None, "缺标记却没有警告"
+    assert checkpoint_warning({"data": {"dit_slice_fix": True}}) is None, "新档被误报"
+    msg = checkpoint_warning({"data": {"dit_slice_fix": False}}) or ""
+    assert "dit_slice_fix" in msg, "警告里没有指出缺失的键"
+    print("PASS  G3  旧 checkpoint 判定：缺标记/False → 警告，True → 放行")
+
+
+def test_normals() -> None:
+    """T8（v1.22）：GLB 顶点法线必须都是单位向量，边界也必须有法线。"""
+    import numpy as np
+    h, w = 48, 64
+    hfov = math.radians(62.0)
+    cam = geom.Camera(hfov, exif.vfov_of(hfov, w, h), w, h)
+    z = np.full((h, w), 12.0, np.float32)
+    z[int(h * 0.6):] = 6.0
+    mesh = geom.build_mesh(z, cam)
+    nrm = mesh["nrm"] if "nrm" in mesh else mesh.get("normal")
+    assert nrm is not None, "build_mesh 没有返回法线"
+    ln = np.linalg.norm(np.asarray(nrm), axis=1)
+    assert ln.size and abs(float(np.median(ln)) - 1.0) < 0.01, \
+        "法线非单位长度（中位 %.3f）" % float(np.median(ln))
+    assert float(ln.min()) > 0.99, "存在零/退化法线（min %.3f）" % float(ln.min())
+    print("PASS  T8  法线：单位长度中位 %.3f / 最小 %.3f（边界已用单侧差分）"
+          % (float(np.median(ln)), float(ln.min())))
+
+
 if __name__ == "__main__":
     test_dataset()
     test_eval_gates()
     test_metric_depth()
+    test_action_scale()
+    test_ckpt_mark()
+    test_normals()
     sys.path.insert(0, os.path.join(ROOT, "tools"))
     import test_regression_p2  # noqa: E402
     test_regression_p2.main()

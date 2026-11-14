@@ -3,6 +3,56 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [1.24.1] - 2026-11-14  · 审查方案的三个补丁（G3/G4/T6/T8 + 口径文档）
+
+上一轮做掉了 T1/T2/T3/T4/T5/T7/T10。这一轮补审查方案点出的漏项，并把"为什么没一次做完"记清楚。
+
+### G4 畸形 `?img` 会挡掉 `?w=`（回归）
+
+- **症状**：`?img=%ZZ&w=alpine` 页面空白 —— 畸形编码被忽略、什么都没启动，但
+  `if (wid && !glbUrl && !imgUrl)` 仍把 `?w=` 分支挡掉。
+- **修法**：改用"流程是否真的启动了"（`imgStarted`），不再看参数在不在。
+- **验收**：`?img=%ZZ&w=alpine` 现在 `ready=1 / hasWorld=true`，只留一条 warning。
+
+### G3 旧 checkpoint 静默错位
+
+- DiT 输出切片修复（v1.21.x）改变了隐变量拆法，之前训的档续训/评测会"能跑但不对"。
+- 新增 `worldmodel/ckpt_meta.py::checkpoint_warning()`（**无 torch 依赖**，便于回归），
+  `rollout._load()` 命中旧档时发 `RuntimeWarning`；新档在 `cfg.data.dit_slice_fix: true` 放行。
+- **验收**：`test_regression.py::test_ckpt_mark` —— 缺标记/False 警告、True 放行。
+
+### T6 action_scale 训推不闭环
+
+- 训练侧 `dataset.py` 会对 `rel_action` 再乘一次 `action_scale`（标量或 7 维），
+  推理侧 `parse_actions` 完全没乘 —— 幅度差 2.1~30×。
+- 缩放逻辑抽到 `action_codec.apply_action_scale()`（纯 numpy），`parse_actions` 调它；
+  另提供 `action_scale_of(ckpt)` 从 cfg 读取。
+- **验收**：`test_regression.py::test_action_scale` —— 标量/7 维逐维相乘、`None` 不动、
+  长度不符报错。**这条以前因为缺 torch 被整段跳过，现在无依赖也能验。**
+
+### T8 法线：边界零法线 + 翻转抖动 + 远景单面
+
+- 边界两列/两行原来是全 0 差分 → `cross(0,0)=0` → 归一化后是零法线（黑边/抖动）。
+  改成**单侧差分**，退化面补一个朝向相机的常量法线。
+- 朝向判据 `n·P > 0` 抬到 `> 1e-4`：近似切向的面会在符号间抖动，相邻顶点一翻一不翻就闪。
+- GLB 材质：存在 backdrop/far/bg 层时 `doubleSided: true`，主体层保持单面。
+- **验收**：`test_regression.py::test_normals` —— 法线单位长度中位 1.000 / 最小 1.000。
+
+### P1-1「js/pipeline 同一闭式」：试了，不能一步到位（重要）
+
+- 我按审查建议先把 js 的 `220·tanh(t/220)` 换成 `metric()`，并同步把角度改切向、
+  远锚改按视差选、`p` clamp 对齐。结果 **alpine 的山体整片消失**（只剩一条地平线和湖面）：
+  远场 t 涨到 1800m 后，`tMax/tMin > edgeRatio(1.6)` 把绝大多数四边形判成断崖丢掉。
+- 单改远锚（不换 tanh）也不行：`allVals` 的 5 分位落在天空上 → p 被顶到 3.0，标定退化成一条硬平面。
+- **结论**：js 侧要对齐，必须**连同标定算法一起移植**（把两锚点解 p 换成地面带三参数拟合），
+  这是独立任务，不能当参数调整做。已回退到可用状态，事实写进 `docs/geometry_spec.md` §5。
+- **验收口径修正**：js/pipeline 一致性比的是 **`metric()` 的值**，不是绘制用的 `t_draw`。
+
+### 新增 `docs/geometry_spec.md`
+
+标定 / 角度 / 远场压缩 / 验收阈值的**唯一口径**，含"哪些写法被实测证伪"。
+审查方案里"先出 spec 再动手"的要求，落在这份文件上。
+
 ## [1.24.0] - 2026-11-14  · 离线管线 v1.22（静态审查 T1/T2/T3/T4/T5/T7/T10）
 
 管线侧的三个 P0 都**用数值验证钉住**，不是改注释。复跑命令见每节末尾。

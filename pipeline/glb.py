@@ -70,6 +70,11 @@ def write_glb(path: str, layers: list, texture_jpeg: bytes, name: str = "world")
         total_verts += int(pos.shape[0])
         total_tris += int(index.size // 3)
 
+    # T8：只要存在"远景/背景"层（名字里带 backdrop/far/bg），就把材质标成双面。
+    layers_double_sided = any(
+        any(k in str(lay.get("name", "")).lower() for k in ("backdrop", "far", "bg"))
+        for lay in layers)
+
     v_img = add_view(texture_jpeg)
 
     gltf = {
@@ -78,11 +83,13 @@ def write_glb(path: str, layers: list, texture_jpeg: bytes, name: str = "world")
         "scenes": [{"nodes": list(range(len(nodes))), "name": name}],
         "nodes": nodes,
         "meshes": meshes,
+        # T8：远景/背景层必须双面，否则从侧面或背面看会整片消失
+        #   （视锥外延拓 + 自由视角一转身就露洞）。主体层保持单面。
         "materials": [{
             "name": "photo",
             "pbrMetallicRoughness": {"baseColorTexture": {"index": 0},
                                      "metallicFactor": 0.0, "roughnessFactor": 0.95},
-            "doubleSided": False,
+            "doubleSided": bool(layers_double_sided),
         }],
         "textures": [{"sampler": 0, "source": 0}],
         "samplers": [{"magFilter": 9729, "minFilter": 9987, "wrapS": 33071, "wrapT": 33071}],

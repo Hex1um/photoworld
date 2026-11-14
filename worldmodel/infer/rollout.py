@@ -14,7 +14,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from worldmodel.action_codec import dsl_action, parse_spec
+from worldmodel.action_codec import apply_action_scale, dsl_action, parse_spec
+from worldmodel.ckpt_meta import checkpoint_warning
 from worldmodel.model.dit import DiTConfig
 from worldmodel.train.trainer import make_model
 from worldmodel.model.tokenizer import Tokenizer
@@ -25,7 +26,8 @@ DSL_ACTIONS = ("forward", "back", "turn_left", "turn_right",
 
 
 def parse_actions(spec, *, speed=None, move_step=None,
-                  yaw_step=None, pitch_step=None, fov=None) -> list[torch.Tensor]:
+                  yaw_step=None, pitch_step=None, fov=None,
+                  action_scale=None) -> list[torch.Tensor]:
     """['forward 20', 'turn_left 15'] → 每帧一个 **7 维**动作张量。
 
     动作由 `worldmodel.action_codec.dsl_action` 生成，与训练标签共用同一个
@@ -40,16 +42,21 @@ def parse_actions(spec, *, speed=None, move_step=None,
                      ("fov", fov)):
         if val is not None:
             kw[key] = float(val)
+    # T6（v1.22）：**训练侧的 action_scale 必须在推理侧同样乘一次**。
+    #   训练时 dataset.py 会对 rel_action 再乘一次 action_scale（标量或 7 维向量），
+    #   而推理侧旧实现在这里直接返回未缩放的 dsl_action —— 幅度差 2.1~30×，
+    #   等于让模型看"几乎不动的动作"，rollout 自然学不到位移。
     out = []
     for name, n in parse_spec(spec):
-        a = torch.from_numpy(np.asarray(dsl_action(name, **kw), dtype=np.float32))
+        # 逐维同序相乘（与 dataset 侧一致），逻辑在 action_codec 里以便无 torch 也能测
+        v = apply_action_scale(dsl_action(name, **kw), action_scale)
+        a = torch.from_numpy(v.astype(np.float32, copy=False))
         for _ in range(n):
             out.append(a.clone())
     return out
 
 
 _CACHE = {}
-
 
 def _load(ckpt_path: str, device: str, use_ema: bool):
     """按 checkpoint 记忆模型与 VAE：评测要跑十几次 rollout，每次重载要白等 15s。"""
@@ -58,6 +65,13 @@ def _load(ckpt_path: str, device: str, use_ema: bool):
         return _CACHE[key]
     ck = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg = ck["cfg"]
+    # G3（v1.22）：DiT 输出切片修复之前的旧 checkpoint 与现在的隐变量切法不一致，
+    #   拿它续训/评测会**静默错位**（不报错，只是画面对不上）。
+    #   这里给出显式警告，并且允许用 cfg 里的标记覆盖（新档写 sliced=True）。
+    msg = checkpoint_warning(cfg)
+    if msg:
+        import warnings
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
     model = make_model(cfg, device)
     sd = ck["ema"] if use_ema and "ema" in ck else ck["model"]
     model.load_state_dict({k: v.to(model.state_dict()[k].dtype) for k, v in sd.items()})
@@ -68,6 +82,15 @@ def _load(ckpt_path: str, device: str, use_ema: bool):
 
 
 @torch.no_grad()
+def action_scale_of(ckpt_path: str, device: str = "cpu") -> float | list | None:
+    """读出 checkpoint 训练时用的 action_scale（T6）。没有就返回 None。"""
+    try:
+        _, _, cfg = _load(ckpt_path, device, True)
+    except Exception:
+        return None
+    return cfg.get("data", {}).get("action_scale")
+
+
 def rollout(image: torch.Tensor, actions: list[torch.Tensor], ckpt_path: str,
             steps: int = 8, cfg_scale: float = 4.0, device: str = "cuda",
             use_ema: bool = True, hist_frames: int = 4):
