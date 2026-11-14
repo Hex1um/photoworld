@@ -641,3 +641,7 @@ button.primary:hover { background: #f0e2c0; }
 }
 
 .live-meta { margin-top: 6px; color: var(--dim); font-family: var(--mono); font-size: 10px; }
+
+.live-switch { grid-template-columns: 34px 20px 1fr; }
+.live-switch input[type="checkbox"] { width: 16px; height: 16px; accent-color: #e0cfa9; }
+.live-switch em { text-align: left; color: var(--dim-2); }

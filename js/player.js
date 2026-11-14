@@ -7,8 +7,10 @@
   function createPlayer(canvas, world) {
     const EYE = (world && world.eyeHeight) || 1.68;
     // walkRadius === 0 表示不限制（深度重建模式）；undefined 才用默认值
-    const MAX_R = (world && world.walkRadius === 0) ? 0
-      : ((world && world.walkRadius) || 116);
+    /* v1.19：不再有任何移动半径夹紧。以前 fallback（无深度模型）路径是
+       walkRadius=116 —— 走出去 116m 就被按回原点，正是用户说的「r≈120 空气墙」。
+       现在所有模式都不限制：脚下用解析高度场，四周用实时生成。 */
+    const MAX_R = 0;
 
     const state = {
       x: 0, z: 0, y: EYE,

@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '1.18.3';
+  const VERSION = '1.19.0';
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -350,7 +350,7 @@
       // 曝光预热只保留一份：这里曾有两份逐字相同的 10 次循环，
       // 第二份在第一份已收敛后又白跑最多 10 帧全屏渲染（首屏进入白白变慢）。
       el('hudName').textContent = def.name;
-      el('hudSub').textContent = (def.sub || 'photoworld');
+      el('hudSub').textContent = (def.sub || 'photoworld') + ' · v' + VERSION;
       el('keysHint').classList.remove('fade');
       setTimeout(() => el('keysHint').classList.add('fade'), 5200);
 
@@ -937,7 +937,10 @@
   const LIVE_KEY = 'pw.live';
 
   function loadLiveState() {
-    let st = { on: false, chaos: 0.35, memory: 0.70 };
+    /* v1.19：默认开启。以前默认关着，扇环外只有一套全局 fBm —— 转身看到的是
+       同一套地貌，用户读作「重复生成」。现在默认按扇区主题生成（混乱度 0.45），
+       按钮只是用来关掉/调参，而不是「开启才生成」。 */
+    let st = { on: true, chaos: 0.45, memory: 0.85 };
     try {
       const saved = JSON.parse(window.localStorage.getItem(LIVE_KEY) || 'null');
       if (saved && typeof saved === 'object') {
@@ -953,23 +956,29 @@
     return st;
   }
 
-  let liveState = { on: false, chaos: 0.35, memory: 0.70 };
+  let liveState = { on: true, chaos: 0.45, memory: 0.85 };
 
   function saveLiveState() {
     try { window.localStorage.setItem(LIVE_KEY, JSON.stringify(liveState)); } catch (e) { /* ignore */ }
   }
+
+  /* 面板是否展开与「实时生成是否开启」分开：默认生成开着、面板收起。
+     否则竖屏上一进世界就被面板挡住半个屏幕（实测 480×1040 挡掉 40%）。 */
+  let livePanelOpen = false;
 
   /* 把状态同步到 extender / DOM / body.dataset（测试用） */
   function applyLiveState(push) {
     const ext = world && world.extender;
     if (push && ext && ext.setLive) ext.setLive(liveState);
     const btn = el('btnLive');
-    if (btn) btn.classList.toggle('on', liveState.on);
+    if (btn) btn.classList.toggle('on', livePanelOpen);
     const panel = el('livePanel');
-    if (panel) panel.classList.toggle('hidden', !liveState.on);
+    if (panel) panel.classList.toggle('hidden', !livePanelOpen);
     const cEl = el('liveChaos'), mEl = el('liveMemory');
     if (cEl) cEl.value = String(liveState.chaos);
     if (mEl) mEl.value = String(liveState.memory);
+    const onOff = el('liveOn');
+    if (onOff) onOff.checked = !!liveState.on;
     const cv = el('liveChaosVal'), mv = el('liveMemoryVal');
     if (cv) cv.textContent = liveState.chaos.toFixed(2);
     if (mv) mv.textContent = liveState.memory.toFixed(2);
@@ -985,7 +994,8 @@
     if (btn) {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        liveState.on = !liveState.on;
+        livePanelOpen = !livePanelOpen;
+        if (livePanelOpen && !liveState.on) liveState.on = true;   // 打开面板视为启用
         saveLiveState();
         applyLiveState(true);
       });
@@ -993,10 +1003,17 @@
     const close = el('btnLiveClose');
     if (close) close.addEventListener('click', (e) => {
       e.stopPropagation();
-      liveState.on = false;
-      saveLiveState();
-      applyLiveState(true);
+      livePanelOpen = false;      // 只收面板，不关生成
+      applyLiveState(false);
     });
+    const onOff = el('liveOn');
+    if (onOff) {
+      onOff.addEventListener('change', () => {
+        liveState.on = !!onOff.checked;
+        saveLiveState();
+        applyLiveState(true);
+      });
+    }
     const bind = (id, key) => {
       const input = el(id);
       if (!input) return;

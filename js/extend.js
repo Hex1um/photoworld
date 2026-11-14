@@ -60,7 +60,10 @@
     const RES = opts.res || 17;            // 每边顶点数（16 段）
     const RADIUS = opts.radius || 5;       // 关闭实时模式时以玩家为中心的固定半径
     const SERVER = (opts.server || '').replace(/\/$/, '');
-    const MAX_TILES = opts.maxTiles || (2 * RADIUS + 3) * (2 * RADIUS + 3) + 120;
+    /* 上限按「12 格扫描里视锥那一片」估：25×25 的 40% 约 250 块，再留余量。
+       旧的 289 在扫描半径拉到 12 之后会被顶满，导致刚生成的块被立刻回收
+       （表现为走两步地形就"塌"一层）。 */
+    const MAX_TILES = opts.maxTiles || 560;
 
     const bb = world.bbox || { A: 55, B: 100 };
     const A = bb.A, B = bb.B;
@@ -240,9 +243,14 @@
           pos[k * 3] = x; pos[k * 3 + 1] = -0.05; pos[k * 3 + 2] = z;
           nrm[k * 3 + 1] = 1;
           uv[k * 2] = x / 4.5; uv[k * 2 + 1] = z / 4.5;
+          /* 颜色来源优先级：照片底行剖面（最贴边）→ 地面色场 → 单色。
+             底行剖面随世界 x 变化、与照片最下方像素同源，因此补片和照片底边之间
+             不会再有那条横向色差接缝。 */
+          let c = null;
+          if (world.bottomRowColor) c = world.bottomRowColor(x);
+          else if (colorAt) c = colorAt(x, z);
           let r = 1, g = 1, b = 1;
-          if (colorAt) {
-            const c = colorAt(x, z);
+          if (c) {
             for (let q = 0; q < 3; q++) {
               const gain = clamp(c[q] / base[q], 0.25, 6);
               if (q === 0) r = gain; else if (q === 1) g = gain; else b = gain;
@@ -454,9 +462,9 @@
       rec.steepTris = parts.steepTris;
       pending--;
       if (!world.extraMeshes) world.extraMeshes = [];
-      world.extraMeshes.push({ key, mesh: parts.flat, tex: world.tex.ground, fog: 0.34, mode: 4 });
+      world.extraMeshes.push({ key, mesh: parts.flat, tex: world.tex.ground, fog: 0.22, mode: 4 });
       if (parts.steep) {
-        world.extraMeshes.push({ key: key + ':steep', mesh: parts.steep, tex: null, fog: 0.30, mode: 1 });
+        world.extraMeshes.push({ key: key + ':steep', mesh: parts.steep, tex: null, fog: 0.20, mode: 1 });
       }
       // 上限按 tile 数算（一个 tile 最多两条 draw）
       const tileCount = Math.ceil(world.extraMeshes.length / 2);
@@ -529,7 +537,10 @@
 
       const fx = -Math.sin(lastYaw), fz = -Math.cos(lastYaw);
       const cx = Math.round(px / TS), cz = Math.round(pz / TS);
-      const scan = live.enabled ? Math.max(RADIUS, 9) : RADIUS;
+      /* 视野内要生成到雾的尽头：12 格 = 384m。以前的 9 格在雾还没吃掉之前就断供，
+         正前方会出现一条「突然没有地形」的边界，走起来像空气墙。
+         非实时模式也放宽到 8 格（256m）。 */
+      const scan = live.enabled ? Math.max(RADIUS, 12) : Math.max(RADIUS, 8);
 
       const cand = [];
       for (let dz = -scan; dz <= scan; dz++) {

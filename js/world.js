@@ -1463,6 +1463,54 @@
       }
       ccnt[ci] = 1;
     }
+    /* 照片底行颜色剖面（v1.19）：竖屏时相机竖直视场比照片大，照片底边以下那条
+       地面只能由近景补片兜底。补片原来用 groundColorAt（整图下半带平均），
+       与照片底行颜色差一截 → 有一条看得见的横向接缝。
+       这里把照片**最底下几行**的颜色按列烘成一条 1D 剖面，补片按 x 取色。 */
+    const EDGE_N = 48;
+    const edgeCol = new Float32Array(EDGE_N * 3);
+    {
+      let rpix = null;
+      try { rpix = analysis.canvas.getContext('2d').getImageData(0, 0, analysis.W, analysis.H).data; } catch (e) { rpix = null; }
+      const rows = Math.max(1, Math.round(analysis.H * 0.02));
+      for (let i = 0; i < EDGE_N; i++) {
+        let r = 0, g = 0, b = 0, n = 0;
+        const x0 = Math.floor((i / EDGE_N) * analysis.W);
+        const x1 = Math.max(x0 + 1, Math.floor(((i + 1) / EDGE_N) * analysis.W));
+        for (let y = analysis.H - rows; y < analysis.H; y++) {
+          for (let x = x0; x < x1; x++) {
+            if (rpix) {
+              const q = (y * analysis.W + x) * 4;
+              r += lin(rpix[q] / 255); g += lin(rpix[q + 1] / 255); b += lin(rpix[q + 2] / 255);
+            } else {
+              r += lin(analysis.ground[0]); g += lin(analysis.ground[1]); b += lin(analysis.ground[2]);
+            }
+            n++;
+          }
+        }
+        n = Math.max(1, n);
+        edgeCol[i * 3] = r / n; edgeCol[i * 3 + 1] = g / n; edgeCol[i * 3 + 2] = b / n;
+      }
+      // 横向 1 次平滑，避免列与列之间的硬跳变
+      const cp = edgeCol.slice();
+      for (let i = 0; i < EDGE_N; i++) {
+        for (let c = 0; c < 3; c++) {
+          const l = cp[Math.max(0, i - 1) * 3 + c], m2 = cp[i * 3 + c], r2 = cp[Math.min(EDGE_N - 1, i + 1) * 3 + c];
+          edgeCol[i * 3 + c] = (l + 2 * m2 + r2) / 4;
+        }
+      }
+    }
+    /* 按世界 x 取照片底行颜色（-A..A 映射到整幅宽度） */
+    function bottomRowColor(x) {
+      const t = clamp((x + A) / (2 * A), 0, 1) * (EDGE_N - 1);
+      const i0 = Math.floor(t), i1 = Math.min(EDGE_N - 1, i0 + 1), f = t - i0;
+      return [
+        lerp(edgeCol[i0 * 3], edgeCol[i1 * 3], f),
+        lerp(edgeCol[i0 * 3 + 1], edgeCol[i1 * 3 + 1], f),
+        lerp(edgeCol[i0 * 3 + 2], edgeCol[i1 * 3 + 2], f)
+      ];
+    }
+
     /* 采样：双线性 + 钳到重建矩形内（矩形外就是边界值，正是延伸的起点）。 */
     function groundColorAt(x, z) {
       const fx = clamp((x + A) / (2 * A), 0, 1) * (CGW - 1);
@@ -1793,6 +1841,8 @@
       instances: instInfo.instances,
       /* 照片地面颜色场（线性 RGB）采样器：js/extend.js 给扇环外 tile 上色用 */
       groundColorAt,
+      /* 照片最底几行的按列颜色：竖屏近景补片用它接上照片底边，消掉横向接缝 */
+      bottomRowColor,
       semGroups: sem ? sem.groups : null,
       semSize: sem ? [sem.width, sem.height] : null,
       /* 信息保留率诊断：哪一步丢了多少面，直接决定「图片丢信息」的排查方向 */
@@ -2118,8 +2168,9 @@
     const worldInfo = {
       mode: relief ? 'depth' : 'legacy',
       eyeHeight: 1.7,
-      // v1.14：深度重建不再限制移动半径（0 = 不限制），边界交给几何与雾
-      walkRadius: relief ? 0 : 116,
+      // v1.19：所有模式都不限制移动（0 = 不限制）。旧 fallback 的 116m 半径
+      // 就是用户遇到的「空气墙」。
+      walkRadius: 0,
       /* v1.17：重建表面是单层薄壳，从背面看就是糊成一片的拉花。
          默认关闭背面（?cull=0 保留旧双面），转到侧后方时看到的是
          360° 低频世界幕 + 雾，而不是「纸片背面」。 */
