@@ -15,6 +15,8 @@
 
   const DEFAULTS = {
     analyzeW: 420,
+    // 显示用照片贴图的最长边上限（0 = 退回 420px 分析画布，供 A/B 用）
+    displayMaxEdge: 2048,
     skyRows: 0.035,
     // 以下阈值由 503 张网图批量评测得出（tools/eval.mjs，score 0.704 vs 0.645）
     colorThresh: 0.050,
@@ -307,6 +309,26 @@
   }
 
   /* ---------------- 浏览器入口 ---------------- */
+  /* 分析画布只有 420px 宽（逐像素统计，成本随分辨率平方增长），但过去它同时
+     被拿去当主照片贴图：2520px 的原图在入口就被压掉 6×，高频细节永久丢失，
+     渲染端再怎么调 DPR / mipBias 都救不回来。这里单独建一张显示用画布：
+     photoCanvas 只供贴图，canvas 继续供语义/天空/地面颜色统计，
+     UV 同为全幅 0..1，几何与既有参数一律不动。 */
+  function makeDisplayCanvas(img, maxEdge) {
+    const iw = img.naturalWidth || img.width;
+    const ih = img.naturalHeight || img.height;
+    if (!(iw > 0 && ih > 0)) return null;
+    const scale = Math.min(1, maxEdge / Math.max(iw, ih));
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(iw * scale));
+    cv.height = Math.max(1, Math.round(ih * scale));
+    const ctx = cv.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, cv.width, cv.height);
+    return cv;
+  }
+
   function analyze(img, name, options) {
     const W = (options && options.analyzeW) || DEFAULTS.analyzeW;
     const H = Math.max(120, Math.round(W * img.height / img.width));
@@ -323,6 +345,14 @@
     const a = analyzePixels(data, W, H, name, options);
     a.canvas = cv;
     a.pixels = { data, W, H };
+    const maxEdge = (options && options.displayMaxEdge !== undefined)
+      ? options.displayMaxEdge : DEFAULTS.displayMaxEdge;
+    if (maxEdge > 0) {
+      try { a.photoCanvas = makeDisplayCanvas(img, maxEdge) || cv; }
+      catch (e) { a.photoCanvas = cv; }   // 画布失败不能拖垮整条重建链路
+    } else {
+      a.photoCanvas = cv;
+    }
     return a;
   }
 

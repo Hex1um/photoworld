@@ -6,6 +6,7 @@
  *   node tools/mv_report.mjs reports/all32.json --top 8 --ring C
  */
 import fs from 'node:fs';
+import { CLARITY_KEYS } from './clarity.mjs';
 
 const argv = process.argv.slice(2);
 const file = argv[0] || 'reports/all32.json';
@@ -17,14 +18,14 @@ const d = JSON.parse(fs.readFileSync(file, 'utf8'));
 const ok = (d.results || []).filter((r) => r.ok);
 const mean = (a) => a.length ? a.reduce((s, v) => s + v, 0) / a.length : 0;
 
-const keys = ['voidFrac', 'innerVoid', 'lowVoid', 'borderVoid', 'darkFrac', 'stripe', 'detail'];
+const keys = ['voidFrac', 'innerVoid', 'lowVoid', 'borderVoid', 'darkFrac', 'stripe', 'detail', ...CLARITY_KEYS];
 const rings = [...new Set(ok.flatMap((r) => r.views.map((v) => v.ring || 'A')))].sort();
 
 console.log(`样本 ${ok.length} 张 · 每张 ${ok[0] ? ok[0].views.length : 0} 视角 · 圈 ${rings.join('/')}`);
-console.log('圈   ' + keys.map((k) => k.padEnd(11)).join(''));
+console.log('圈   ' + keys.map((k) => k.padEnd(16)).join(''));
 for (const ring of rings) {
   const vs = ok.flatMap((r) => r.views.filter((v) => (v.ring || 'A') === ring));
-  console.log(ring.padEnd(4) + keys.map((k) => mean(vs.map((v) => v[k])).toFixed(4).padEnd(11)).join(''));
+  console.log(ring.padEnd(4) + keys.map((k) => mean(vs.map((v) => v[k])).toFixed(4).padEnd(16)).join(''));
 }
 
 /* 单视角最差：按指标排序 */

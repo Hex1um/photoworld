@@ -162,7 +162,7 @@ node tools/bump_cache.mjs --check
 **视场错误**必须由 `--verify-fov` 或 `--fov` 覆盖 EXIF 提供独立相机做交叉泼点。
 单视图自洽自检在数学上无法约束尺度/FOV，别只看 99dB 就认为尺度对了。详见 `CHANGELOG.md`。
 
-## 多视角批量质检（v1.17）
+## 多视角批量质检（v1.17；v1.20.3 补清晰度基线）
 
 每张图取 **16 个方位 + 1 个俯视**，逐张算客观指标，用来回答「这张照片重建出来的地貌
 在别的角度看还站不站得住」：
@@ -170,15 +170,27 @@ node tools/bump_cache.mjs --check
 ```bash
 node tools/multiview.mjs --base http://127.0.0.1:8099 \
   --list reports/mv_sample.txt --views 16 --gl hw \
-  --out shots/mv --json reports/mv.json
+  --out shots/mv --json reports/mv.json \
+  --baseline reports/clarity_baseline.json
 ```
 
 - `--list` 每行一个相对 base 的图片路径（`corpus/xxx.jpg`），`--corpus <dir>` 可直接整目录
 - `--gl hw|sw`：hw = D3D11 真 GPU（默认），sw = SwiftShader 软件光栅。
   **两者观感差很多**（软件光栅在掠射角会拉出放射条纹），指标只能同后端对比
-- 指标：`voidFrac` 空底色占比（洞/露底）、`innerVoid` 中央 ROI、`lowVoid` 下 40% 地面、
+- 几何指标：`voidFrac` 空底色占比（洞/露底）、`innerVoid` 中央 ROI、`lowVoid` 下 40% 地面、
   `borderVoid` 外圈、`darkFrac` 塌黑、`stripe` 竖直/水平能量比（竖幕/拉花）、
-  `detail` 平均梯度（越低越糊）
+  `detail` 平均梯度（保留兼容，但它分不出「糊片」和「雾」，别只看它）
+- 清晰度六项（`tools/clarity.mjs`，越大越清晰）：`hfEnergy` 3×3 模糊残差、`farHF` 远景带、
+  `centerHF` 中央 ROI、`lapVar` / `centerLapVar` 拉普拉斯方差（×1000）、`localContrast`
+  5×5 局部标准差。**A/B 优先看 `centerHF` 与 `centerLapVar`**：天空和程序化地面是低频区，
+  全图均值会被稀释。`node tools/test_clarity.mjs` 用合成图锁住「清晰 / 糊片 / 雾」的区分度
+- `--baseline <file>` 第一次跑写入基线，之后**完全同参数**再跑即输出逐指标 A/B 表
+  （基线均值 / 当前均值 / 变化 / 改善与退化的图数）。报告里带 `capture` 采集条件
+  （分辨率、dpr、光栅后端、视角数、稳定时长、指标版本），任一不一致直接拒绝对比，
+  避免把「换了后端」误读成清晰度变化
+- 照片贴图 A/B：URL 加 `?tex=0` 回到旧的 420px 分析画布，`?tex=4096` 抬高上限；
+  默认 `displayMaxEdge=2048`。`body.dataset.texW/texH` 会写入实际贴图尺寸，
+  用 `tools/probe.mjs` 可直接断言
 - 空底色用「画面主色」判定（16 级直方图最大桶），不依赖雾色 —— 夜景里雾色接近黑，
   用雾色比色会把整屏误判成雾
 

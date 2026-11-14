@@ -3,20 +3,26 @@
  * 多视角批量质检（语料 → 16 方位 + 俯视）
  *
  * 把语料图一张张喂进**在线重建链路**（?img= 同源直读），绕世界中心取 16 个方位
- * 各拍一张，再补一张俯视侧拍，同时对截图算四项客观指标：
+ * 各拍一张，再补一张俯视侧拍，同时对截图算两组客观指标：
  *   voidFrac   与画面主色（clear color）几乎一致的像素占比 —— 洞 / 露底 / 天穹灰边
  *   innerVoid  中央 50% ROI 的空底色占比 —— 画面中部的贯穿灰带
  *   lowVoid    下 40%（地面）的空底色占比 —— 脚下的空洞 / 没铺到的地面
  *   borderVoid 外圈 6% 的空底色占比 —— 照片没铺满视口
  *   darkFrac   luma < 0.05 的像素占比 —— 塌黑
  *   stripe     列方向竖直能量 / 行方向水平能量 —— 竖幕、拉花、冰柱
- *   detail     平均梯度 —— 贴图是否被放大糊掉（越低越糊）
+ *   detail     平均梯度 —— 保留兼容，但它分不出「糊片」和「雾」，A/B 别只看它
+ *   hfEnergy / farHF / centerHF / lapVar / centerLapVar / localContrast
+ *              清晰度六项，见 tools/clarity.mjs（越大越清晰；优先看 centerHF、
+ *              centerLapVar，全图指标会被天空与程序化地面稀释）
  *
  * PNG 用 Node 内置 zlib 自解（CDP 截图是 8bit RGBA、无隔行），不引第三方依赖。
  *
  *   node tools/multiview.mjs --base http://127.0.0.1:8099 \
- *     --list corpus/sample.txt --views 16 --out shots/mv --json reports/mv.json
+ *     --list corpus/sample.txt --views 16 --out shots/mv --json reports/mv.json \
+ *     --baseline reports/clarity_baseline.json
  *
+ * --baseline 第一次跑写入基线，之后同参数再跑即输出逐指标 A/B 表；
+ * 采集条件（分辨率 / dpr / 光栅后端 / 视角数 / 稳定时长）不一致会拒绝对比。
  * 列表文件每行一个相对 base 的图片路径（如 corpus/_norm/aa.jpg），也支持 # 注释。
  */
 import { spawn } from 'node:child_process';
@@ -24,6 +30,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { clarityMetrics, CLARITY_KEYS, HIGHER_IS_BETTER, captureDiff } from './clarity.mjs';
 
 /* ---------------- 参数 ---------------- */
 const argv = process.argv.slice(2);
@@ -72,6 +79,14 @@ const EDGE = arg('edge', 'C:/Program Files (x86)/Microsoft/Edge/Application/msed
    两者观感差别很大（软件光栅在掠射角会拉出放射状条纹），
    指标只能在同一后端之间比较，所以默认走 hw。 */
 const GLMODE = arg('gl', 'hw');
+const BASELINE = arg('baseline', '');
+/* 采集条件随报告一起落盘：A/B 时若这些字段不一致，指标没有可比性，
+   直接拒绝出表，避免把「换了后端/分辨率」误读成清晰度变化。 */
+const CAPTURE = {
+  w: W, h: H, dpr: 1, gl: GLMODE, views: VIEWS,
+  radius: RADIUS, center: CENTER, pitch: PITCH, settle: SETTLE,
+  query: EXTRA, clarity: 1
+};
 const PORT = 9600 + Math.floor(Math.random() * 300);
 
 /* ---------------- 名单 ---------------- */
@@ -196,7 +211,8 @@ function metrics(png) {
     borderVoid: +(borderN ? borderVoid / borderN : 0).toFixed(4),
     darkFrac: +(darkN / total).toFixed(4),
     stripe: +(vy / Math.max(1e-6, vx)).toFixed(3),
-    detail: +(detail / Math.max(1, cells)).toFixed(4)
+    detail: +(detail / Math.max(1, cells)).toFixed(4),
+    ...clarityMetrics(L, w, h)
   };
 }
 
@@ -338,6 +354,7 @@ try {
       voidFrac: mean('voidFrac'), darkFrac: mean('darkFrac'),
       innerVoid: mean('innerVoid'), lowVoid: mean('lowVoid'),
       borderVoid: mean('borderVoid'), stripe: mean('stripe'), detail: mean('detail'),
+      ...Object.fromEntries(CLARITY_KEYS.map((k) => [k, mean(k)])),
       worstInner: +Math.max(...rec.views.map((v) => v.innerVoid)).toFixed(4),
       worstLow: +Math.max(...rec.views.map((v) => v.lowVoid)).toFixed(4),
       worstStripe: +Math.max(...rec.views.map((v) => v.stripe)).toFixed(3)
@@ -345,9 +362,10 @@ try {
     results.push(rec);
     const el = ((Date.now() - t0) / 1000).toFixed(0);
     console.log(`✓ ${path.basename(rel)}  void ${rec.agg.voidFrac} inner ${rec.agg.innerVoid} `
-      + `low ${rec.agg.lowVoid} stripe ${rec.agg.stripe} detail ${rec.agg.detail}  `
+      + `low ${rec.agg.lowVoid} stripe ${rec.agg.stripe} detail ${rec.agg.detail} `
+      + `hf ${rec.agg.centerHF} lap ${rec.agg.centerLapVar}  `
       + `[${n + 1}/${images.length}, ${el}s]`);
-    fs.writeFileSync(JSONOUT, JSON.stringify({ base: BASE, views: VIEWS, results }, null, 1));
+    fs.writeFileSync(JSONOUT, JSON.stringify({ base: BASE, views: VIEWS, capture: CAPTURE, results }, null, 1));
   }
   ws.close();
 } catch (e) {
@@ -370,13 +388,57 @@ if (ok.length) {
     avg: {
       voidFrac: avg('voidFrac'), innerVoid: avg('innerVoid'), lowVoid: avg('lowVoid'),
       borderVoid: avg('borderVoid'), stripe: avg('stripe'),
-      darkFrac: avg('darkFrac'), detail: avg('detail')
+      darkFrac: avg('darkFrac'), detail: avg('detail'),
+      ...Object.fromEntries(CLARITY_KEYS.map((k) => [k, avg(k)]))
     },
     worstInner: worst
   };
-  fs.writeFileSync(JSONOUT, JSON.stringify({ base: BASE, views: VIEWS, summary, results }, null, 1));
+  fs.writeFileSync(JSONOUT, JSON.stringify({ base: BASE, views: VIEWS, capture: CAPTURE, summary, results }, null, 1));
   console.log('汇总 ' + JSON.stringify(summary.avg) + '  失败 ' + summary.failed);
   console.log('最差 inner/low void：' + worst.slice(0, 5).map((w) => path.basename(w.image) + ' ' + w.worstInner + '/' + w.worstLow).join(' | '));
   console.log('明细 → ' + JSONOUT + '，截图 → ' + OUTDIR);
+}
+/* ---------------- 清晰度基线 / A-B 对比 ---------------- */
+/* 第一次带 --baseline 跑 = 建立基线；之后同参数再跑 = 逐指标出 A/B 表。
+   刻意只用一个参数：基线文件和对比文件是同一个，避免两份报告用错版本。 */
+if (BASELINE && fs.existsSync(JSONOUT)) {
+  const cur = JSON.parse(fs.readFileSync(JSONOUT, 'utf8'));
+  if (!fs.existsSync(BASELINE)) {
+    fs.mkdirSync(path.dirname(BASELINE), { recursive: true });
+    fs.writeFileSync(BASELINE, JSON.stringify(cur, null, 1));
+    if (exitCode) console.warn('注意：本次有失败样本，基线不完整，建议修复后重跑');
+    console.log(`基线已建立 → ${BASELINE}（同参数再跑一次即为 A/B）`);
+  } else {
+    const base = JSON.parse(fs.readFileSync(BASELINE, 'utf8'));
+    const diff = captureDiff(base.capture, cur.capture);
+    if (diff.length) {
+      console.error(`采集条件不一致，拒绝对比：${diff.join(', ')}`);
+      console.error('  基线 ' + JSON.stringify(base.capture));
+      console.error('  本次 ' + JSON.stringify(cur.capture));
+      exitCode = 2;   // 末尾统一写 process.exitCode，避免被成功码覆盖
+    } else {
+      const keys = [...CLARITY_KEYS, 'detail', 'voidFrac', 'innerVoid', 'lowVoid', 'borderVoid', 'darkFrac', 'stripe'];
+      const mapOf = (d) => new Map((d.results || []).filter((r) => r.ok && r.agg).map((r) => [r.image, r.agg]));
+      const bm = mapOf(base), cm = mapOf(cur);
+      const shared = [...cm.keys()].filter((k) => bm.has(k));
+      console.log(`\nA/B 对比：基线 ${path.basename(BASELINE)} · 共同样本 ${shared.length} 张 · 采集条件一致`);
+      console.log('指标'.padEnd(16) + '基线'.padEnd(11) + '当前'.padEnd(11) + '变化'.padEnd(11) + '改善/退化');
+      for (const k of keys) {
+        let bs = 0, cs = 0, betterN = 0, worseN = 0;
+        for (const img of shared) {
+          const b = bm.get(img)[k], c = cm.get(img)[k];
+          if (!Number.isFinite(b) || !Number.isFinite(c)) continue;
+          bs += b; cs += c;
+          const hi = HIGHER_IS_BETTER[k] !== false;
+          if (hi ? c > b : c < b) betterN++;
+          else if (hi ? c < b : c > b) worseN++;
+        }
+        const n = shared.length || 1;
+        const pct = bs ? ((cs - bs) / bs) * 100 : 0;
+        console.log(k.padEnd(16) + (bs / n).toFixed(5).padEnd(11) + (cs / n).toFixed(5).padEnd(11)
+          + ((pct >= 0 ? '+' : '') + pct.toFixed(1) + '%').padEnd(11) + `${betterN}/${worseN}`);
+      }
+    }
+  }
 }
 process.exitCode = exitCode;
