@@ -40,5 +40,14 @@ if (arg === '--check') {
   // 最长 10 分钟，手机浏览器还可能更久，光靠 ?v= 拿不到新的 index.html）
   fs.writeFileSync(path.join(ROOT, 'version.json'),
     JSON.stringify({ version: arg, builtAt: new Date().toISOString() }, null, 1) + '\n');
-  console.log(`index.html: v${current[0]} → v${arg}（${tags} 处缓存串已同步；version.json 已更新）`);
+  // app.js 里的 VERSION 也一起改：v1.25.0 那次 bump 就漏了它，顶栏徽标与
+  // version.json 对不上，排查了半天。第三处手改点必须自动化。
+  const APPF = path.join(ROOT, 'js', 'app.js');
+  if (fs.existsSync(APPF)) {
+    const a = fs.readFileSync(APPF, 'utf8');
+    const b = a.replace(/const VERSION = '\d+\.\d+\.\d+';/, `const VERSION = '${arg}';`);
+    if (b !== a) fs.writeFileSync(APPF, b);
+  }
+  console.log(`index.html: v${current[0]} → v${arg}（${tags} 处缓存串已同步；`
+    + 'version.json 与 js/app.js VERSION 已更新）');
 }

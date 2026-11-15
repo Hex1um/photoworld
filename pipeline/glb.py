@@ -14,7 +14,8 @@ def _pad4(b: bytes, fill: bytes = b"\x00") -> bytes:
     return b + fill * ((4 - len(b) % 4) % 4)
 
 
-def write_glb(path: str, layers: list, texture_jpeg: bytes, name: str = "world") -> dict:
+def write_glb(path: str, layers: list, texture_jpeg: bytes, name: str = "world",
+              extras: dict | None = None) -> dict:
     """layers: [{"pos","nrm","uv","index","name"}, ...] —— 同一张贴图，多个 mesh。"""
     blobs: list[bytes] = []
     views: list[dict] = []
@@ -98,6 +99,11 @@ def write_glb(path: str, layers: list, texture_jpeg: bytes, name: str = "world")
         "bufferViews": views,
         "buffers": [{"byteLength": offset}],
     }
+    # 相机内参必须随资产走：前端 GLB 路径原本是按固定 66° 视场渲染的，
+    # 而几何是按照片真实视场建的 —— 两者不一致时整幅重建被放大并错位，
+    # 画面底部露出被拉长的边缘几何（实测的"底部尖刺带"就是这么来的）。
+    if extras:
+        gltf["asset"]["extras"] = extras
 
     json_chunk = _pad4(json.dumps(gltf, separators=(",", ":")).encode("utf-8"), b" ")
     bin_chunk = b"".join(blobs)

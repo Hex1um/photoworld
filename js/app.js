@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '1.27.3';
+  const VERSION = '2.0.0';
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -148,7 +148,52 @@
     if (lbl) lbl.textContent = '深度图（亮=近 / 暗=远）';
   }
 
+  /* v2 链路：把原图 POST 给本地 GPU 服务，拿回分层 GLB 直接进资产模式。
+   *
+   * 为什么值得加这一跳：浏览器内 518² 小模型 + 一张连续薄片的老链路，在实测里
+   * 会让山体变成幕布、近景塌成地毯（见 REVIEW.md / docs/AB_v2.md）。
+   * 5070 上跑 ViT-L 高分辨率深度 + LDI 建网格，一张图冷启动 ~14s、命中缓存 ~0s，
+   * 产物是 10MB 左右的 GLB —— 观感是照片级的。
+   *
+   * 触发条件：URL 带 ?api=http://127.0.0.1:8100（与地貌延伸共用同一个服务地址），
+   * 且没有显式 ?v2=0。服务不在或失败时**静默回退**在线链路，不影响原有用法。 */
+  async function tryReconstructV2(def) {
+    const q = new URLSearchParams(location.search);
+    const api = q.get('api');
+    if (!api || q.get('v2') === '0' || !def || !def.src) return false;
+    const base = api.replace(/\/+$/, '');
+    try {
+      loader.classList.remove('hidden', 'done', 'burst');
+      el('loaderTitle').textContent = '正在用 GPU 重建场景';
+      el('loaderDepthLabel').textContent = '';
+      setProgress(6, '上传照片到本地重建服务…');
+      const srcResp = await fetch(def.src, { cache: 'no-store' });
+      if (!srcResp.ok) return false;
+      const photo = await srcResp.blob();
+      const fd = new FormData();
+      fd.append('image', photo, 'photo.jpg');
+      setProgress(18, 'GPU 深度估计 + LDI 建网格（首次约 15s）…');
+      const t0 = performance.now();
+      const resp = await fetch(base + '/api/reconstruct', { method: 'POST', body: fd });
+      if (!resp.ok) {
+        console.warn('[v2] 重建服务不可用', resp.status, await resp.text().catch(() => ''));
+        return false;
+      }
+      const glb = await resp.blob();
+      const secs = ((performance.now() - t0) / 1000).toFixed(1);
+      setProgress(88, '重建完成（' + secs + 's），装载世界…');
+      const url = URL.createObjectURL(glb);
+      await enterAsset(url);
+      el('hudSub').textContent = 'v2 管线 · ' + el('hudSub').textContent;
+      return true;
+    } catch (e) {
+      console.warn('[v2] 失败，回退在线链路', e);
+      return false;
+    }
+  }
+
   async function enterWorld(def) {
+    if (await tryReconstructV2(def)) return;
     if (running) stopLoop();
     loader.classList.remove('hidden', 'done', 'burst');
     pause.classList.add('hidden');
@@ -705,8 +750,7 @@
         vertexColor,
         heightAt: (x, z) => grid.at(x, z),
         eyeHeight: 1.7,
-        walkRadius: 55,
-        fogColor: col.bot,
+        walkRadius: 55,        fogColor: col.bot,
         skyTop: col.top,
         skyHorizon: col.bot,
         ambient: [1, 1, 1],
@@ -723,10 +767,29 @@
         analysis: { horizon: 0.5, meanLum: col.lum }
       };
 
+      /* 相机内参与几何必须同源（v2）：GLB 里写的是**照片真实的** hfov/vfov，
+         而 fovRad() 的默认分支是按 66° 推的。不接这根线，整幅重建会被放大并错位，
+         画面底部会露出被拉长的边缘几何。
+         做法：把照片尺寸塞进 analysis（fovRad 用它还原照片宽高比）、把 vfov 塞进
+         reliefMeta —— fovRad 已有的分支就会算出"水平与照片一致、竖直按画布比例裁切"
+         的正确取景。 */
+      if (asset.camera && asset.camera.vfov > 0.1) {
+        w.reliefMeta = { vfov: asset.camera.vfov, hfov: asset.camera.hfov };
+        w.analysis = {
+          horizon: 0.5, meanLum: col.lum,
+          W: asset.camera.w || 4, H: asset.camera.h || 3
+        };
+        w.photoMeta = asset.camera;
+      }
+
       if (player) player.dispose();
       world = w;
       current = { name: '离线重建', sub: 'asset · world.glb' };
       player = PW.createPlayer(canvas, world);
+      /* 资产模式的视场必须**正好等于**资产的视场：在线链路用 fovMul=1.06 多看一点
+         周边没关系（视锥外还有程序化几何），但 GLB 的几何正好止于照片视锥边界，
+         多看 6% 就会在左右两侧露出被拉长的贴图边缘（实测的竖条）。 */
+      player.state.fovMul = 1.0;
       if (window.__spawn) player.reset(window.__spawn.x, window.__spawn.z, window.__spawn.yaw);
       else player.reset(0, 0, 0);
       // 与 enterWorld 同一口径：reset() 会把 pitch 置为 -0.02，

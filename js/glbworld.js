@@ -133,7 +133,11 @@
 
     let verts = 0, tris = 0;
     for (const l of layers) { verts += l.vertices; tris += l.triangles; }
-    return { layers, img, vertices: verts, triangles: tris, bytes: buf.byteLength };
+    // 相机内参（v2 管线写进 asset.extras）：没有就用调用方的默认视场。
+    // 不做这层传递，几何与视场就会各说各话，整幅重建被放大/错位。
+    const camExtras = (json.asset && json.asset.extras && json.asset.extras.camera) || null;
+    return { layers, img, vertices: verts, triangles: tris, bytes: buf.byteLength,
+             camera: camExtras };
   }
 
   global.PW = global.PW || {};

@@ -15,3 +15,10 @@ __pycache__/
 # 本地 Node 依赖（jpeg-js 用于 tools/eval.mjs 解码，npm i --no-save 安装）
 node_modules/
 package-lock.json
+
+# v2 管线：深度权重（1.3GB）不进仓库，见 pipeline/v2/README.md
+/models/da2_large/
+
+# v2 中间产物：深度缓存 / 烘焙输出（world.glb 每个 10MB 量级）
+/cache/
+/pipeline/v2/_tmp_out.glb

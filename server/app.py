@@ -24,6 +24,18 @@ from pydantic import BaseModel
 import terrain
 import object3d
 
+# v2 重建管线（pipeline/v2）：缺依赖时不能让整个服务起不来
+try:
+    import sys as _sys, importlib.util as _ilu
+    _p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pipeline", "v2")
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
+    _spec = _ilu.spec_from_file_location("v2_api", os.path.join(_p, "api.py"))
+    _v2 = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_v2)
+except Exception:                              # noqa: BLE001
+    _v2 = None
+
 app = FastAPI(title="photoworld generation service", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
@@ -50,7 +62,57 @@ def health():
         "terrain_diffusion": _has_terrain_diffusion(),
         "object3d": object3d.backend_name(),
         "gpu": _gpu_name(),
+        "reconstruct": _reconstruct_available(),
     }
+
+
+def _reconstruct_available():
+    if _v2 is None:
+        return {"ok": False, "reason": "pipeline/v2 未能加载（缺 torch/transformers/scipy？）"}
+    try:
+        return _v2.available()
+    except Exception as e:                     # 缺依赖/缺权重都要能优雅降级
+        return {"ok": False, "reason": str(e)}
+
+
+@app.post("/api/reconstruct")
+async def api_reconstruct(image: UploadFile = File(...), opts: str = Form("")):
+    """照片 → 分层 GLB（v2 管线，GPU 上跑的离线重建）。
+
+    这是"点一张照片就走进新的世界"的主链路：前端把原图 POST 上来，这里用
+    常驻的 ViT-L 深度模型 + LDI 建网格，直接回 GLB 字节。前端拿 blob URL 交给
+    现有的资产加载器即可，不需要改渲染路径。
+    """
+    avail = _reconstruct_available()
+    if not avail.get("ok") or _v2 is None:
+        return JSONResponse(status_code=501,
+                            content={"error": "reconstruct_unavailable",
+                                     "hint": avail.get("reason", "")})
+    data = await image.read()
+    over = {}
+    if opts:
+        try:
+            import json as _json
+            over = {k: v for k, v in _json.loads(opts).items() if k in _v2.DEFAULTS}
+        except Exception:
+            over = {}
+    try:
+        import asyncio
+        glb, manifest = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: _v2.bake(data, **over))
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": "bake_failed", "detail": str(e)})
+    return Response(content=glb, media_type="model/gltf-binary",
+                    headers={"X-Pipeline": "photoworld-v2",
+                             "X-Elapsed": str(manifest.get("elapsed_s", "")),
+                             "X-Layers": str(len([k for k in manifest.get("layers", {})
+                                                  if not k.startswith("_")]))})
+
+
+@app.get("/api/reconstruct/info")
+async def api_reconstruct_info(manifest: str = ""):
+    """调试用：回显上一次/指定 manifest（当前从简，只回能力探测）。"""
+    return {"available": _reconstruct_available()}
 
 
 @app.post("/api/extend")

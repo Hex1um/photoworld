@@ -36,6 +36,36 @@ python -m http.server 8099 --bind 127.0.0.1
 
 操作：`WASD` 行走 · 鼠标环视（点击画面锁定指针，或按住左键拖动）· `Shift` 奔跑 · 滚轮调视野 · `Esc` 暂停 · `H` 隐藏 HUD。触屏为左半屏摇杆 + 右半屏拖动视角。
 
+## v2 分层重建（推荐，v2.0.0）
+
+在线链路的单张连续深度薄片会把山体拉成"幕布"、把秋叶塌成"地毯"。
+v2 把重建搬到 GPU 上重做：**高分辨率深度 + LDI 分层 + 裙边 + 真实相机内参**，
+观感是照片级的。8 张代表图里 7 张明显改善，逐图结论与复现命令见
+[`docs/AB_v2.md`](docs/AB_v2.md)。
+
+```bash
+# 1) 起本地重建服务（GPU 常驻，一张图冷启动 11~15s，命中缓存 <1s）
+cd server && python -m uvicorn app:app --host 127.0.0.1 --port 8100
+
+# 2) 静态站照旧
+python -m http.server 8099 --bind 127.0.0.1
+
+# 3) 前端带 ?api= 就走 v2；服务不在/失败会静默回退到原在线链路
+#    http://127.0.0.1:8099/?w=desert&api=http://127.0.0.1:8100
+```
+
+离线批量烘焙（不依赖服务）：
+
+```bash
+python pipeline/v2/bake.py "corpus_test/*.jpg" --out out/v2/all
+node tools/abshots.mjs --base http://127.0.0.1:8099 \
+  --list glb_list.txt --out shots/ab --mode glb --hw --views front,side,back
+```
+
+依赖（v2 才需要，前端仍零构建）：`torch` `transformers` `scipy`，
+以及 `models/da2_large/`（Depth-Anything-V2-Large，约 1.3GB）。
+回归：`python tools/test_v2.py`（26 条断言，2 秒，不需要 GPU）。
+
 ## 原理
 
 核心是**单目深度重建**，不是把照片贴在地面上：
@@ -238,7 +268,8 @@ worlds/            内置场景图
 train/             历史实验：早期本地小网络（deprecated，运行时无引用，见 train/README.md）
 tools/             语料采集 / 归一化 / 批量评测 / 多视角质检 / CDP 截图 / 算法回归 / 缓存升版
 worldmodel/        Causal World DiT（action_codec 统一训练/推理动作，data/ 读 tar 与 .latent）
-server/            本地 GPU 生成服务（FastAPI）：/api/extend、/api/object3d，见 server/README.md
+pipeline/v2/       v2 管线：GPU 高分辨率深度 + LDI 分层几何 + 稳健标定（见 docs/AB_v2.md）
+server/            本地 GPU 生成服务（FastAPI）：/api/extend、/api/object3d、/api/reconstruct
 training/          数据集整理与训练脚本（四条能力对应四个可训练模型），见 training/README.md
 CHANGELOG.md       面向使用者的更新日志
 ```

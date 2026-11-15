@@ -1,0 +1,8 @@
+corpus_test/01_grass_snowmtn.jpg|01_grass_snowmtn
+corpus_test/02_lake_pier.jpg|02_lake_pier
+corpus_test/03_snowrange.jpg|03_snowrange
+corpus_test/04_coast_cliff.jpg|04_coast_cliff
+corpus_test/05_canyon_strata.jpg|05_canyon_strata
+corpus_test/06_boat_beach.jpg|06_boat_beach
+corpus_test/07_mtn_forest.jpg|07_mtn_forest
+corpus_test/08_autumn_fg.jpg|08_autumn_fg
