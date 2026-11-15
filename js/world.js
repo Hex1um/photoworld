@@ -2547,6 +2547,17 @@
         /* 掠射/边缘加密（v1.27.2，方案 ③ 的自适应点尺寸替代）：
            深度变化剧烈的点再复制一份、带细微抖动与半透明，
            等效于把那一片的 splat 放大，补住掠射角拉开的缝。 */
+        /* 断崖裙边（v1.27.3，方案 B2）：深度比 > 2.5 是真断崖，向下垂一排点
+           （颜色逐级压暗 + 半透明），从侧面看岩柱不再是「纸片」，而有厚度。 */
+        if (jump > 2.5) {
+          for (let sk = 1; sk <= 2; sk++) {
+            pos.push(x0, y0 - sk * 0.16, z0);
+            uv.push(relief.uv[k * 2], relief.uv[k * 2 + 1]);
+            const dim = 1 - sk * 0.14;
+            col.push(relief.color[k * 4] * dim, relief.color[k * 4 + 1] * dim,
+              relief.color[k * 4 + 2] * dim, relief.color[k * 4 + 3] * aEdge * 0.7);
+          }
+        }
         if (jump > 1.3) {
           pos.push(x0 + ((i % 3) - 1) * 0.012, y0 + 0.025, z0 + ((j % 3) - 1) * 0.012);
           uv.push(relief.uv[k * 2], relief.uv[k * 2 + 1]);
