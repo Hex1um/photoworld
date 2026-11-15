@@ -368,6 +368,33 @@ def build_points(P: np.ndarray, rgb: np.ndarray, valid: np.ndarray,
             "point_px": float(step_used) * 2.0}
 
 
+def build_photo_wall(cam, dist: float = 8.0) -> dict:
+    """把整张照片做成一面"照片墙"（正对视线的四边形）。
+
+    什么时候用：画面里几乎没有地面（云海、星空、从太空拍的地球、纯天空）。
+    这类图像的"深度"没有物理意义 —— 硬建三维只会得到一团黑色拉丝，
+    实测验收批次里最惨的两张就是这种。诚实的做法是退回"平贴"，观感等于
+    一张高分辨率照片挂在正前方，至少不毁。
+    """
+    rays = cam.rays()
+    h, w = rays.shape[:2]
+    corners = [(0, 0), (0, w - 1), (h - 1, 0), (h - 1, w - 1)]
+    pos, uv = [], []
+    for (j, i) in corners:
+        d = rays[j, i]
+        p = d * dist
+        pos.extend([float(p[0]), float(p[1]), float(-p[2])])
+        uv.extend([i / (w - 1.0), j / (h - 1.0)])
+    idx = [0, 2, 1, 1, 2, 3]
+    return {
+        "name": "backdrop",
+        "pos": np.asarray(pos, dtype=np.float32).reshape(-1, 3),
+        "nrm": np.tile(np.array([0, 0, 1], dtype=np.float32), (4, 1)),
+        "uv": np.asarray(uv, dtype=np.float32).reshape(-1, 2),
+        "index": np.asarray(idx, dtype=np.uint32),
+    }
+
+
 def build_ground_skirt(P: np.ndarray, ground: np.ndarray, uv: np.ndarray,
                        radius: float = 400.0, cells: int = 96,
                        n_palette: int = 12, inner_frac: float = 0.28) -> dict | None:
@@ -451,6 +478,12 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
           repr_mode: str = "auto", scatter_thr: float = 0.002,
           cliff_thr: float = 0.010, ground_radius: float = 400.0,
           seg_edge_tau: float = 0.10, quad_stretch_max: float = 0.0,
+          # 默认关闭：试过"地面像素占比 < 0.4%"当"非风景照"的判据，实测**不成立** ——
+          # 云海/星空/太空地球这几张图的地面占比也有 3.7~5.2%（压平判据把它们误判成地面），
+          # 而"远景占比 / 纵深动态范围"在好坏图上完全不分离（远景占比全是 0，
+          # 纵深比好的 29、坏的 80~148，但雪山这种好图也有 102）。
+          # 结论：这一层要靠**语义**（SegFormer 的 sky 类占比）才能判，不是数值统计能到的。
+          photo_wall_frac: float = 0.0,
           card_flatten: bool = True,
           ground_cells: int = 96) -> dict:
     """主入口：深度（米）→ 分层网格。
@@ -538,6 +571,22 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
     valid = np.isfinite(zs) & (zs > dist_min)
     # 断崖掩码要在表示选择之前算：它是"该用网格还是点云"两个判据之一
     cliff, ratio, edge_str = cliff_mask(zs, step, edge_ratio)
+
+    # ---- 非风景照：退回"照片墙" -----------------------------------
+    # 判据用两个便宜的统计量：能识别成地面的像素几乎没有，且地平线以上占绝大多数。
+    # 云海、星空、太空地球这类图都会命中。
+    gfrac = float(ground.mean())
+    skyfrac = float((rays[..., 1] > 0.02).mean())
+    if photo_wall_frac > 0 and gfrac < photo_wall_frac and skyfrac > 0.55:
+        wall = build_photo_wall(cam)
+        return {"layers": [wall], "stats": {
+            "wall": {"vertices": 4, "triangles": 2, "skirt_quads": 0,
+                     "pixels": int(valid.sum()),
+                     "depth_p10": 8.0, "depth_p90": 8.0},
+            "_global": {"grid": [int(hh), int(ww)], "step": int(step), "repr": "photo-wall",
+                        "cliff_frac": 0.0, "ground_frac": round(gfrac, 4),
+                        "sky_frac": round(skyfrac, 3), "scatter": 0.0,
+                        "segments": 0, "triangles": 2, "vertices": 4}}}
 
     # ---- 表示选择：网格还是点云 -----------------------------------
     # 判据是"散布度"（相邻深度比 > 4 的像素占比），不是画面内容的名字。
