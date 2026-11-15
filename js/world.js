@@ -679,6 +679,8 @@
     const dh = depth.height || depth.size;
     let D = depth.data;
     D = shrinkDepth(D, dw, dh);
+    /* RGB 引导平滑：治纹理同频的量化噪声（eps 2e-3、半径 4） */
+    if (!(opt && opt.noguide)) D = guidedSmooth(D, guideLum(analysis, dw, dh), dw, dh, 4, 2e-3);
 
     /* 深度分布拉伸 */
     const hist = [];
@@ -1138,6 +1140,8 @@
     const dh = depth.height || depth.size;
     let D = depth.data;
     D = shrinkDepth(D, dw, dh);
+    /* RGB 引导平滑：治纹理同频的量化噪声（eps 2e-3、半径 4） */
+    if (!(opt && opt.noguide)) D = guidedSmooth(D, guideLum(analysis, dw, dh), dw, dh, 4, 2e-3);
 
     /* 逐列天际线：用**未平滑**的原始轮廓做 alpha 判定，树冠/悬崖的锯齿才不会被
        平滑成一条水平直线（蓝调雪林的树梢被整排切掉就是这个原因）。
@@ -2615,6 +2619,75 @@
         out[i] = g > EDGE ? Math.min(c, l, r, u, d) : c;
       }
     }
+    return out;
+  }
+
+  /* 盒滤波（分离两趟，O(N)），引导滤波的基元 */
+  function boxFilter(src, dst, w, h, r) {
+    const tmp = new Float32Array(src.length);
+    const win = 2 * r + 1;
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      let sum = 0;
+      for (let x = -r; x <= r; x++) sum += src[row + Math.min(w - 1, Math.max(0, x))];
+      for (let x = 0; x < w; x++) {
+        tmp[row + x] = sum / win;
+        sum += src[row + Math.min(w - 1, x + r + 1)] - src[row + Math.max(0, x - r)];
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      for (let y = -r; y <= r; y++) sum += tmp[Math.min(h - 1, Math.max(0, y)) * w + x];
+      for (let y = 0; y < h; y++) {
+        dst[y * w + x] = sum / win;
+        sum += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x];
+      }
+    }
+  }
+
+  /* RGB 引导滤波（v1.27.1，方案 ① 的后半）：
+     以照片灰度为引导，在**视差域**平滑深度。纹理噪声被抹平，
+     而 RGB 强边缘处的深度跳变被保留 —— 竖条纹的另一半来源是
+     岩壁纹理同频的量化噪声，正是这个要治的。eps 越大越平滑。 */
+  function guidedSmooth(p, I, w, h, r, eps) {
+    const n = p.length;
+    const meanI = new Float32Array(n), meanP = new Float32Array(n);
+    const corrI = new Float32Array(n), corrIp = new Float32Array(n);
+    const I2 = new Float32Array(n), Ip = new Float32Array(n);
+    for (let i = 0; i < n; i++) { I2[i] = I[i] * I[i]; Ip[i] = I[i] * p[i]; }
+    boxFilter(I, meanI, w, h, r);
+    boxFilter(p, meanP, w, h, r);
+    boxFilter(I2, corrI, w, h, r);
+    boxFilter(Ip, corrIp, w, h, r);
+    const a = new Float32Array(n), b = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const varI = corrI[i] - meanI[i] * meanI[i];
+      const cov = corrIp[i] - meanI[i] * meanP[i];
+      a[i] = cov / (varI + eps);
+      b[i] = meanP[i] - a[i] * meanI[i];
+    }
+    const ma = new Float32Array(n), mb = new Float32Array(n), q = new Float32Array(n);
+    boxFilter(a, ma, w, h, r);
+    boxFilter(b, mb, w, h, r);
+    for (let i = 0; i < n; i++) q[i] = ma[i] * I[i] + mb[i];
+    return q;
+  }
+
+  /* 从照片采一张 dw×dh 的灰度引导图（最近邻，够用） */
+  function guideLum(analysis, w, h) {
+    const out = new Float32Array(w * h);
+    try {
+      const ctx = analysis.canvas.getContext('2d', { willReadFrequently: true });
+      const img = ctx.getImageData(0, 0, analysis.W, analysis.H).data;
+      for (let y = 0; y < h; y++) {
+        const sy = Math.min(analysis.H - 1, Math.round((y / Math.max(1, h - 1)) * (analysis.H - 1)));
+        for (let x = 0; x < w; x++) {
+          const sx = Math.min(analysis.W - 1, Math.round((x / Math.max(1, w - 1)) * (analysis.W - 1)));
+          const i = (sy * analysis.W + sx) * 4;
+          out[y * w + x] = (img[i] * 0.299 + img[i + 1] * 0.587 + img[i + 2] * 0.114) / 255;
+        }
+      }
+    } catch (e) { /* canvas 被污染时退化为全 0.5 引导，等于纯平滑 */ out.fill(0.5); }
     return out;
   }
 
