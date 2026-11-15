@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#08090b">
 <title>PHOTOWORLD — 走进照片里的世界</title>
 <meta name="description" content="上传一张风景照片，在浏览器里重建为可以自由行走的 3D 世界。">
-<link rel="stylesheet" href="css/style.css?v=2.0.0">
+<link rel="stylesheet" href="css/style.css?v=2.0.1">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
@@ -26,6 +26,8 @@
     </div>
     <div class="topbar-actions">
       <span class="live-dot" id="liveDot"></span>
+      <a class="pipe-chip" id="pipeBadge" href="gpu.html" target="_blank" rel="noopener"
+         title="当前重建管线（点击查看运行环境自检）">检测中…</a>
       <span class="ver-chip" id="verBadge" title="PHOTOWORLD 版本">v1.26.8</span>
       <button class="ghost" id="btnAbout">工作原理</button>
     </div>
@@ -57,9 +59,9 @@
   </main>
 
   <footer class="foot">
-    <span>本地重建 · 无上传 · 无服务器</span>
+    <span id="footPipe">管线检测中…</span>
     <span class="dot"></span>
-    <span>WebGL2</span>
+    <span>WebGL2 渲染</span>
     <span class="dot"></span>
     <span id="footStat">Depth-Anything-V2-Small · 518×518</span>
     <span class="dot"></span>
@@ -75,7 +77,7 @@
     <div class="hud-top">
       <div class="place">
         <div class="place-name" id="hudName">—</div>
-        <div class="place-sub" id="hudSub">photoworld</div>
+        <div class="place-sub"><span id="hudPipe" class="hud-pipe"></span><span id="hudSub">photoworld</span></div>
       </div>
 
       <div class="compass" id="compass">
@@ -171,15 +173,36 @@
 <div class="modal hidden" id="modal">
   <div class="modal-card">
     <h2>这是怎么做到的</h2>
-    <p>没有云端大模型，全部在本地完成。照片会被还原成"拍摄那一刻你面前的这一层三维表面"：</p>
+    <p>没有云端大模型。照片要么在浏览器里重建，要么交给本机的 GPU 服务重建，
+       两条链路都在你自己的机器上完成，照片可以不出本机。</p>
+
+    <div class="cap-report" id="capReport">
+      <div class="cap-line"><b>当前链路</b><span id="capPipe">检测中…</span></div>
+      <div class="cap-line"><b>WebGPU</b><span id="capGpu">检测中…</span></div>
+      <div class="cap-line"><b>本地服务</b><span id="capSvc">检测中…</span></div>
+      <p class="dim" id="capAdvice"></p>
+    </div>
+
+    <h3>v2 链路（推荐，画质最好）</h3>
     <ol>
-      <li><b>单目深度估计</b> — 浏览器内用 Depth-Anything-V2-Small（ONNX，量化版 27MB）推理出每个像素的距离，天空远、树近、山在中景，得到一张真实的深度图。</li>
-      <li><b>三维表面重建</b> — 每个像素按自己的深度放进空间，形成有起伏的连续表面。它不是"把照片铺在地上"，而是照片里那座山、那片林本来的位置与体积；走动时前后景会正确地位移。</li>
-      <li><b>透视正确的地面</b> — 地平线以下按相机高度（1.7m）反解距离，脚下的地就是照片里的那块地，远处收敛到真实的透视。</li>
-      <li><b>接缝与断崖处理</b> — 深度不连续处做"前拉"约束，避免拉出竖直的鳍；360° 由镜像平铺补全，接缝处融合深度。</li>
-      <li><b>光与空气</b> — 太阳方位取天空最亮处，雾色取地平线色，入景前用探针反解曝光，让画面平均亮度对齐原片。</li>
+      <li><b>GPU 高分辨率深度</b> — 服务端用 Depth-Anything-V2-<b>Large</b> 跑到长边 1540，
+          再以原图为引导做 guided-filter 上采样；浏览器内的在线链路只有 518²，山脊和枝叶会糊成一片。</li>
+      <li><b>LDI 分层 + 裙边</b> — 被前景遮住的地方不建面（不是把纹理拉满），
+          薄弱边界向后挤出"裙边"做出厚度。走动时看到的是物体侧面，而不是穿透过去的洞。</li>
+      <li><b>真实相机内参</b> — 照片的水平/垂直视场写进资产，渲染时按它取景，不会把世界放大错位。</li>
     </ol>
-    <p class="dim">提示：横向构图、地平线偏低、有明显纵深（近景—中景—远景）的照片，重建效果最好。</p>
+
+    <h3>在线链路（无需服务，随时可用）</h3>
+    <ol>
+      <li>浏览器内 Depth-Anything-V2-Small（ONNX 量化版 27MB）推理出深度，ORT-WASM 单线程。</li>
+      <li>像素按深度反投影成一层表面，走动时有视差 —— 但深度分辨率只有图片的 1/3，
+          容易在山体边缘拉出竖直条纹。</li>
+      <li>光与空气：太阳取天空最亮处、雾色取地平线色，入景前用探针反解曝光。</li>
+    </ol>
+
+    <p class="dim">提示：横向构图、地平线偏低、有明显纵深（近景—中景—远景）的照片效果最好；
+      密集枝叶贴脸的前景（如满屏秋叶）目前两条链路都处理不好。</p>
+    <p class="dim">想确认自己的机器能不能走 GPU 加速：<a href="gpu.html" target="_blank" rel="noopener">打开运行环境自检</a>。</p>
     <button class="primary" id="btnCloseModal">明白了</button>
   </div>
 </div>
@@ -247,22 +270,23 @@ window.addEventListener('unhandledrejection', function (e) {
 });
 </script>
 
-<script src="js/mat.js?v=2.0.0"></script>
-<script src="js/glutil.js?v=2.0.0"></script>
-<script src="js/reconstruct.js?v=2.0.0"></script>
-<script src="js/world.js?v=2.0.0"></script>
-<script src="js/depth.js?v=2.0.0"></script>
-<script src="js/objects.js?v=2.0.0"></script>
-<script src="js/inpaint.js?v=2.0.0"></script>
-<script src="js/semantics.js?v=2.0.0"></script>
-<script src="js/intro.js?v=2.0.0"></script>
-<script src="js/glbworld.js?v=2.0.0"></script>
-<script src="js/renderer.js?v=2.0.0"></script>
-<script src="js/player.js?v=2.0.0"></script>
-<script src="js/audio.js?v=2.0.0"></script>
-<script src="js/live_params.js?v=2.0.0"></script>
-<script src="js/extend.js?v=2.0.0"></script>
-<script src="js/object3d.js?v=2.0.0"></script>
-<script src="js/app.js?v=2.0.0"></script>
+<script src="js/mat.js?v=2.0.1"></script>
+<script src="js/glutil.js?v=2.0.1"></script>
+<script src="js/reconstruct.js?v=2.0.1"></script>
+<script src="js/world.js?v=2.0.1"></script>
+<script src="js/depth.js?v=2.0.1"></script>
+<script src="js/objects.js?v=2.0.1"></script>
+<script src="js/inpaint.js?v=2.0.1"></script>
+<script src="js/semantics.js?v=2.0.1"></script>
+<script src="js/intro.js?v=2.0.1"></script>
+<script src="js/glbworld.js?v=2.0.1"></script>
+<script src="js/renderer.js?v=2.0.1"></script>
+<script src="js/player.js?v=2.0.1"></script>
+<script src="js/audio.js?v=2.0.1"></script>
+<script src="js/live_params.js?v=2.0.1"></script>
+<script src="js/extend.js?v=2.0.1"></script>
+<script src="js/object3d.js?v=2.0.1"></script>
+<script src="js/caps.js?v=2.0.1"></script>
+<script src="js/app.js?v=2.0.1"></script>
 </body>
 </html>

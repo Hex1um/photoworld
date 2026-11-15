@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.0.0';
+  const VERSION = '2.0.1';
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -184,7 +184,7 @@
       setProgress(88, '重建完成（' + secs + 's），装载世界…');
       const url = URL.createObjectURL(glb);
       await enterAsset(url);
-      el('hudSub').textContent = 'v2 管线 · ' + el('hudSub').textContent;
+      setHudPipe('v2', 'V2');
       return true;
     } catch (e) {
       console.warn('[v2] 失败，回退在线链路', e);
@@ -498,6 +498,8 @@
       // 第二份在第一份已收敛后又白跑最多 10 帧全屏渲染（首屏进入白白变慢）。
       el('hudName').textContent = def.name;
       el('hudSub').textContent = (def.sub || 'photoworld') + ' · v' + VERSION;
+      // 在线链路（浏览器内 518² 小模型）与 v2 观感差一个代际，必须标出来
+      setHudPipe('online', '在线');
       el('keysHint').classList.remove('fade');
       setTimeout(() => el('keysHint').classList.add('fade'), 5200);
 
@@ -797,6 +799,7 @@
       if (window.__spawn && typeof window.__spawn.pitch === 'number') player.state.pitch = window.__spawn.pitch;
 
       el('hudName').textContent = '离线重建世界';
+      if (!el('hudPipe').textContent) setHudPipe('asset', '资产');
       el('hudSub').textContent = asset.triangles.toLocaleString() + ' 三角 · ' + (asset.bytes / 1048576).toFixed(1) + 'MB · ' + asset.layers.length + ' 层';
       setProgress(100, '完成');
 
@@ -1014,7 +1017,10 @@
   }
 
   function wireUI() {
-    el('btnAbout').addEventListener('click', () => el('modal').classList.remove('hidden'));
+    el('btnAbout').addEventListener('click', () => {
+      el('modal').classList.remove('hidden');
+      renderCapReport();
+    });
     el('btnCloseModal').addEventListener('click', () => el('modal').classList.add('hidden'));
 
     // 开屏 CTA：随便走走 = 随机进一个内置世界；用我的照片 = 同一个上传入口
@@ -1227,8 +1233,104 @@
   }
 
   /* ---------------- 启动 ---------------- */
+  /* 运行环境探测 → 顶栏徽标。
+     只做"读"：拿不到就照常进世界，绝不因为探测失败而卡住。 */
+  async function initCaps() {
+    const badge = el('pipeBadge');
+    const capsApi = window.PW && window.PW.caps;
+    if (!badge || !capsApi) return;
+    const q = new URLSearchParams(location.search);
+    const api = q.get('api');
+    badge.textContent = '检测中…';
+    try {
+      const [webgpu, service] = await Promise.all([
+        capsApi.probeWebGPU(),
+        capsApi.probeService(api)
+      ]);
+      const v = capsApi.verdict({ webgpu, service });
+      window.__pwCaps = { webgpu, service, verdict: v };
+      // 页脚也要写清楚链路与模型：只写"无服务器"在启用 v2 时是错的（本机服务≠云端）
+      const foot = el('footPipe');
+      const stat = el('footStat');
+      if (foot) {
+        foot.textContent = v.level === 'v2'
+          ? 'v2 管线 · 本机 GPU 服务（照片不出本机）'
+          : '在线链路 · 浏览器内推理（照片不上传）';
+      }
+      if (stat) {
+        stat.textContent = v.level === 'v2'
+          ? 'Depth-Anything-V2-Large · 长边 1540 · LDI 分层'
+          : 'Depth-Anything-V2-Small · 518×518';
+      }
+      badge.dataset.level = v.level;
+      badge.textContent = v.label;
+      badge.title = v.detail
+        + (v.level === 'v2' ? '' : '\n点开查看运行环境自检（WebGPU / 服务 / 建议）');
+      if (document.body) document.body.dataset.pipeline = v.level;
+    } catch (e) {
+      badge.textContent = '检测失败';
+      badge.dataset.level = 'v1';
+    }
+  }
+
+  /* 把探测结果写进「工作原理」弹窗：使用者点开就知道自己现在跑哪条链路、
+     以及为什么没跑上更好的那条。 */
+  function renderCapReport() {
+    const c = window.__pwCaps;
+    const pipe = el('capPipe'), gpu = el('capGpu'), svc = el('capSvc');
+    const advice = el('capAdvice');
+    if (!c) {
+      if (pipe) pipe.textContent = '探测中…（稍后再点一次）';
+      return;
+    }
+    const v = c.verdict;
+    if (pipe) {
+      pipe.textContent = v.label + ' —— ' + v.detail;
+      pipe.dataset.ok = v.level === 'v2' ? '1' : (v.level === 'v2-partial' ? '2' : '0');
+    }
+    if (gpu) {
+      const g = c.webgpu;
+      gpu.textContent = g.ok
+        ? (g.vendor || '?') + ' / ' + (g.architecture || '?')
+          + (g.device ? ' · ' + g.device : '') + ' · ' + g.features.length + ' 项特性'
+        : ('不可用 —— ' + g.reason);
+      gpu.dataset.ok = g.ok ? (/intel/i.test(g.vendor) ? '2' : '1') : '0';
+    }
+    if (svc) {
+      const s = c.service;
+      svc.textContent = s.ok
+        ? (s.url + ' · GPU: ' + (s.gpu || '-') + ' · v2: '
+           + (s.reconstruct && s.reconstruct.ok ? '可用' : (s.reason || '不可用')))
+        : (s.reason || '未连接');
+      svc.dataset.ok = (s.ok && s.reconstruct && s.reconstruct.ok) ? '1' : (s.ok ? '2' : '0');
+    }
+    if (advice) {
+      if (v.level === 'v2') {
+        advice.textContent = '你现在走的是 v2 链路（GPU 高分辨率深度 + LDI 分层），画质最好。';
+      } else if (v.level === 'v2-partial') {
+        advice.textContent = '服务在，但 v2 不可用：' + (c.service.reason || '')
+          + '。按 docs/WebGPU.md 的「路线一」补齐依赖后即可启用。';
+      } else if (c.webgpu.ok && /intel/i.test(c.webgpu.vendor)) {
+        advice.textContent = '浏览器把 WebGPU 交给了核显（' + c.webgpu.vendor + '）。'
+          + '核显上跑 GPU 推理不如直接起本地服务；想走 v2：在 Windows「设置 → 系统 → 显示 → 显卡」'
+          + '里把 msedge.exe 设为「高性能」，再按 docs/WebGPU.md 起服务。';
+      } else {
+        advice.textContent = '当前是浏览器内在线链路（518² 小模型）。想要 v2 画质，'
+          + '按 docs/WebGPU.md 起本地服务并在 URL 加 ?api=http://127.0.0.1:8100。';
+      }
+    }
+  }
+
+  function setHudPipe(level, text) {
+    const e = el('hudPipe');
+    if (!e) return;
+    e.dataset.level = level;
+    e.textContent = text;
+  }
+
   function boot() {
     applyVersion();
+    initCaps();
     liveState = loadLiveState();
     buildGallery();
     buildCompass();

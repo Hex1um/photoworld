@@ -666,3 +666,73 @@ button.primary:hover { background: #f0e2c0; }
   }
   #btnLive.on span { color: var(--accent); }
 }
+
+/* 管线徽标（v2 / 在线）：告诉使用者现在跑的是哪条重建链路。
+   两条链路观感差一个代际，不标出来「效果不好」根本无法归因。 */
+.pipe-chip {
+  font-family: var(--mono);
+  font-size: 10.5px; line-height: 1;
+  letter-spacing: .04em;
+  padding: 4px 8px;
+  border-radius: 999px;
+  text-decoration: none;
+  color: var(--dim);
+  border: 1px solid rgba(255, 255, 255, .14);
+  background: rgba(255, 255, 255, .04);
+  user-select: none;
+  white-space: nowrap;
+  transition: color .2s, border-color .2s, background .2s;
+}
+.pipe-chip:hover { color: var(--accent); border-color: rgba(224, 207, 169, .4); }
+.pipe-chip[data-level="v2"] {
+  color: #9dffb4; border-color: rgba(126, 240, 160, .45); background: rgba(126, 240, 160, .10);
+}
+.pipe-chip[data-level="v2-partial"] {
+  color: #ffd479; border-color: rgba(255, 212, 121, .42); background: rgba(255, 212, 121, .10);
+}
+.pipe-chip[data-level="gpu"] {
+  color: #9ed4ff; border-color: rgba(158, 212, 255, .40); background: rgba(158, 212, 255, .09);
+}
+.pipe-chip[data-level="igpu"], .pipe-chip[data-level="v1"] { color: #ff9d9d; border-color: rgba(255, 157, 157, .35); }
+
+/* HUD 里的管线标记：进世界后仍然知道这次用的是哪条链路 */
+.hud-pipe {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: .05em;
+  padding: 1px 6px;
+  margin-right: 6px;
+  border-radius: 3px;
+  vertical-align: 1px;
+  color: #9dffb4;
+  border: 1px solid rgba(126, 240, 160, .35);
+  background: rgba(126, 240, 160, .09);
+}
+.hud-pipe:empty { display: none; }
+.hud-pipe[data-level="online"] {
+  color: #ff9d9d; border-color: rgba(255, 157, 157, .32); background: rgba(255, 157, 157, .08);
+}
+.hud-pipe[data-level="asset"] {
+  color: #9ed4ff; border-color: rgba(158, 212, 255, .34); background: rgba(158, 212, 255, .08);
+}
+
+/* 弹窗里的能力报告：使用者一眼看到"我现在跑的是哪条链路、为什么" */
+.cap-report {
+  margin: 14px 0 18px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, .10);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .03);
+}
+.cap-report .cap-line {
+  display: flex; gap: 10px; align-items: baseline;
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.9;
+}
+.cap-report .cap-line b { flex: 0 0 76px; color: var(--dim); font-weight: 500; }
+.cap-report .cap-line span { color: var(--fg); word-break: break-all; }
+.cap-report .cap-line span[data-ok="1"] { color: #9dffb4; }
+.cap-report .cap-line span[data-ok="0"] { color: #ff9d9d; }
+.cap-report .cap-line span[data-ok="2"] { color: #ffd479; }
+.cap-report p.dim { margin: 8px 0 0; font-size: 11.5px; }
+.modal-card h3 { font-size: 13px; margin: 16px 0 6px; letter-spacing: .02em; }
+.modal-card a { color: var(--accent); }
