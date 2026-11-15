@@ -303,3 +303,37 @@ CHANGELOG.md       面向使用者的更新日志
   （`?ldi=1` 的实验层会填洞，但 A/B 里出现色块，默认关）；绕到物体侧面仍能看出它是照片。
 - 视锥外不再由镜像补全（v1.13 的直角区域只覆盖照片投影的梯形），转身会看到程序化地面与雾；
   360° 全铺需要 `extend_fov` 级别的外推与修补，属于生成式方案的范畴。
+
+---
+
+## 隐私：照片不上传
+
+深度（Depth-Anything-V2）、语义（SegFormer）、实例（YOLOv8n）、补全（MI-GAN）
+四路推理全部在浏览器本地跑（onnxruntime-web / WASM），**照片与派生数据不经任何服务器**。
+learned 后端（`/api/extend`）默认关闭，只在显式开启时才发请求。
+
+推理结果用 `PW.inferenceCache`（IndexedDB，key = 尺寸 + 16×16 内容指纹）持久化：
+刷新页面后同一张图 **0 次 ONNX 推理**。隐私模式 / 配额不足 / 无 indexedDB 一律静默降级。
+
+## 模型与许可
+
+| 模型 | 用途 | 来源 | 许可 |
+| --- | --- | --- | --- |
+| Depth-Anything-V2-Small（ONNX，27MB） | 单目深度 | `depth-anything/Depth-Anything-V2` | Apache-2.0 |
+| SegFormer ADE20K（ONNX，4.4MB） | 语义分组（天空/天花板/地面） | `nvidia/segformer-b0` | NVIDIA Source Code License |
+| YOLOv8n-seg（ONNX，14MB） | 前景实例切分 | `ultralytics` | AGPL-3.0 |
+| MI-GAN（ONNX，29MB，`?migan=1`） | 画面外补全 | `Picsart-AI-Research/MI-GAN` | MIT |
+
+YOLOv8 是 AGPL-3.0：本项目以源码形式公开，如要商用需评估 AGPL 的传染性，
+或换成本更低许可的检测器（模型路径可替换，`js/objects.js` 里只有一处加载）。
+
+## 语料合规
+
+`tools/harvest.py` 采集的风景图**只用于本地调参与多视角质检**，
+`corpus/` 在 `.gitignore` 里，不随仓库分发；仓库里的 `worlds/` 只有自有或明确可用的示例图。
+
+## CI
+
+`.github/workflows/ci.yml`：语法检查 → 几何回归（`tools/test_regression.mjs`，无需浏览器）
+→ 版本串一致性（`version.json` / `index.html` / `js/app.js` 三者必须一致）在每次 push / PR 上跑。
+浏览器端冒烟（`tools/smoke.mjs`）需要真实 WebGL，留在本地跑。
