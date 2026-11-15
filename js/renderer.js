@@ -302,7 +302,7 @@
          贴图 UV 取自反投影场 —— 从任何角度看都没有放射状拉丝。 */
       /* 点云模式下不再画地面方格网：手机低角度那张「放射长条」就是它的
          近处三角形沿视线拉长、从点云缝隙里透出来的。地面交给点云自己覆盖。 */
-      if (world.meshes.groundGrid && !skip('ground') && !world.splatMode) {
+      if (world.meshes.groundGrid && !skip('ground') && (!world.splatMode || world.snowGround)) {
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(true);
@@ -319,7 +319,7 @@
          「一整块程序化色板」——24 张批量里最差那几张（粉紫峡谷平板、
          全绿草原平板）就是这个。mipBias 2.2 = 只取照片的低频颜色，
          既保住草/砂/水的地域色调，又不产生掠射拉丝。 */
-      if (world.meshes.groundGridPhoto && !skip('ground')) {
+      if (world.meshes.groundGridPhoto && !skip('ground') && !world.snowGround) {
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(true);

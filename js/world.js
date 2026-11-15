@@ -1576,7 +1576,13 @@
         /* v1.26：在**写 alpha 的最后一刻**做逐列轮廓兜底。
            前面那条 skyFill 会被后面的语义清零覆盖（我踩过这个坑），
            这里直接以写出去的值为准：轮廓线以下一律不透明。 */
-        col[k * 4 + 3] = aSky * aU * aV;
+        /* 雪地：画面下部（v>0.70）的照片地面与程序化雪地会拼成「贴片」，
+           让这部分 alpha 渐隐，交给地面网格接住（两张雪图实测）。 */
+        let aG = 1;
+        if (analysis.isSnow && v > 0.70) {
+          aG = 1 - 0.62 * smoothstep(0.70, 0.95, v);
+        }
+        col[k * 4 + 3] = aSky * aU * aV * aG;
         col[k * 4] = 1; col[k * 4 + 1] = 1; col[k * 4 + 2] = 1;
         // 有限区域的边界就是照片投影的梯形，alpha 硬边比"融色灰带"干净；
         // edge 保持 0，不参与 mode 4 的环境色混合。
@@ -2800,6 +2806,9 @@
       splatMode: !!(opts && opts.splat) && !(analysis.meanLum < 0.25)
         && !(analysis.horizon < 0.42 || analysis.horizon > 0.72),
       splatScale: (opts && opts.splatScale) || 30,
+      /* 雪地/冰川（v1.26.6）：低纹理高亮度，照片 UV 在地面上梯度乱跳，
+         掠射时被拉成放射拖影（9aee3465 那张）。这时改用程序化雪地。 */
+      snowGround: !!analysis.isSnow,
       /* v1.17：重建表面是单层薄壳，从背面看就是糊成一片的拉花。
          默认关闭背面（?cull=0 保留旧双面），转到侧后方时看到的是
          360° 低频世界幕 + 雾，而不是「纸片背面」。 */
