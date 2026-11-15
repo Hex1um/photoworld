@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '1.26.4';
+  const VERSION = '1.26.5';
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -351,7 +351,10 @@
         // 但 32 视角语料质检暴露了代价：雪地/水面/建筑这类低纹理题材，
         // 照片 UV 在掠射角被拉成流线（edd4e65e 雪地 lowVoid 0.41）。
         // ?groundphoto=1 可按题材手动开。
-        groundPhoto: params.get('groundphoto') === '1',
+        // v1.26.5：照片 UV 地面恢复默认开。v1.24.6 关掉它是怕雪地拉丝，
+        // 但关掉后地面只剩程序化色板（24 张批量里最差几张的根因）。
+        // 现在用 mipBias 2.2 取低频照片色，兼顾色调与抗拉丝。
+        groundPhoto: params.get('groundphoto') !== '0',
         // 地面拓扑：默认世界坐标方格网；?gfan=1 回到旧的极坐标扇形地面（A/B）
         groundGrid: params.get('gfan') !== '1',
         // 地面渐隐区间可调（A/B 用）：?gfade=起始m,结束m,强度

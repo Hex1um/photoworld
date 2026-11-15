@@ -2748,8 +2748,9 @@
     const m = {
       relief: relief ? PWGL.createMesh(gl, relief) : null,
       splat: (relief && relief.grid) ? PWGL.createMesh(gl, buildSplat(relief, gl, 2)) : null,
-      flat: (analysis.meanLum < 0.25
-        || (opts && opts.sem && opts.sem.stats && opts.sem.stats.water > 0.5))
+      flat: (analysis.meanLum < 0.22
+        || !!(opts && opts.sem && opts.sem.stats
+          && opts.sem.stats.water > 0.55 && opts.sem.stats.sky < 0.1))
         ? PWGL.createMesh(gl, buildFlatCard(analysis, gl)) : null,
       splatHole: (relief && relief.grid && opts && opts.fgMask && analysis.bgPhotoCanvas)
         ? PWGL.createMesh(gl, buildHolePoints(relief, opts.fgMask, gl, 2)) : null,
@@ -2790,9 +2791,12 @@
       walkRadius: 0,
       /* 点云只用于室外风景：室内是密集小几何 + 大俯角，点云会把墙面和楼梯
          撕成黑块/白块（楼梯图实测），室内仍走三角网格（v1.15 的完整效果）。 */
-      flatMode: analysis.meanLum < 0.25
+      /* 降级条件收窄（v1.26.5）：公园照 vegetation>0.5 却深度可用，被误降级成
+         「贴纸 + 倒影三角」。植被类不再降级（改用「不做近景限幅」缓解）；
+         整屏水面同时要求几乎没有天空，避免湖岸风景被误伤。 */
+      flatMode: analysis.meanLum < 0.22
         || !!(opts && opts.sem && opts.sem.stats
-          && (opts.sem.stats.water > 0.5 || opts.sem.stats.vegetation > 0.5)),
+          && opts.sem.stats.water > 0.55 && opts.sem.stats.sky < 0.1),
       splatMode: !!(opts && opts.splat) && !(analysis.meanLum < 0.25)
         && !(analysis.horizon < 0.42 || analysis.horizon > 0.72),
       splatScale: (opts && opts.splatScale) || 30,

@@ -310,14 +310,23 @@
         drawMesh(world, world.meshes.groundGrid, {
           tex: world.tex.ground, mode: 4, fog: 0.26, mipBias: 0.2
         });
-        /* 照片 UV 版地面（v1.23）：同一张几何，UV 换成"该点反投影到照片的坐标"，
-           顶点 alpha = 视锥内权重。叠在平铺地面之上 —— 视锥内出现照片自己的
-           草/砂/水波细节，视锥外仍然用平铺贴图（不拉丝）。 */
-        if (world.meshes.groundGridPhoto) {
-          drawMesh(world, world.meshes.groundGridPhoto, {
-            tex: world.tex.photo, mode: 4, fog: 0.26, mipBias: 0, backdrop: [0, 0]
-          });
-        }
+        gl.disable(gl.BLEND);
+        gl.enable(gl.CULL_FACE);
+      }
+
+      /* 照片 UV 地面（v1.26.5 起独立绘制）：点云模式下也必须画。
+         点云地面是 step2 的稀疏点，只靠它 + floor 底板，整片地面会退成
+         「一整块程序化色板」——24 张批量里最差那几张（粉紫峡谷平板、
+         全绿草原平板）就是这个。mipBias 2.2 = 只取照片的低频颜色，
+         既保住草/砂/水的地域色调，又不产生掠射拉丝。 */
+      if (world.meshes.groundGridPhoto && !skip('ground')) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.depthMask(true);
+        gl.disable(gl.CULL_FACE);
+        drawMesh(world, world.meshes.groundGridPhoto, {
+          tex: world.tex.photo, mode: 4, fog: 0.26, mipBias: 2.2, backdrop: [0, 0]
+        });
         gl.disable(gl.BLEND);
         gl.enable(gl.CULL_FACE);
       }
