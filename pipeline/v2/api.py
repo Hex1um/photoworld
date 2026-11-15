@@ -44,6 +44,11 @@ DEFAULTS = {
     "flatten": True, "skirt_min": 0.12, "skirt_max": 6.0,
     "stretch_clamp": 12.0, "strong_median": 7, "quantize": 0.0,
     "repr": "auto", "scatter_thr": 0.002, "cliff_thr": 0.010, "ground_tol": 0.30,
+    # 视锥外扩（模型补全）：倍数 >1 才启用。1.7 = 左右各多 35%，
+    # 纵向 1.3 = 上 8% / 下 22%（地面比天空更需要内容）
+    "outpaint": 1.70, "outpaint_y": 1.30, "outpaint_steps": 26,
+    "outpaint_side": 1024, "outpaint_seed": 0, "outpaint_model": True,
+    "ground_radius": 400.0,
     "long_side": 1540, "device": "cuda", "median_size": 3,
 }
 
@@ -99,6 +104,22 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
     img_src = Image.open(io.BytesIO(data)).convert("RGB")
     src_size = img_src.size
     hfov, fov_src, meta = hfov_from_image(img_src)
+    hfov0 = hfov
+
+    # ---- 视锥外扩：把"照片只有一块梯形"补成"周围也有世界" --------------
+    # 不做这一步，画面左右下三块是纯色，照片边界是一条刀切硬边。
+    oinfo = {"mode": "off"}
+    if float(opts["outpaint"]) > 1.01:
+        import importlib
+        op = importlib.import_module("outpaint")
+        img_src, oinfo = op.outpaint(
+            img_src, ROOT,
+            scale_x=float(opts["outpaint"]), scale_y=float(opts["outpaint_y"]),
+            device=opts["device"], use_model=bool(opts["outpaint_model"]),
+            steps=int(opts["outpaint_steps"]), gen_side=int(opts["outpaint_side"]),
+            seed=int(opts["outpaint_seed"]))
+        if img_src.size[0] != src_size[0]:
+            hfov = op.hfov_of_extended(hfov0, src_size[0], img_src.size[0])
 
     work = img_src
     if max(work.size) > opts["work_side"]:
@@ -158,6 +179,8 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
 
     manifest = {
         "version": "v2", "source_size": list(src_size), "work_size": [tw, th],
+        "outpaint": oinfo, "hfov_deg": round(math.degrees(hfov), 2),
+        "hfov_source_deg": round(math.degrees(hfov0), 2),
         "texture_size": list(tex.size), "fov_source": fov_src,
         "camera": {"hfov_deg": round(math.degrees(cam.hfov), 2),
                    "vfov_deg": round(math.degrees(cam.vfov), 2),

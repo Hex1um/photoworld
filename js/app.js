@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.1.1';
+  const VERSION = '2.2.0';
 
   /* v2 服务的地址：显式 ?api= 优先，其次是自动发现（本机常见端口）。
      自动发现写在启动流程里，不需要使用者改 URL —— 这是"更快捷地启用 v2"的关键。 */
@@ -1386,8 +1386,9 @@
           + '核显上跑 GPU 推理不如直接起本地服务；想走 v2：在 Windows「设置 → 系统 → 显示 → 显卡」'
           + '里把 msedge.exe 设为「高性能」，再按 docs/WebGPU.md 起服务。';
       } else {
-        advice.textContent = '当前是浏览器内在线链路（518² 小模型）。想要 v2 画质，'
-          + '按 docs/WebGPU.md 起本地服务并在 URL 加 ?api=http://127.0.0.1:8100。';
+        advice.innerHTML = '当前是浏览器内在线链路（518² 小模型）。想要 v2 画质：'
+          + '<a href="start_v2.bat" download>下载一键启动脚本</a> 双击运行即可，'
+          + '或看 <a href="gpu.html" target="_blank" rel="noopener">运行环境自检</a>。';
       }
     }
   }

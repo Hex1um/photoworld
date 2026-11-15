@@ -25,3 +25,6 @@ package-lock.json
 
 # 启动器日志与 PID（本机运行时产物）
 /logs/
+
+# inpainting 权重（6.5GB，走 HF 缓存，不入库）
+/models/sd2_inpaint/

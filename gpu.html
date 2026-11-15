@@ -51,6 +51,15 @@
     color: var(--fg); background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.16);
   }
   button:hover { border-color: rgba(224,207,169,.5); color: var(--accent); }
+  a.btn {
+    font: inherit; font-size: 12.5px; padding: 7px 14px; border-radius: 999px;
+    text-decoration: none; display: inline-block;
+    color: var(--fg); background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.16);
+  }
+  a.btn.primary { background: rgba(224,207,169,.14); border-color: rgba(224,207,169,.45); color: var(--accent); }
+  a.btn:hover { border-color: rgba(224,207,169,.5); color: var(--accent); }
+  details.cmd { margin: 10px 0 0; }
+  details.cmd summary { cursor: pointer; color: var(--dim); font-size: 12.5px; }
   button.primary { background: rgba(224,207,169,.14); border-color: rgba(224,207,169,.45); color: var(--accent); }
   .dim { color: var(--dim); }
   a { color: var(--accent); }
@@ -79,6 +88,8 @@
   </table>
 
   <div class="row">
+    <a class="btn primary" href="start_v2.bat" download>⬇ 下载一键启动脚本</a>
+    <button id="btnCopyCmd">复制启动命令</button>
     <button class="primary" id="btnRe">重新检测</button>
     <button id="btnBench">跑 GPU 算力测试</button>
     <button id="btnCopy">复制诊断报告</button>
@@ -90,9 +101,12 @@
   <ol>
     <li><b>路线一：本地 GPU 服务（画质最好，需要 NVIDIA 显卡）</b><br>
       服务端跑 Depth-Anything-V2-Large + LDI 分层，产出的世界是照片级。
+      <p class="dim" style="margin:0 0 6px">最简做法：下载上面的<b>一键启动脚本</b>，双击它，其余全自动
+        （起服务、等就绪、开浏览器）。已经放好桌面版也可以直接用。</p>
+      <details class="cmd"><summary>高级：手动敲命令</summary>
       <pre>python -m pip install torch transformers scipy fastapi uvicorn
 cd server &amp;&amp; python -m uvicorn app:app --host 127.0.0.1 --port 8100
-# 然后打开：http://127.0.0.1:8099/?api=http://127.0.0.1:8100</pre>
+# 然后打开：http://127.0.0.1:8099/?api=http://127.0.0.1:8100</pre></details>
       权重约 1.3GB，放置方法与镜像下载命令见 <code>pipeline/v2/README.md</code>。
     </li>
     <li><b>路线二：浏览器内 WebGPU（需要独显被浏览器认领）</b><br>
@@ -253,6 +267,17 @@ cd server &amp;&amp; python -m uvicorn app:app --host 127.0.0.1 --port 8100
       + (grade === 1 ? ' · 独显级' : grade === 2 ? ' · 中低端/核显级' : ' · 核显级'), grade);
     log('GPU 算力   ' + r.gflops + ' GFLOPS');
   });
+  $('btnCopyCmd').addEventListener('click', async () => {
+    const cmd = 'cd server && python -m uvicorn app:app --host 127.0.0.1 --port 8100';
+    try {
+      await navigator.clipboard.writeText(cmd);
+      $('btnCopyCmd').textContent = '已复制';
+      setTimeout(() => { $('btnCopyCmd').textContent = '复制启动命令'; }, 1500);
+    } catch (e) {
+      out.textContent = cmd;
+    }
+  });
+
   $('btnCopy').addEventListener('click', async () => {
     const txt = window.__capsReport || lines.join('\n');
     try {

@@ -84,7 +84,24 @@ def cliff_mask(z: np.ndarray, step: int, edge_ratio: float = 2.4,
     ratio = zmax / np.maximum(zmin, 1e-6)
     e = np.maximum(np.maximum(edge_str[:-1, :-1], edge_str[:-1, 1:]),
                    np.maximum(edge_str[1:, :-1], edge_str[1:, 1:]))
-    return (ratio > edge_ratio) & (e > edge_tau), ratio
+    return (ratio > edge_ratio) & (e > edge_tau), ratio, edge_str
+
+
+def cliff_to_pixels(cliff: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """把 (H-1,W-1) 的"格掩码"摊到 (H,W) 的像素上（一格传播到它的四个角）。
+
+    建面用的是格子，分割用的是像素 —— 两边形状差 1，直接相与会报
+    "operands could not be broadcast"。这个转换在两处都要用。
+    """
+    if cliff.shape == shape:
+        return cliff
+    out = np.zeros(shape, dtype=bool)
+    h, w = cliff.shape
+    out[:h, :w] |= cliff
+    out[1:h + 1, :w] |= cliff
+    out[:h, 1:w + 1] |= cliff
+    out[1:h + 1, 1:w + 1] |= cliff
+    return out
 
 
 def segment_layers(zs: np.ndarray, valid: np.ndarray, cliff: np.ndarray,
@@ -98,15 +115,7 @@ def segment_layers(zs: np.ndarray, valid: np.ndarray, cliff: np.ndarray,
     现在层界只落在真实断崖（遮断边）上：两侧本来就不连面，缝藏在物体轮廓里。
     """
     from scipy import ndimage
-    # cliff 是 (H-1,W-1) 的"格"掩码，先摊到像素上（一个断崖格传播到它的四个角）
-    if cliff.shape != zs.shape:
-        cp = np.zeros(zs.shape, dtype=bool)
-        cp[:-1, :-1] |= cliff; cp[1:, :-1] |= cliff
-        cp[:-1, 1:] |= cliff; cp[1:, 1:] |= cliff
-        cliff_px = cp
-    else:
-        cliff_px = cliff
-    barrier = cliff_px | (~valid)
+    barrier = cliff_to_pixels(cliff, zs.shape) | (~valid)
     # 断崖膨胀 1 像素：单像素宽的洞不足以让两侧分开，却足以漏光
     barrier = ndimage.binary_dilation(barrier, np.ones((3, 3), bool))
     free = ~barrier
@@ -174,7 +183,7 @@ def _vertex_normals(P: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
 def build_layer(P: np.ndarray, uv: np.ndarray, mask: np.ndarray, filled: np.ndarray,
                 zgrid: np.ndarray, dir_world: np.ndarray, skirt_delta_min: float,
-                skirt_delta_max: float) -> dict:
+                skirt_delta_max: float, skirt_cap: float = 3.0) -> dict:
     """单层网格 + 裙边。
 
     mask    : (H,W) 该层拥有哪些顶点
@@ -248,8 +257,9 @@ def build_layer(P: np.ndarray, uv: np.ndarray, mask: np.ndarray, filled: np.ndar
         z1 = z_in[jj, ii]
         z2 = np.maximum(z_out[jj, ii], 0.0)
         # 长度只看**近端**：远端是背景（可能几百米），按它算会把裙边拉成 6m 长的刺。
-        d1 = np.clip(0.45 * z1, skirt_delta_min, skirt_delta_max)
-        d2 = np.clip(0.45 * np.minimum(z2, z1 * 1.5), skirt_delta_min, skirt_delta_max)
+        cap = min(skirt_delta_max, skirt_cap)
+        d1 = np.clip(0.40 * z1, skirt_delta_min, cap)
+        d2 = np.clip(0.40 * np.minimum(z2, z1 * 1.5), skirt_delta_min, cap)
         q1 = p1 + dv1 * d1[..., None]
         q2 = p2 + dv2 * d2[..., None]
         base = vcount + np.arange(jj.size * 4, dtype=np.int64).reshape(jj.size, 4)
@@ -259,7 +269,11 @@ def build_layer(P: np.ndarray, uv: np.ndarray, mask: np.ndarray, filled: np.ndar
         fn = fn / np.maximum(np.linalg.norm(fn, axis=-1, keepdims=True), 1e-9)
         sk_pos.append(np.stack([p1, p2, q2, q1], axis=1))
         sk_nrm.append(np.repeat(fn[:, None, :], 4, axis=1))
-        sk_uv.append(np.stack([u1, u2, u2, u1], axis=1))
+        # 裙边的 UV **两端都用内侧端点**的颜色。
+        # 用 (u1,u2,u2,u1) 会让裙边从物体色渐变到背景色 —— 在剪影处等于画了一圈
+        # 亮色轮廓（实测：灯柱、灌木、人身上都是一圈发白的描边）。
+        # 只用内侧色，裙边读起来是"这个物体自己的厚度"。
+        sk_uv.append(np.stack([u1, u1, u1, u1], axis=1))
         b0, b1, b2, b3 = base[:, 0], base[:, 1], base[:, 2], base[:, 3]
         sk_idx.append(np.stack([b0, b1, b2, b0, b2, b3], axis=1).astype(np.uint32))
         nsk += int(jj.size)
@@ -322,15 +336,89 @@ def build_points(P: np.ndarray, rgb: np.ndarray, valid: np.ndarray,
             "point_px": float(step_used) * 2.0}
 
 
+def build_ground_skirt(P: np.ndarray, ground: np.ndarray, uv: np.ndarray,
+                       radius: float = 400.0, cells: int = 96,
+                       n_palette: int = 12, inner_frac: float = 0.28) -> dict | None:
+    """重建区域之外补一整圈地面，让"视锥外的灰白"变成"远处地面 + 雾"。
+
+    为什么需要它：v2 的几何止于照片的投影梯形，梯形外什么都没有 ——
+    实测截图里画面左右下三块纯色、以及山脚那条刀切硬边，都是这个边界。
+    光靠外扩（模型补全）只能把边界推远，推不远的地方还是要有东西兜住。
+
+    做法：
+      * 地面高度取"地面像素的 y 中位数"（相机系里约等于 -eye）；
+      * 内圈留空（inner_frac），避免与重建网格重叠打架；
+      * 颜色**从照片自己的地面像素里采样**：把地面像素的 UV 聚成 n_palette 个代表值，
+        按位置哈希轮流贴到裙边顶点上。这样裙边天然带一点照片的地面杂色，
+        不再是纯色板，也不需要额外贴图。
+      * 法线一律朝上；远端交给雾（渲染器按距离混雾），所以不需要写衰减。
+    """
+    if not ground.any():
+        return None
+    # 高度必须取地面像素的**真实 y**（世界坐标），不能拿沿视线的距离取负 ——
+    # 早先写成 -zs 得到的是"负的几十上百米"，裙边整个沉到地下，
+    # 画面里表现成"上半是景、下半是一整块地面"的硬地平线。
+    # 再压低 0.2m 并往内延伸：裙子要钻到重建网格下面，
+    # 否则两者交界（网格远端 vs 平坦裙边）会留一条亮缝。
+    gy = float(np.median(P[ground][:, 1])) - 0.20
+    # 用地面像素的 UV 做色板
+    g_uv = uv[ground]
+    if g_uv.shape[0] < 8:
+        return None
+    idx = np.linspace(0, g_uv.shape[0] - 1, min(n_palette, g_uv.shape[0])).astype(int)
+    palette = g_uv[np.argsort(g_uv[:, 1] * 1.0 + g_uv[:, 0] * 0.37 + np.random.rand(g_uv.shape[0]) * 0.0)[idx]]
+
+    n = int(cells)
+    lin = np.linspace(-radius, radius, n + 1, dtype=np.float32)
+    X, Z = np.meshgrid(lin, lin)                 # Z 向 -Z 是前方，这里用世界 z
+    Z = Z - radius * 0.35                        # 略向前铺，画面里主要是前方
+    inner = radius * inner_frac
+    hole = (np.abs(X) < inner) & (np.abs(Z + radius * 0.35) < inner)
+
+    pos, nrm, uvout, index = [], [], [], []
+    vid = np.full(X.shape, -1, dtype=np.int64)
+    for j in range(n + 1):
+        for i in range(n + 1):
+            if hole[j, i]:
+                continue
+            vid[j, i] = len(pos) // 3
+            pos.extend([float(X[j, i]), gy, float(Z[j, i])])
+            nrm.extend([0.0, 1.0, 0.0])
+            # 按格子哈希挑一个色板 UV：既不是纯色，也不会出现明显重复
+            k = (j * 73856093 ^ i * 19349663) % palette.shape[0]
+            uvout.extend([float(palette[k, 0]), float(palette[k, 1])])
+
+    for j in range(n):
+        for i in range(n):
+            a, b = vid[j, i], vid[j + 1, i]
+            c, d = vid[j, i + 1], vid[j + 1, i + 1]
+            if a < 0 or b < 0 or c < 0 or d < 0:
+                continue
+            index.extend([a, b, c, c, b, d])
+
+    if not index:
+        return None
+    return {
+        "name": "ground",
+        "pos": np.asarray(pos, dtype=np.float32).reshape(-1, 3),
+        "nrm": np.asarray(nrm, dtype=np.float32).reshape(-1, 3),
+        "uv": np.asarray(uvout, dtype=np.float32).reshape(-1, 2),
+        "index": np.asarray(index, dtype=np.uint32),
+    }
+
+
 def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
           far_split: float = 70.0, near_split: float = 12.0,
           sky: np.ndarray | None = None, edge_ratio: float = 2.4,
           flatten: bool = True, skirt_min: float = 0.12, skirt_max: float = 6.0,
           dist_min: float = 0.5, median_size: int = 3, ground_tol: float = 0.30,
+          skirt_cap: float = 3.0,
           stretch_clamp: float = 12.0, strong_median: int = 7,
           quantize: float = 0.0, rgb: np.ndarray | None = None,
           repr_mode: str = "auto", scatter_thr: float = 0.002,
-          cliff_thr: float = 0.010) -> dict:
+          cliff_thr: float = 0.010, ground_radius: float = 400.0,
+          seg_edge_tau: float = 0.10, quad_stretch_max: float = 0.0,
+          ground_cells: int = 96) -> dict:
     """主入口：深度（米）→ 分层网格。
 
     返回 {"layers": [...], "stats": {...}}，可直接交给 pipeline/glb.write_glb。
@@ -378,14 +466,19 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
     # （最大 2802×），在雪脊这种高对比区域就形成可见的彩色细条。
     # 处理办法：只在这些区域把深度换成更大窗口的中值 —— 相当于承认"这里本来
     # 就分辨不出细节"，用更平滑的表面换更均匀的纹理映射。其余区域一格不动。
+    # 纹理拉伸倍数：每个格子"3D 边长 / 一像素应有的世界尺寸"。
+    # 它同时服务两件事：① 超标区域平滑深度；② **超标格子直接不连面**。
+    # ② 是关键：剪影处的深度是"软过渡"，逐格深度比看着不大（所以 cliff 漏判），
+    # 但连着建面就是把近物的暗像素拉成几十像素长的黑带 —— 实测灯柱/人头上的黑弧。
+    from scipy import ndimage
+    foot = (2.0 * math.tan(cam.hfov * 0.5) / cam.w) * zs
+    ddx = np.linalg.norm(P[:, 1:] - P[:, :-1], axis=-1) / np.maximum(foot[:, :-1], 1e-6)
+    ddy = np.linalg.norm(P[1:] - P[:-1], axis=-1) / np.maximum(foot[:-1], 1e-6)
+    st = np.zeros_like(zs)
+    st[:, :-1] = np.maximum(st[:, :-1], ddx)
+    st[:-1, :] = np.maximum(st[:-1, :], ddy)
+
     if stretch_clamp > 0:
-        from scipy import ndimage
-        foot = (2.0 * math.tan(cam.hfov * 0.5) / cam.w) * zs
-        ddx = np.linalg.norm(P[:, 1:] - P[:, :-1], axis=-1) / np.maximum(foot[:, :-1], 1e-6)
-        ddy = np.linalg.norm(P[1:] - P[:-1], axis=-1) / np.maximum(foot[:-1], 1e-6)
-        st = np.zeros_like(zs)
-        st[:, :-1] = np.maximum(st[:, :-1], ddx)
-        st[:-1, :] = np.maximum(st[:-1, :], ddy)
         bad = st > stretch_clamp
         if bad.any():
             z_s = np.exp(ndimage.median_filter(np.log(np.maximum(zs, 1e-3)),
@@ -408,7 +501,7 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
     fwd = -P[..., 2]
     valid = np.isfinite(zs) & (zs > dist_min)
     # 断崖掩码要在表示选择之前算：它是"该用网格还是点云"两个判据之一
-    cliff, ratio = cliff_mask(zs, step, edge_ratio)
+    cliff, ratio, edge_str = cliff_mask(zs, step, edge_ratio)
 
     # ---- 表示选择：网格还是点云 -----------------------------------
     # 判据是"散布度"（相邻深度比 > 4 的像素占比），不是画面内容的名字。
@@ -449,7 +542,41 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
                         "cliff": round(cliff_frac_auto, 4),
                         "triangles": 0, "vertices": int(pts["pos"].shape[0])}}}
     valid_q = valid[:-1, :-1] & valid[1:, :-1] & valid[:-1, 1:] & valid[1:, 1:]
-    ok_quad = valid_q & ~cliff
+
+    # ---- 地物分割：不同地物之间**永不连面** ----------------------------
+    # 实测的坏例子：一张校园照片里有一根近处灯柱，深度确实把它判成了"近"，
+    # 但建面时柱子边缘的四边形连到了几十米外的背景上，于是柱子被横向拉成
+    # 一大片糊条。逐格比较深度比（cliff 判据）救不了它 —— 阈值调低就剪碎地形，
+    # 调高就漏掉细杆。
+    # 正确做法不是调阈值，而是**先分割再建面**：
+    #   把"深度平滑连通"的区域标成同一块，只在同一块内部建四边形。
+    # 这样柱子、人、楼房各自成块，柱子只可能长成一张窄卡片，不可能横着连出去。
+    from scipy import ndimage
+    # 分割屏障要比建面判据**更严**：建面用 2.4 倍深度比 + 结构张量，太稀疏，
+    # 细杆的轮廓线断断续续 → 整幅并成一整块（实测灯柱照片只分出 1 块）。
+    # 这里只用"相对深度梯度"，阈值低得多，能沿细杆画出连续边界。
+    seg_barrier = ndimage.binary_dilation(
+        (edge_str > seg_edge_tau) | cliff_to_pixels(cliff, zs.shape) | (~valid),
+        np.ones((3, 3), bool))
+    seg_labels, n_seg = ndimage.label(~seg_barrier)
+    if n_seg:
+        # 断崖像素就近归到相邻地物（否则每条边都留 1px 无主带）
+        idx_seg = ndimage.distance_transform_edt(seg_barrier, return_distances=False,
+                                                return_indices=True)
+        seg = seg_labels[idx_seg[0], idx_seg[1]]
+    else:
+        seg = np.ones(zs.shape, dtype=np.int32)
+    s00 = seg[:-1, :-1]; s10 = seg[1:, :-1]; s01 = seg[:-1, 1:]; s11 = seg[1:, 1:]
+    same_seg = (s00 == s10) & (s00 == s01) & (s00 == s11)
+
+    ok_quad = valid_q & ~cliff & same_seg
+    if quad_stretch_max > 0:
+        # 可选：把"纹理拉伸超过 N 倍"的格子也剪掉。
+        # 默认关闭 —— 实测在细杆/人头这类剪影上，剪掉高拉伸格子会让中景塌成
+        # 一条浅色空带（比原来的黑带更糟）。真正该走的是"物体卡片 + 模型补背面"。
+        cell_st = np.maximum(st[:-1, :-1],
+                             np.maximum(st[:-1, 1:], np.maximum(st[1:, :-1], st[1:, 1:])))
+        ok_quad = ok_quad & (cell_st <= quad_stretch_max)
 
     # 分层：按距离切"近景 / 无视差背景"两层。
     #
@@ -476,7 +603,8 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
         q = (ok_quad & mask[:-1, :-1] & mask[1:, :-1] & mask[:-1, 1:] & mask[1:, 1:])
         if not q.any():
             continue
-        L = build_layer(P, uv, mask, q, zs, dir_world, skirt_min, skirt_max)
+        L = build_layer(P, uv, mask, q, zs, dir_world, skirt_min, skirt_max,
+                        skirt_cap=skirt_cap)
         L["name"] = names[lid]
         layers.append(L)
         stats[names[lid]] = {
@@ -488,6 +616,23 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
             "depth_p90": round(float(np.percentile(fwd[mask], 90)), 2),
         }
 
+    # 远景地面裙边：把"视锥外的空白"变成"远处地面 + 雾"。
+    # 必须在 _global 统计之前追加，否则三角/顶点数会少算这一层。
+    if ground_radius > 0:
+        gmask = ground if ground.shape == zs.shape else ground[::step, ::step]
+        if gmask.shape == zs.shape:
+            skirt = build_ground_skirt(P, gmask, uv,
+                                       radius=ground_radius, cells=ground_cells)
+            if skirt is not None:
+                layers.append(skirt)
+                stats["ground"] = {
+                    "vertices": int(skirt["pos"].shape[0]),
+                    "triangles": int(skirt["index"].size // 3),
+                    "skirt_quads": 0, "pixels": int(ground.sum()),
+                    "depth_p10": round(float(ground_radius * 0.3), 1),
+                    "depth_p90": round(float(ground_radius), 1),
+                }
+
     stats["_global"] = {
         "grid": [int(hh), int(ww)], "step": int(step),
         "cliff_frac": round(float(cliff.mean()), 4),
@@ -495,6 +640,7 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
         "ground_frac": round(float(ground.mean()), 4),
         "far_split": far_split, "near_split": near_split,
         "repr": "mesh", "scatter": round(float(scattered), 4),
+        "segments": int(n_seg),
         "cliff": round(cliff_frac_auto, 4),
         "triangles": int(sum(int(l.get("index", np.zeros(0, np.uint32)).size // 3) for l in layers)),
         "vertices": int(sum(int(l["pos"].shape[0]) for l in layers)),
