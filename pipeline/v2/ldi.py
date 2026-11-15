@@ -418,6 +418,7 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
           repr_mode: str = "auto", scatter_thr: float = 0.002,
           cliff_thr: float = 0.010, ground_radius: float = 400.0,
           seg_edge_tau: float = 0.10, quad_stretch_max: float = 0.0,
+          card_flatten: bool = True,
           ground_cells: int = 96) -> dict:
     """主入口：深度（米）→ 分层网格。
 
@@ -567,6 +568,28 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
     else:
         seg = np.ones(zs.shape, dtype=np.int32)
     s00 = seg[:-1, :-1]; s10 = seg[1:, :-1]; s01 = seg[:-1, 1:]; s11 = seg[1:, 1:]
+
+    # ---- 前景细物体压成"卡片" ----------------------------------------
+    # 灯柱、树枝、行人这类"显著近于周边且很细"的物体，深度在剪影处是 3~6 像素的
+    # 软过渡；建面时这段斜坡会把物体的暗像素一路拉到远处，肉眼看就是一条黑弧。
+    # 先把它们的深度压成各自的中位数（= 一张正对相机的卡片），斜坡消失，
+    # 拉丝也就没了。代价是物体失去自身的微小起伏 —— 对细杆/人来说这是可接受的。
+    if card_flatten:
+        med_big = ndimage.median_filter(zs, size=31, mode="nearest")
+        near_mask = valid & (zs < 0.55 * med_big)
+        area_total = max(1, int(valid.sum()))
+        for lab in range(1, n_seg + 1):
+            m = (seg == lab) & valid
+            a = int(m.sum())
+            if a == 0 or a > 0.12 * area_total:
+                continue
+            if float(near_mask[m].mean()) < 0.60:
+                continue
+            zs[m] = float(np.median(zs[m]))
+        P = rays * zs[..., None]
+        P[..., 2] *= -1.0
+        fwd = -P[..., 2]
+
     same_seg = (s00 == s10) & (s00 == s01) & (s00 == s11)
 
     ok_quad = valid_q & ~cliff & same_seg
