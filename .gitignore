@@ -22,3 +22,6 @@ package-lock.json
 # v2 中间产物：深度缓存 / 烘焙输出（world.glb 每个 10MB 量级）
 /cache/
 /pipeline/v2/_tmp_out.glb
+
+# 启动器日志与 PID（本机运行时产物）
+/logs/
