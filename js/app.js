@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.3.1';
+  const VERSION = '2.3.2';
 
   /* v2 服务的地址：显式 ?api= 优先，其次是自动发现（本机常见端口）。
      自动发现写在启动流程里，不需要使用者改 URL —— 这是"更快捷地启用 v2"的关键。 */
@@ -1168,7 +1168,8 @@
     /* v1.19：默认开启。以前默认关着，扇环外只有一套全局 fBm —— 转身看到的是
        同一套地貌，用户读作「重复生成」。现在默认按扇区主题生成（混乱度 0.45），
        按钮只是用来关掉/调参，而不是「开启才生成」。 */
-    let st = { on: true, chaos: 0.45, memory: 0.85 };
+    // 用户指定默认：实时变化开、混乱度 0.1（整片世界同一个主题）、记忆力 1.0（生成后基本不变）
+    let st = { on: true, chaos: 0.1, memory: 1.0 };
     try {
       const saved = JSON.parse(window.localStorage.getItem(LIVE_KEY) || 'null');
       if (saved && typeof saved === 'object') {
@@ -1184,7 +1185,7 @@
     return st;
   }
 
-  let liveState = { on: true, chaos: 0.45, memory: 0.85 };
+  let liveState = { on: true, chaos: 0.1, memory: 1.0 };
 
   function saveLiveState() {
     try { window.localStorage.setItem(LIVE_KEY, JSON.stringify(liveState)); } catch (e) { /* ignore */ }
