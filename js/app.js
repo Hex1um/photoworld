@@ -6,7 +6,15 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.0.1';
+  const VERSION = '2.1.0';
+
+  /* v2 服务的地址：显式 ?api= 优先，其次是自动发现（本机常见端口）。
+     自动发现写在启动流程里，不需要使用者改 URL —— 这是"更快捷地启用 v2"的关键。 */
+  let apiBase = '';
+  /* 自动发现的 Promise：?w= / ?img= 会在 DOMContentLoaded 后 120ms 就进世界，
+     而自动探测要几百毫秒。早先没有这个等待，结果是"服务明明在，却走了在线链路"
+     —— 表现为徽标写着 v2 就绪、画面却是 518² 的观感。 */
+  let capsReady = null;
 
   const WORLDS = [
     { id: 'alpine', name: '晨雾湖岸', sub: '高山湖泊 · 破晓', src: 'worlds/alpine.jpg', thumb: 'worlds/alpine_thumb.jpg', badge: '晨雾' },
@@ -159,9 +167,13 @@
    * 且没有显式 ?v2=0。服务不在或失败时**静默回退**在线链路，不影响原有用法。 */
   async function tryReconstructV2(def) {
     const q = new URLSearchParams(location.search);
-    const api = q.get('api');
-    if (!api || q.get('v2') === '0' || !def || !def.src) return false;
-    const base = api.replace(/\/+$/, '');
+    if (q.get('v2') === '0' || !def || !def.src) return false;
+    if (!apiBase && capsReady) {
+      // 最多等 4s：宁可慢一点，也不要因为"探测还没回来"就降级到在线链路
+      await Promise.race([capsReady, sleep(4000)]);
+    }
+    if (!apiBase) return false;
+    const base = apiBase.replace(/\/+$/, '');
     try {
       loader.classList.remove('hidden', 'done', 'burst');
       el('loaderTitle').textContent = '正在用 GPU 重建场景';
@@ -732,9 +744,38 @@
         count: l.index.length,
         mode: gl.TRIANGLES
       });
+      // 点云层（v2.1）：GLB 里 mode=0 的层。用于"细枝/树叶"这类网格必然剪碎的
+      // 内容 —— 没有"连接"就没有拉丝与碎片。点云层单独走 points2 通道。
+      const pointLayers = asset.layers.filter((l) => l.points);
+      const triLayers = asset.layers.filter((l) => !l.points);
+      let pointsMesh = null;
+      if (pointLayers.length) {
+        let n = 0;
+        for (const l of pointLayers) n += l.pos.length / 3;
+        const pos = new Float32Array(n * 3);
+        const col = new Float32Array(n * 4);
+        const siz = new Float32Array(n);
+        let o = 0;
+        for (const l of pointLayers) {
+          pos.set(l.pos, o * 3);
+          if (l.color) col.set(l.color, o * 4);
+          else for (let i = 0; i < l.pos.length / 3; i++) {
+            col[(o + i) * 4] = 0.8; col[(o + i) * 4 + 1] = 0.8;
+            col[(o + i) * 4 + 2] = 0.8; col[(o + i) * 4 + 3] = 1;
+          }
+          if (l.size) siz.set(l.size, o);
+          o += l.pos.length / 3;
+        }
+        pointsMesh = {
+          aPos: buf(gl, pos, 3),
+          aColor: buf(gl, col, 4),
+          aSize: buf(gl, siz, 1),
+          count: n
+        };
+      }
       // 分层规则：名为 backdrop 的层做无视差远景；其余层合并成近景（真视差）
-      const farLayers = asset.layers.filter((l) => l.name === 'backdrop');
-      const nearLayers = asset.layers.filter((l) => l.name !== 'backdrop');
+      const farLayers = triLayers.filter((l) => l.name === 'backdrop');
+      const nearLayers = triLayers.filter((l) => l.name !== 'backdrop');
       const farMesh = farLayers.length ? toMesh(mergeLayers(farLayers)) : null;
       const nearMesh = nearLayers.length ? toMesh(mergeLayers(nearLayers)) : null;
       const tex = asset.img
@@ -766,6 +807,8 @@
         meshes: { relief: nearMesh, backdrop: farMesh, farRidge: null, nearRidge: null, sky: null, ground: null, rocks: null, grass: null, shrub: null },
         particles: null,
         pointsMesh: null,
+        points2Mesh: pointsMesh,
+        points2Px: (asset.camera && asset.camera.pointPx) || 2.6,
         analysis: { horizon: 0.5, meanLum: col.lum }
       };
 
@@ -800,7 +843,9 @@
 
       el('hudName').textContent = '离线重建世界';
       if (!el('hudPipe').textContent) setHudPipe('asset', '资产');
-      el('hudSub').textContent = asset.triangles.toLocaleString() + ' 三角 · ' + (asset.bytes / 1048576).toFixed(1) + 'MB · ' + asset.layers.length + ' 层';
+      el('hudSub').textContent = pointsMesh
+        ? (pointsMesh.count.toLocaleString() + ' 点 · ' + (asset.bytes / 1048576).toFixed(1) + 'MB · 点云')
+        : (asset.triangles.toLocaleString() + ' 三角 · ' + (asset.bytes / 1048576).toFixed(1) + 'MB · ' + asset.layers.length + ' 层');
       setProgress(100, '完成');
 
       landing.classList.add('leaving');
@@ -1240,14 +1285,18 @@
     const capsApi = window.PW && window.PW.caps;
     if (!badge || !capsApi) return;
     const q = new URLSearchParams(location.search);
-    const api = q.get('api');
+    const explicit = q.get('api');
     badge.textContent = '检测中…';
     try {
-      const [webgpu, service] = await Promise.all([
-        capsApi.probeWebGPU(),
-        capsApi.probeService(api)
-      ]);
+      const webgpuP = capsApi.probeWebGPU();
+      // 没显式指定就自动找本机服务（含上次成功的地址）
+      const found = await capsApi.discoverService(explicit);
+      const service = found.found || { url: explicit || '', ok: false, reason: '未发现本机服务' };
+      const webgpu = await webgpuP;
+      const v2ok = service.ok && service.reconstruct && service.reconstruct.ok;
+      if (v2ok) apiBase = service.url;
       const v = capsApi.verdict({ webgpu, service });
+      if (v2ok && !explicit) { v.label = 'v2 就绪 · 自动'; }
       window.__pwCaps = { webgpu, service, verdict: v };
       // 页脚也要写清楚链路与模型：只写"无服务器"在启用 v2 时是错的（本机服务≠云端）
       const foot = el('footPipe');
@@ -1267,6 +1316,28 @@
       badge.title = v.detail
         + (v.level === 'v2' ? '' : '\n点开查看运行环境自检（WebGPU / 服务 / 建议）');
       if (document.body) document.body.dataset.pipeline = v.level;
+
+      /* CTA 下面那行：启用与否都说清楚，并且给一个"下一步"而不是只报状态。
+         没检测到服务时不要只写"不可用"—— 写清楚一条命令就能开。 */
+      const note = el('v2Note');
+      if (note) {
+        if (v2ok) {
+          note.dataset.level = 'v2';
+          note.innerHTML = 'GPU 加速已开启（v2 管线）· <a href="?v2=0">改用在线链路</a>';
+        } else {
+          note.dataset.level = 'off';
+          note.innerHTML = '想要照片级画质：起本地服务后刷新即可自动启用 · '
+            + '<a href="#" id="v2How">怎么做</a>';
+          const how = el('v2How');
+          if (how) {
+            how.addEventListener('click', (ev) => {
+              ev.preventDefault();
+              el('modal').classList.remove('hidden');
+              renderCapReport();
+            });
+          }
+        }
+      }
     } catch (e) {
       badge.textContent = '检测失败';
       badge.dataset.level = 'v1';
@@ -1330,7 +1401,7 @@
 
   function boot() {
     applyVersion();
-    initCaps();
+    capsReady = initCaps();
     liveState = loadLiveState();
     buildGallery();
     buildCompass();

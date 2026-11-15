@@ -271,6 +271,56 @@ void main() {
   gl_PointSize = clamp(aSize * uScale / max(vDist, 0.6), 1.0, 64.0);
 }`;
 
+  /* ---- 资产点云（v2.1）：图像采样点用**恒定屏幕尺寸** ----
+   * 与上面的粒子点不同：这些点是"每个照片像素一个点"，在图像空间里本来就等距，
+   * 所以屏幕尺寸应与距离无关（恒定像素），而不是按 1/距离 衰减 ——
+   * 用 1/距离 会让近处点巨大、远处点漏缝。
+   * 平色点已经等价于照片本身（每点带自己那一个像素的颜色），不需要贴图采样。 */
+  const VS_POINTS2 = `#version 300 es
+precision highp float;
+in vec3 aPos;
+in vec4 aColor;
+in float aSize;
+uniform mat4 uVP;
+uniform vec3 uEye;
+uniform float uPx;
+out vec4 vC;
+out float vDist;
+void main() {
+  gl_Position = uVP * vec4(aPos, 1.0);
+  vDist = length(aPos - uEye);
+  vC = aColor;
+  /* aSize 是这点**建库时的原始距离**。图像采样点的正确屏幕尺寸是
+     "基准像素 × 原距离/当前距离"：站在原位时恰好铺满，走近时点会自动放大
+     （否则点距被透视放大、画面变稀 —— 雪山图近景那片点雾就是这么来的）。 */
+  float grow = aSize > 0.01 ? clamp(aSize / max(vDist, 0.25), 0.35, 6.0) : 1.0;
+  gl_PointSize = clamp(uPx * grow, 1.2, 24.0);
+}`;
+
+  const FS_POINTS2 = `#version 300 es
+precision highp float;
+in vec4 vC;
+in float vDist;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+uniform float uFogAmt;
+out vec4 fragColor;
+void main() {
+  vec2 d = gl_PointCoord - 0.5;
+  float r = length(d) * 2.0;
+  if (r > 1.0) discard;
+  /* 点边缘只留很窄的羽化带：整圆 alpha 衰减会让相邻点的半透明边缘互相叠加，
+     底色透上来，画面整体发灰发软（实测点云世界的 lapVar 只有网格的一半）。
+     0.78 以内基本实心、0.78~1.0 收边，既不留缝也不糊。 */
+  float a = vC.a * (1.0 - smoothstep(0.78, 1.0, r));
+  float f = clamp(1.0 - exp(-pow(vDist * uFogDensity, 2.2)), 0.0, 1.0);
+  /* 点的颜色来自照片像素（sRGB 编码），必须解码到线性再与雾色混合，
+     否则点云世界会比网格世界整体偏亮/发灰 —— 后级 FS_POST 会再做 ACES + 编码。 */
+  vec3 lin = pow(max(vC.rgb, vec3(0.0)), vec3(2.2));
+  vec3 col = mix(lin, uFogColor, f * uFogAmt);
+  fragColor = vec4(col, a * (1.0 - f * 0.85));
+}`;
+
   const FS_POINTS = `#version 300 es
 precision highp float;
 in vec4 vC;
@@ -479,7 +529,7 @@ void main() {
 
   global.PW.GL = {
     VS_MAIN, FS_MAIN, VS_FULL, FS_SKY, FS_POST, VS_POINTS, FS_POINTS,
-    VS_SPLAT, FS_SPLAT,
+    VS_SPLAT, FS_SPLAT, VS_POINTS2, FS_POINTS2,
     createProgram, setUniforms, createMesh, bindMesh, createTexture
   };
 })(window);

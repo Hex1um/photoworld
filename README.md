@@ -66,6 +66,20 @@ node tools/abshots.mjs --base http://127.0.0.1:8099 \
 以及 `models/da2_large/`（Depth-Anything-V2-Large，约 1.3GB）。
 回归：`python tools/test_v2.py`（26 条断言，2 秒，不需要 GPU）。
 
+**不用改 URL**：页面启动时会自动探测本机 `127.0.0.1:8100`（含 `localhost`、`8101`
+与上次成功的地址，记在 localStorage）。服务在，就直接走 v2；不在就静默回退在线链路。
+显式 `?api=` 仍然优先，`?v2=0` 可以强制关掉。
+
+**表示方式可以按图选**：山脊/建筑用网格，密集枝叶用点云（网格在几像素跨 30 倍
+深度的地方必然被剪成碎条）。`--repr auto` 按"断崖占比 / 散布度"自动选，
+实测 8 张测试图里只有满屏秋叶那张走点云，其余走网格。
+
+```bash
+python pipeline/v2/bake.py photo.jpg --repr auto      # 默认
+python pipeline/v2/bake.py photo.jpg --repr points    # 强制点云
+python tools/tune_per_image.py --corpus corpus_test --views 32   # 按图自适应 + 32 视角质检
+```
+
 **你现在跑的是哪条链路？** 展厅顶栏的胶囊标签给出结论（`v2 就绪` / `在线 · 独显` /
 `在线 · 核显` / `在线链路`），点进去是 **`gpu.html` 运行环境自检**：WebGPU 适配器、
 真实 GPU 算力、本地服务与 v2 依赖状态，可一键复制诊断报告。

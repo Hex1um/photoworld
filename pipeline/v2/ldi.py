@@ -278,13 +278,59 @@ def build_layer(P: np.ndarray, uv: np.ndarray, mask: np.ndarray, filled: np.ndar
     }
 
 
+def scatter_ratio(zs: np.ndarray, valid: np.ndarray, ratio_thr: float = 4.0) -> float:
+    """"散布型"内容占比：相邻像素深度比超过 ratio_thr 的比例。
+
+    枝叶、栏杆、蛛网这类内容在几像素内跨一个量级的深度。它们**不该**用连续网格
+    表示 —— 网格会把这些四边形全部剪掉，剩下的是碎条。这个比值就是判别依据：
+    测过的雪山/峡谷/海岸都在 0.02~0.05，而满屏秋叶是 0.3 以上。
+    """
+    z = np.maximum(zs, 1e-3)
+    rx = np.maximum(z[:, 1:], z[:, :-1]) / np.minimum(z[:, 1:], z[:, :-1])
+    ry = np.maximum(z[1:], z[:-1]) / np.minimum(z[1:], z[:-1])
+    ok = valid[:, 1:] & valid[:, :-1]
+    ok2 = valid[1:] & valid[:-1]
+    hit = int(((rx > ratio_thr) & ok).sum() + ((ry > ratio_thr) & ok2).sum())
+    tot = int(ok.sum() + ok2.sum())
+    return hit / max(1, tot)
+
+
+def build_points(P: np.ndarray, rgb: np.ndarray, valid: np.ndarray,
+                 step_used: int = 1, max_points: int = 900_000) -> dict:
+    """把整幅场景做成一层点云（每个采样点就是照片里的一个像素）。
+
+    为什么点云在这里是对的：点的颜色直接来自照片像素，点与点之间**没有连接**，
+    所以既不会被"剪碎"，也不会像网格那样在掠射角把纹理拉成条。
+    代价是侧面看是"点雾"而不是实体表面 —— 对枝叶这类内容这是可接受的，
+    对山体/建筑则应该用网格（见调用方的判别）。
+    """
+    # 三个入参都已经是**网格分辨率**（调用方降采样过了），这里不再二次抽稀
+    c = rgb[..., :3]
+    col = np.concatenate([c, np.ones(c.shape[:2] + (1,), dtype=np.float32)], axis=-1)
+    m = valid.reshape(-1)
+    pos = P.reshape(-1, 3)[m]
+    col = col.reshape(-1, 4)[m]
+    # 每点的**原始距离**：surfel 的正确点尺寸是 "基准像素 × 原距离/当前距离"。
+    # 少了它，走近时点距被放大、画面变稀（实测雪山图的近景就是一片点雾）。
+    size = np.linalg.norm(pos, axis=1).astype(np.float32)
+    if pos.shape[0] > max_points:
+        k = int(max_points / pos.shape[0])
+        pos = pos[::max(1, k)]
+        col = col[::max(1, k)]
+    return {"name": "splat", "points": True, "pos": pos.astype(np.float32),
+            "color": col.astype(np.float32), "size": size,
+            "point_px": float(step_used) * 2.0}
+
+
 def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
           far_split: float = 70.0, near_split: float = 12.0,
           sky: np.ndarray | None = None, edge_ratio: float = 2.4,
           flatten: bool = True, skirt_min: float = 0.12, skirt_max: float = 6.0,
-          dist_min: float = 0.5, median_size: int = 3,
+          dist_min: float = 0.5, median_size: int = 3, ground_tol: float = 0.30,
           stretch_clamp: float = 12.0, strong_median: int = 7,
-          quantize: float = 0.0) -> dict:
+          quantize: float = 0.0, rgb: np.ndarray | None = None,
+          repr_mode: str = "auto", scatter_thr: float = 0.002,
+          cliff_thr: float = 0.010) -> dict:
     """主入口：深度（米）→ 分层网格。
 
     返回 {"layers": [...], "stats": {...}}，可直接交给 pipeline/glb.write_glb。
@@ -306,10 +352,11 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
                                          size=median_size, mode="nearest"))
     rays_full = cam.rays()
     if flatten:
-        z, ground = flatten_ground(z, rays_full, eye=eye)
+        z, ground = flatten_ground(z, rays_full, eye=eye, tol=ground_tol)
     else:
         ground = np.zeros_like(z, dtype=bool)
 
+    z_full = z                      # 点云用全分辨率（见下面的表示选择）
     zs = z[::step, ::step]
     rays = rays_full[::step, ::step]
     sky_s = None
@@ -360,7 +407,47 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
 
     fwd = -P[..., 2]
     valid = np.isfinite(zs) & (zs > dist_min)
+    # 断崖掩码要在表示选择之前算：它是"该用网格还是点云"两个判据之一
     cliff, ratio = cliff_mask(zs, step, edge_ratio)
+
+    # ---- 表示选择：网格还是点云 -----------------------------------
+    # 判据是"散布度"（相邻深度比 > 4 的像素占比），不是画面内容的名字。
+    scattered = scatter_ratio(zs, valid)
+    # 第二个判据：断崖占比。枝叶类内容在 518²→1540 的高分辨率深度上会留下
+    # 大量相邻深度比 > 2.4 的格子（实测秋叶 1.9%，而雪山/峡谷/海岸只有 0.2~0.5%，
+    # 有 4 倍以上差距）。散布度（相邻比 > 4）在同样这批图上只有 0.000 vs 0.0025，
+    # 太薄；断崖占比与几何构建的真实行为直接对应，更可靠。
+    cliff_frac_auto = float(cliff.mean())
+    use_points = (repr_mode == "points"
+                  or (repr_mode == "auto"
+                      and (scattered >= scatter_thr or cliff_frac_auto >= cliff_thr)))
+    if use_points:
+        # 点云用**全分辨率**：点云没有三角形预算的限制，没理由跟着网格一起降采样
+        # （网格的 step 是被三角数压下来的）。只在超过点数预算时才按 2/3/4 倍抽稀。
+        Pf = rays_full * z_full[..., None]
+        Pf[..., 2] *= -1.0
+        rgb_f = rgb if rgb is not None else np.full(z_full.shape + (3,), 0.6, dtype=np.float32)
+        valid_f = np.isfinite(z_full) & (z_full > dist_min)
+        pt_step = 1
+        while (z_full.shape[0] // pt_step) * (z_full.shape[1] // pt_step) > 650_000:
+            pt_step += 1
+        if pt_step > 1:
+            Pf = Pf[::pt_step, ::pt_step]
+            rgb_f = rgb_f[::pt_step, ::pt_step]
+            valid_f = valid_f[::pt_step, ::pt_step]
+        pts = build_points(Pf, rgb_f, valid_f, step_used=pt_step)
+        return {"layers": [pts], "stats": {
+            "splat": {"vertices": int(pts["pos"].shape[0]), "triangles": 0,
+                      "skirt_quads": 0, "pixels": int(valid.sum()),
+                      "point_px": pts["point_px"],
+                      "depth_p10": round(float(np.percentile(fwd[valid], 10)), 2),
+                      "depth_p90": round(float(np.percentile(fwd[valid], 90)), 2)},
+            "_global": {"grid": [int(hh), int(ww)], "step": int(step),
+                        "cliff_frac": round(cliff_frac_auto, 4), "ground_frac": round(float(ground.mean()), 4),
+                        "stretch": stretch_stats, "repr": "points",
+                        "scatter": round(float(scattered), 4),
+                        "cliff": round(cliff_frac_auto, 4),
+                        "triangles": 0, "vertices": int(pts["pos"].shape[0])}}}
     valid_q = valid[:-1, :-1] & valid[1:, :-1] & valid[:-1, 1:] & valid[1:, 1:]
     ok_quad = valid_q & ~cliff
 
@@ -407,7 +494,9 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
         "stretch": stretch_stats,
         "ground_frac": round(float(ground.mean()), 4),
         "far_split": far_split, "near_split": near_split,
-        "triangles": int(sum(int(l["index"].size // 3) for l in layers)),
+        "repr": "mesh", "scatter": round(float(scattered), 4),
+        "cliff": round(cliff_frac_auto, 4),
+        "triangles": int(sum(int(l.get("index", np.zeros(0, np.uint32)).size // 3) for l in layers)),
         "vertices": int(sum(int(l["pos"].shape[0]) for l in layers)),
     }
     return {"layers": layers, "stats": stats}

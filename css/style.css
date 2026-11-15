@@ -736,3 +736,16 @@ button.primary:hover { background: #f0e2c0; }
 .cap-report p.dim { margin: 8px 0 0; font-size: 11.5px; }
 .modal-card h3 { font-size: 13px; margin: 16px 0 6px; letter-spacing: .02em; }
 .modal-card a { color: var(--accent); }
+
+/* CTA 里的 GPU 加速提示：启用 v2 说清楚，没启用给出一步到位的入口 */
+#v2Note {
+  display: block;
+  margin-top: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .02em;
+}
+#v2Note[data-level="v2"] { color: #9dffb4; }
+#v2Note[data-level="off"] { color: var(--dim); }
+#v2Note a { color: var(--accent); text-decoration: none; border-bottom: 1px dotted currentColor; }
+#v2Note a:hover { color: #fff; }

@@ -91,6 +91,7 @@
       const m = json.meshes[mi];
       if (!m.primitives || !m.primitives.length) continue;
       const prim = m.primitives[0];
+      const isPoints = prim.mode === 0;          // 0 = POINTS（点云层）
       const pos = readAccessor(json, bin, prim.attributes.POSITION);
       const nrm = prim.attributes.NORMAL !== undefined ? readAccessor(json, bin, prim.attributes.NORMAL) : null;
       const uv = prim.attributes.TEXCOORD_0 !== undefined ? readAccessor(json, bin, prim.attributes.TEXCOORD_0) : null;
@@ -111,16 +112,20 @@
           colData = vcol.data;
         }
       }
-      const idx = readAccessor(json, bin, prim.indices);
+      const idx = prim.indices !== undefined ? readAccessor(json, bin, prim.indices) : null;
+      const sizeAcc = prim.attributes._SIZE !== undefined
+        ? readAccessor(json, bin, prim.attributes._SIZE) : null;
       layers.push({
         name: m.name || ('layer' + mi),
+        points: isPoints,
         pos: pos.data,
         nrm: nrm ? nrm.data : null,
         uv: uv ? uv.data : null,
         color: colData,
-        index: idx.data,
+        size: sizeAcc ? sizeAcc.data : null,
+        index: idx ? idx.data : null,
         vertices: pos.count,
-        triangles: idx.count / 3
+        triangles: idx ? idx.count / 3 : 0
       });
     }
 

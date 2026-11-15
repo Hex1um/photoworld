@@ -39,10 +39,10 @@ def write_glb(path: str, layers: list, texture_jpeg: bytes, name: str = "world",
 
     for li, layer in enumerate(layers):
         pos = np.asarray(layer["pos"], dtype=np.float32).reshape(-1, 3)
-        nrm = np.asarray(layer["nrm"], dtype=np.float32).reshape(-1, 3)
-        uv = np.asarray(layer["uv"], dtype=np.float32).reshape(-1, 2)
-        index = np.asarray(layer["index"], dtype=np.uint32).reshape(-1)
-        if pos.shape[0] == 0 or index.size == 0:
+        is_points = bool(layer.get("points"))
+        index = (None if is_points
+                 else np.asarray(layer.get("index", []), dtype=np.uint32).reshape(-1))
+        if pos.shape[0] == 0 or (index is not None and index.size == 0):
             continue
 
         a_pos = len(accessors)
@@ -50,26 +50,48 @@ def write_glb(path: str, layers: list, texture_jpeg: bytes, name: str = "world",
         accessors.append({"bufferView": v, "componentType": 5126, "count": int(pos.shape[0]),
                           "type": "VEC3", "min": pos.min(axis=0).tolist(),
                           "max": pos.max(axis=0).tolist()})
-        a_nrm = len(accessors)
-        v = add_view(nrm.tobytes(), 34962)
-        accessors.append({"bufferView": v, "componentType": 5126,
-                          "count": int(nrm.shape[0]), "type": "VEC3"})
-        a_uv = len(accessors)
-        v = add_view(uv.tobytes(), 34962)
-        accessors.append({"bufferView": v, "componentType": 5126,
-                          "count": int(uv.shape[0]), "type": "VEC2"})
-        a_idx = len(accessors)
-        v = add_view(index.tobytes(), 34963)
-        accessors.append({"bufferView": v, "componentType": 5125,
-                          "count": int(index.shape[0]), "type": "SCALAR"})
+        attrs = {"POSITION": a_pos}
+        if is_points:
+            # 点云层：颜色直接来自照片像素（COLOR_0，VEC4 带 alpha），不需要法线与 UV。
+            # 图像采样点本来就是"每个像素一个点"，平色点已等价于照片本身。
+            col = np.asarray(layer["color"], dtype=np.float32).reshape(-1, 4)
+            a_col = len(accessors)
+            v = add_view(col.tobytes(), 34962)
+            accessors.append({"bufferView": v, "componentType": 5126,
+                              "count": int(col.shape[0]), "type": "VEC4"})
+            attrs["COLOR_0"] = a_col
+            # 自定义属性（glTF 允许 `_` 前缀）：每点的原始距离，渲染时用来算点尺寸
+            sz = np.asarray(layer.get("size", np.ones(col.shape[0])), dtype=np.float32).reshape(-1, 1)
+            a_sz = len(accessors)
+            v = add_view(sz.tobytes(), 34962)
+            accessors.append({"bufferView": v, "componentType": 5126,
+                              "count": int(sz.shape[0]), "type": "SCALAR"})
+            attrs["_SIZE"] = a_sz
+        else:
+            nrm = np.asarray(layer["nrm"], dtype=np.float32).reshape(-1, 3)
+            uv = np.asarray(layer["uv"], dtype=np.float32).reshape(-1, 2)
+            a_nrm = len(accessors)
+            v = add_view(nrm.tobytes(), 34962)
+            accessors.append({"bufferView": v, "componentType": 5126,
+                              "count": int(nrm.shape[0]), "type": "VEC3"})
+            a_uv = len(accessors)
+            v = add_view(uv.tobytes(), 34962)
+            accessors.append({"bufferView": v, "componentType": 5126,
+                              "count": int(uv.shape[0]), "type": "VEC2"})
+            attrs["NORMAL"] = a_nrm
+            attrs["TEXCOORD_0"] = a_uv
+            a_idx = len(accessors)
+            v = add_view(index.tobytes(), 34963)
+            accessors.append({"bufferView": v, "componentType": 5125,
+                              "count": int(index.shape[0]), "type": "SCALAR"})
 
-        meshes.append({"name": layer.get("name", "layer%d" % li),
-                       "primitives": [{"attributes": {"POSITION": a_pos, "NORMAL": a_nrm,
-                                                      "TEXCOORD_0": a_uv},
-                                       "indices": a_idx, "material": 0, "mode": 4}]})
+        prim = {"attributes": attrs, "material": 0, "mode": 0 if is_points else 4}
+        if index is not None:
+            prim["indices"] = a_idx
+        meshes.append({"name": layer.get("name", "layer%d" % li), "primitives": [prim]})
         nodes.append({"mesh": len(meshes) - 1, "name": layer.get("name", "layer%d" % li)})
         total_verts += int(pos.shape[0])
-        total_tris += int(index.size // 3)
+        total_tris += 0 if index is None else int(index.size // 3)
 
     # T8：只要存在"远景/背景"层（名字里带 backdrop/far/bg），就把材质标成双面。
     layers_double_sided = any(

@@ -95,6 +95,10 @@ def main() -> int:
     ap.add_argument("--no-flatten", action="store_true")
     ap.add_argument("--strong-median", type=int, default=7)
     ap.add_argument("--quantize", type=float, default=0.0, help="深度量化倍数，0=关（枝叶类内容可试 1.3）")
+    ap.add_argument("--repr", default="auto", choices=["auto", "mesh", "points"],
+                    help="表示方式：auto 按散布度自动选，mesh 强制网格，points 强制点云")
+    ap.add_argument("--scatter-thr", type=float, default=0.12,
+                    help="散布度阈值（auto 模式下超过就用点云）")
     ap.add_argument("--stretch-clamp", type=float, default=12.0,
                     help="纹理拉伸超过该倍数就用更强中值平滑深度（0=关）")
     ap.add_argument("--no-skirt", action="store_true", help="关掉裙边（A/B 用）")
@@ -168,7 +172,9 @@ def main() -> int:
                         sky=sky, edge_ratio=args.edge_ratio,
                         flatten=not args.no_flatten,
                         skirt_min=(0.0 if args.no_skirt else 0.12), skirt_max=(0.0 if args.no_skirt else 6.0),
-                        stretch_clamp=args.stretch_clamp, strong_median=args.strong_median, quantize=args.quantize)
+                        stretch_clamp=args.stretch_clamp, strong_median=args.strong_median,
+                        quantize=args.quantize, rgb=rgb,
+                        repr_mode=args.repr, scatter_thr=args.scatter_thr)
         g = res["stats"]["_global"]
         print(f"  网格 step={g['step']} 三角 {g['triangles']} 顶点 {g['vertices']} "
               f"断崖 {g['cliff_frac']*100:.1f}% 地面 {g['ground_frac']*100:.1f}% 天空 {sky.mean()*100:.1f}%")
@@ -192,6 +198,7 @@ def main() -> int:
         cam_extras = {"camera": {
             "hfov": cam.hfov, "vfov": cam.vfov, "w": tw, "h": th,
             "pitch": cam.pitch, "eyeHeight": args.eye,
+            "pointPx": (res["stats"].get("splat") or {}).get("point_px", 0.0),
             "yaw": 0.0, "generator": "photoworld-v2",
         }}
         info = glb_mod.write_glb(glb_path, res["layers"], buf.getvalue(),

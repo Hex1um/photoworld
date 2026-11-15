@@ -41,6 +41,10 @@ const arg = (name, def) => {
 const BASE = arg('base', 'http://127.0.0.1:8099').replace(/\/$/, '');
 const LIST = arg('list', '');
 const CORPUS = arg('corpus', '');       // 直接给目录时取目录下所有 jpg（与 --list 二选一）
+/* GLB 模式（v2 资产）：--glb-list 每行一个相对 base 的 world.glb 路径。
+   复用同一套 32 视角套餐与指标 —— 这样"在线链路 vs v2 网格 vs v2 点云"三种表示
+   可以在**完全相同的机位与指标口径**下比较。 */
+const GLBLIST = arg('glb-list', '');
 const VIEWS = parseInt(arg('views', '16'), 10);
 const OUTDIR = arg('out', 'shots/mv');
 const JSONOUT = arg('json', 'reports/multiview.json');
@@ -52,6 +56,28 @@ const RADIUS = parseFloat(arg('radius', '11'));
                                       检查视锥实时生成的地貌；一半平视、一半 14m 俯视。
    之前的 C 圈放在 r=18（仍在照片矩形内），32 张全落在照片几何上，
    等于没测到生成区 —— 细看指标才发现。 */
+/* v2 专用 32 机位：**拍摄点附近、朝场景看**。
+   为什么不能沿用 A/B/C 三圈：那套是给在线链路的"无限地貌"设计的，r=10~75 绕世界
+   中心转 —— 对 v2 的单视锥重建（内容都在原点前方 2~70m）来说，相机直接落进了
+   几何内部，看到的是薄壳内壁，测出来的指标没有意义（实测两边都是满屏拉丝）。
+
+   这套的分布：8 个水平偏移 × 4 个纵深，全部朝前（-Z），带 ±60° 的偏航与少量俯仰。
+   它回答的是真实使用中的问题：站在重建区域里左右移动、转身看，画面站不站得住。 */
+const PLAN_V2 = (() => {
+  const plan = [];
+  const xs = [-6, -2, 2, 6];
+  const zs = [0, -1.5, -3, -5];
+  for (let zi = 0; zi < zs.length; zi++) {
+    for (let xi = 0; xi < xs.length; xi++) {
+      // 每个位置配 2 个偏航（0 与 ±25°），凑满 32
+      for (const yaw of (zi % 2 === 0 ? [0, -0.44] : [0.44, 0])) {
+        plan.push({ ring: 'V', x: xs[xi], z: zs[zi], yaw, pitch: -0.04 + zi * 0.02, eye: null });
+      }
+    }
+  }
+  return plan;
+})();
+
 const RINGS_32 = (() => {
   const plan = [];
   for (let i = 0; i < 12; i++) plan.push({ ring: 'A', a: (i / 12) * Math.PI * 2, r: 10, pitch: -0.10, eye: null });
@@ -90,8 +116,12 @@ const CAPTURE = {
 const PORT = 9600 + Math.floor(Math.random() * 300);
 
 /* ---------------- 名单 ---------------- */
+const IS_GLB = !!GLBLIST;
 let images = [];
-if (LIST) {
+if (GLBLIST) {
+  images = fs.readFileSync(GLBLIST, 'utf8').split(/\r?\n/)
+    .map((s) => s.trim()).filter((s) => s && !s.startsWith('#'));
+} else if (LIST) {
   images = fs.readFileSync(LIST, 'utf8').split(/\r?\n/)
     .map((s) => s.trim()).filter((s) => s && !s.startsWith('#'));
 } else if (CORPUS) {
@@ -99,7 +129,7 @@ if (LIST) {
     .sort().map((f) => CORPUS.replace(/\\/g, '/').replace(/\/$/, '') + '/' + f);
 }
 if (!images.length) {
-  console.error('没有输入图片：用 --list 或 --corpus 指定');
+  console.error('没有输入图片：用 --list / --corpus / --glb-list 指定');
   process.exit(2);
 }
 if (LIMIT > 0) images = images.slice(0, LIMIT);
@@ -288,9 +318,12 @@ try {
 
   for (let n = 0; n < images.length; n++) {
     const rel = images[n];
-    const url = `${BASE}/?img=${encodeURIComponent(rel)}&instant=1&name=`
-      + encodeURIComponent(path.basename(rel).replace(/\.[a-z0-9]+$/i, ''))
-      + (EXTRA ? '&' + EXTRA : '');
+    // GLB 模式：每个条目是一个 world.glb，走资产加载；机位/指标口径完全一致
+    const url = IS_GLB
+      ? `${BASE}/?glb=${encodeURIComponent(rel)}&instant=1&cb=${Date.now()}` + (EXTRA ? '&' + EXTRA : '')
+      : `${BASE}/?img=${encodeURIComponent(rel)}&instant=1&name=`
+        + encodeURIComponent(path.basename(rel).replace(/\.[a-z0-9]+$/i, ''))
+        + (EXTRA ? '&' + EXTRA : '');
     const rec = { image: rel, views: [], ok: false };
     await send('Page.navigate', { url });
 
@@ -318,21 +351,27 @@ try {
     const dbg = state.dbg ? JSON.parse(state.dbg) : null;
     if (dbg) rec.relief = dbg;
 
-    const plan = (VIEWS === 32) ? RINGS_32 : Array.from({ length: VIEWS }, (_, i) => ({
+    const plan = (VIEWS === 32)
+      ? (IS_GLB ? PLAN_V2 : RINGS_32)
+      : Array.from({ length: VIEWS }, (_, i) => ({
       ring: 'A', a: (i / VIEWS) * Math.PI * 2, r: RADIUS, pitch: PITCH, eye: null
     }));
     for (let i = 0; i < plan.length; i++) {
       const v = plan[i];
-      const a = v.a;
-      const x = cx + Math.sin(a) * v.r;
-      const z = cz + Math.cos(a) * v.r;
+      const a = v.a === undefined ? 0 : v.a;
+      const x = (v.x !== undefined) ? v.x : cx + Math.sin(a) * v.r;
+      const z = (v.z !== undefined) ? v.z : cz + Math.cos(a) * v.r;
+      const yawArg = (v.yaw !== undefined) ? v.yaw : (-a);
       const eyeArg = (v.eye === null || v.eye === undefined) ? 'undefined' : String(v.eye);
-      const ok = await evalIn(send, `window.__setCam ? window.__setCam(${x.toFixed(2)}, ${z.toFixed(2)}, ${(-a).toFixed(4)}, ${v.pitch}, ${eyeArg}) : false`);
+      const ok = await evalIn(send, `window.__setCam ? window.__setCam(${x.toFixed(2)}, ${z.toFixed(2)}, ${yawArg.toFixed(4)}, ${v.pitch}, ${eyeArg}) : false`);
       if (!ok) throw new Error('页面缺少 window.__setCam');
       await sleep(SETTLE);
       const shot = await send('Page.captureScreenshot', { format: 'png' });
       const buf = Buffer.from(shot.data, 'base64');
-      const file = path.join(OUTDIR, `${path.basename(rel).replace(/\.[a-z0-9]+$/i, '')}_${v.ring}${String(i).padStart(2, '0')}.png`);
+      const tag = IS_GLB
+        ? (path.basename(path.dirname(rel)) + '_' + path.basename(path.dirname(path.dirname(rel))))
+        : path.basename(rel).replace(/\.[a-z0-9]+$/i, '');
+      const file = path.join(OUTDIR, `${tag}_${v.ring}${String(i).padStart(2, '0')}.png`);
       fs.writeFileSync(file, buf);
       const m = metrics(decodePNG(buf));
       rec.views.push({ i, ring: v.ring, r: v.r, a: +(a * 180 / Math.PI).toFixed(0), ...m, file: file.replace(/\\/g, '/') });

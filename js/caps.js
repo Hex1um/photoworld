@@ -71,6 +71,37 @@
     }
   }
 
+  /* 自动发现本机重建服务。
+     为什么要这个：v2 的画质优势必须靠"起一个本地服务"，而让使用者手敲
+     ?api=http://127.0.0.1:8100 是把人挡在门外的最大摩擦点。
+     这里按"显式指定 → 上次成功的 → 常见端口"的顺序找，找到就记住。
+     全部带超时，找不到就是找不到，不阻塞任何东西。 */
+  const CANDIDATES = ['http://127.0.0.1:8100', 'http://localhost:8100', 'http://127.0.0.1:8101'];
+  const LS_KEY = 'pw.api';
+
+  function savedApi() {
+    try { return localStorage.getItem(LS_KEY) || ''; } catch (e) { return ''; }
+  }
+  function saveApi(url) {
+    try { url ? localStorage.setItem(LS_KEY, url) : localStorage.removeItem(LS_KEY); } catch (e) {}
+  }
+
+  async function discoverService(explicit) {
+    const tried = [];
+    const order = [];
+    if (explicit) order.push(explicit);
+    const s = savedApi();
+    if (s && !order.includes(s)) order.push(s);
+    for (const c of CANDIDATES) if (!order.includes(c)) order.push(c);
+    for (const url of order) {
+      const r = await probeService(url);
+      tried.push({ url, ok: r.ok, reason: r.reason, reconstruct: r.reconstruct });
+      if (r.ok) { saveApi(url); return { found: r, tried, url }; }
+    }
+    saveApi('');
+    return { found: null, tried, url: '' };
+  }
+
   /* 一句话结论，给顶栏徽标与自检页共用。 */
   function verdict(caps) {
     const s = (caps && caps.service) || {};
@@ -91,5 +122,6 @@
   }
 
   global.PW = global.PW || {};
-  global.PW.caps = { probeWebGPU, probeService, verdict, withTimeout };
+  global.PW.caps = { probeWebGPU, probeService, verdict, withTimeout,
+    discoverService, savedApi, saveApi, CANDIDATES };
 })(window);

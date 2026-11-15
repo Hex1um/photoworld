@@ -21,7 +21,8 @@
       sky: PWGL.createProgram(gl, PWGL.VS_FULL, PWGL.FS_SKY),
       post: PWGL.createProgram(gl, PWGL.VS_FULL, PWGL.FS_POST),
       points: PWGL.createProgram(gl, PWGL.VS_POINTS, PWGL.FS_POINTS),
-      splat: PWGL.createProgram(gl, PWGL.VS_SPLAT, PWGL.FS_SPLAT)
+      splat: PWGL.createProgram(gl, PWGL.VS_SPLAT, PWGL.FS_SPLAT),
+      points2: PWGL.createProgram(gl, PWGL.VS_POINTS2, PWGL.FS_POINTS2)
     };
 
     // 全屏四边形
@@ -195,6 +196,45 @@
       gl.drawArrays(gl.POINTS, 0, mesh.count);
     }
 
+    /* 资产点云（v2.1）：world.points2Mesh = { aPos, aColor, count }，点尺寸由
+       world.points2Px 给（屏幕像素，与分辨率无关）。用于"细枝/树叶"这类
+       网格必然剪碎的内容。 */
+    function drawPoints2(world, mesh, opt) {
+      if (!mesh || !mesh.aPos) return;
+      const p = progs.points2;
+      gl.useProgram(p.prog);
+      const ap = gl.getAttribLocation(p.prog, 'aPos');
+      const ac = gl.getAttribLocation(p.prog, 'aColor');
+      gl.bindBuffer(gl.ARRAY_BUFFER, mesh.aPos.buf);
+      gl.enableVertexAttribArray(ap);
+      gl.vertexAttribPointer(ap, 3, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, mesh.aColor.buf);
+      gl.enableVertexAttribArray(ac);
+      gl.vertexAttribPointer(ac, 4, gl.FLOAT, false, 0, 0);
+      // 每点的原始距离（没有就统一给 0，着色器里回退成恒定像素尺寸）
+      const asz = gl.getAttribLocation(p.prog, 'aSize');
+      if (asz >= 0) {
+        if (mesh.aSize) {
+          gl.bindBuffer(gl.ARRAY_BUFFER, mesh.aSize.buf);
+          gl.enableVertexAttribArray(asz);
+          gl.vertexAttribPointer(asz, 1, gl.FLOAT, false, 0, 0);
+        } else {
+          gl.disableVertexAttribArray(asz);
+          gl.vertexAttrib1f(asz, 0);
+        }
+      }
+      PWGL.setUniforms(gl, p, {
+        uVP: vp, uEye: camera.eye,
+        // 点尺寸按画布高度缩放：点是"图像采样点"，屏幕尺寸应随分辨率等比放大，
+        // 否则高分辨率屏上会漏缝、低分辨率屏上会糊成一片。
+        uPx: (opt.px || 3.2) * ((gl.drawingBufferHeight || 800) / 800),
+        uFogColor: world.fogColor,
+        uFogDensity: world.lights.fogDensity,
+        uFogAmt: opt.fog === undefined ? 0.3 : opt.fog
+      });
+      gl.drawArrays(gl.POINTS, 0, mesh.count);
+    }
+
     const camera = { eye: [0, 2, 0], yaw: 0, pitch: 0, fov: 66 * Math.PI / 180, aspect: 1 };
 
     function render(world, cam, opts) {
@@ -336,6 +376,21 @@
         drawMesh(world, world.meshes.groundGridPhoto, {
           tex: world.tex.photo, mode: 4, fog: 0.26, mipBias: 2.2, backdrop: [0, 0]
         });
+        gl.disable(gl.BLEND);
+        gl.enable(gl.CULL_FACE);
+      }
+
+      /* 资产点云（v2.1）：GLB 里带了 POINTS 层时走这里。
+         **必须放在 relief 分支之外** —— 点云世界没有 relief 网格，
+         塞进那个 else-if 里会整块被跳过（实测表现：只画出天空，点全都不见）。
+         网格在"细枝/树叶"这类几像素跨 30 倍深度的内容上必然被剪碎；
+         点云没有"连接"，既不拉丝也不会被剪碎。 */
+      if (world.points2Mesh && !skip('shell')) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.depthMask(true);
+        gl.disable(gl.CULL_FACE);
+        drawPoints2(world, world.points2Mesh, { px: world.points2Px || 3.2 });
         gl.disable(gl.BLEND);
         gl.enable(gl.CULL_FACE);
       }

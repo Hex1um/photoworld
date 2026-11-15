@@ -43,6 +43,7 @@ DEFAULTS = {
     "far_split": 120.0, "horizon_far": 1500.0,
     "flatten": True, "skirt_min": 0.12, "skirt_max": 6.0,
     "stretch_clamp": 12.0, "strong_median": 7, "quantize": 0.0,
+    "repr": "auto", "scatter_thr": 0.002, "cliff_thr": 0.010, "ground_tol": 0.30,
     "long_side": 1540, "device": "cuda", "median_size": 3,
 }
 
@@ -129,7 +130,8 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
                     flatten=opts["flatten"], skirt_min=opts["skirt_min"],
                     skirt_max=opts["skirt_max"], median_size=opts["median_size"],
                     stretch_clamp=opts["stretch_clamp"],
-                    strong_median=opts["strong_median"], quantize=opts["quantize"])
+                    strong_median=opts["strong_median"], quantize=opts["quantize"],
+                    rgb=rgb, repr_mode=opts["repr"], scatter_thr=opts["scatter_thr"])
 
     tex = img_src
     if max(tex.size) > opts["tex_max"]:
@@ -140,8 +142,10 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
 
     out = io.BytesIO()
     tmp = os.path.join(HERE, "_tmp_out.glb")
+    splat_stat = res["stats"].get("splat") or {}
     cam_extras = {"camera": {"hfov": cam.hfov, "vfov": cam.vfov, "w": tw, "h": th,
                              "pitch": cam.pitch, "eyeHeight": opts["eye"], "yaw": 0.0,
+                             "pointPx": splat_stat.get("point_px", 0.0),
                              "generator": "photoworld-v2"}}
     info = glb_mod.write_glb(tmp, res["layers"], buf.getvalue(),
                              name="photoworld", extras=cam_extras)
@@ -159,6 +163,9 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
                    "vfov_deg": round(math.degrees(cam.vfov), 2),
                    "pitch_deg": round(math.degrees(cam.pitch), 2)},
         "calibration": {k: v for k, v in cal.items() if isinstance(v, (int, float, str, bool))},
+        "repr": res["stats"]["_global"].get("repr", "mesh"),
+        "scatter": res["stats"]["_global"].get("scatter", 0.0),
+        "cliff": res["stats"]["_global"].get("cliff", 0.0),
         "layers": res["stats"], "glb": info,
         "depth_ms": None, "elapsed_s": round(time.time() - t0, 2),
     }
