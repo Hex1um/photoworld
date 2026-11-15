@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.4.3';
+  const VERSION = '2.4.4';
 
   /* v2 服务的地址：显式 ?api= 优先，其次是自动发现（本机常见端口）。
      自动发现写在启动流程里，不需要使用者改 URL —— 这是"更快捷地启用 v2"的关键。 */
@@ -908,7 +908,9 @@
           const lin = (c) => Math.pow(Math.max(1e-4, c), 2.2);
           w.groundBaseLin = [lin(gcol[0]), lin(gcol[1]), lin(gcol[2])];
           w.groundTint = gcol;
-          if (!w.tex.ground) w.tex.ground = w.tex.photo;
+          // 资产世界的地面**没有照片贴图可铺**（网格自带 UV），底板走顶点色
+          w.floorMode = 1;
+          w.floorTex = null;
 
           const ext = window.PW.createExtender({
             gl, world: w,
@@ -920,6 +922,11 @@
             live: liveState.on, chaos: liveState.chaos, memory: liveState.memory
           });
           w.extender = ext;
+          /* 延伸器会给"洞"铺一块兜底底板（在线链路需要，因为它的地面是程序化的）。
+             资产世界本身有 GLB 地面几何，这块底板只会变成一大片灰板挡在眼前
+             （实测：下半屏被一块灰平面盖住，顶点色是 1×光照所以发白）。 */
+          w.meshes.floor = null;
+          w.meshes.nearGround = null;
           setHudPipe('v2', 'V2+延伸');
         } catch (e) {
           console.warn('[ext] 资产世界接入延伸器失败，保持仅有网格边界', e);

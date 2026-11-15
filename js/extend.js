@@ -78,8 +78,14 @@
     const bb = world.bbox || { A: 55, B: 100 };
     const A = bb.A, B = bb.B;
     /* 外部 heightAt 是**世界坐标**的高度；延伸器内部要"相对地面"的口径，
-       所以这里先减掉 YB，生成时再加回去。 */
-    const baseHeight = (x, z) => world.heightAt(x, z) - YB;
+       所以这里先减掉 YB，生成时再加回去。
+
+       ⚠ 必须**先把原函数取下来**：这个 extender 后面会把 world.heightAt 换成自己的
+       （见文件末尾的接管逻辑）。写成 `(x,z) => world.heightAt(x,z) - YB` 的话，
+       接管之后它调用的是自己的新 heightAt → 无限递归 → 栈溢出 → 渲染循环直接死掉，
+       表现为整个画面全黑、但 ready=1 且没有任何错误提示（实测排查了很久）。 */
+    const origHeightAt = world.heightAt.bind(world);
+    const baseHeight = (x, z) => origHeightAt(x, z) - YB;
 
     const insideRect = (x, z) => (x >= -A && x <= A && z >= -B && z <= 0);
 

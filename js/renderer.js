@@ -334,13 +334,20 @@
         gl.disable(gl.CULL_FACE);
         drawMesh(world, world.meshes.floor, {
           // mipBias 2.6 会把底板糊成一块灰（手机端画面最下方那条灰带），收到 1.0。
-          tex: world.tex.ground, mode: 4, fog: 0.42, mipBias: 1.0
+          // tex/mode 允许世界覆盖：资产世界的底板必须走**顶点色**（mode 1），
+          // 因为底板的 UV 是 x/40 这种平铺坐标，拿去采样照片贴图会取到天空 →
+          // 一道蓝色拉丝横插进画面（实测）。在线链路保持原样（贴图 × 顶点色）。
+          tex: (world.floorTex === undefined ? world.tex.ground : world.floorTex),
+          mode: (world.floorMode === undefined ? 4 : world.floorMode),
+          fog: 0.42, mipBias: 1.0
         });
         /* 近景补片：竖向视场比照片大时，照片底边以下那条地面靠它提供细节，
            否则是一块糊平的灰板（底板 UV 放大 40m + mipBias 2.6）。 */
         if (world.meshes.nearGround) {
           drawMesh(world, world.meshes.nearGround, {
-            tex: world.tex.ground, mode: 4, fog: 0.40, mipBias: 0.2
+            tex: (world.floorTex === undefined ? world.tex.ground : world.floorTex),
+            mode: (world.floorMode === undefined ? 4 : world.floorMode),
+            fog: 0.40, mipBias: 0.2
           });
         }
         gl.enable(gl.CULL_FACE);
