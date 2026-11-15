@@ -210,7 +210,14 @@
 
       gl.bindFramebuffer(gl.FRAMEBUFFER, state.fbo);
       gl.viewport(0, 0, w, h);
-      gl.clearColor(world.fogColor[0], world.fogColor[1], world.fogColor[2], 1);
+      /* 点云模式下相机脚下常常没有几何（照片投影范围外），底部会露出清屏色
+         —— 手机竖屏最下方那条灰带。用地面色清屏，它就读成「远处地面」。 */
+      if (world.splatMode && world.groundTint) {
+        const g = world.groundTint;
+        gl.clearColor(g[0] * 0.85, g[1] * 0.85, g[2] * 0.85, 1);
+      } else {
+        gl.clearColor(world.fogColor[0], world.fogColor[1], world.fogColor[2], 1);
+      }
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       gl.enable(gl.DEPTH_TEST);
       gl.depthFunc(gl.LEQUAL);
