@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.4.1';
+  const VERSION = '2.4.2';
 
   /* v2 服务的地址：显式 ?api= 优先，其次是自动发现（本机常见端口）。
      自动发现写在启动流程里，不需要使用者改 URL —— 这是"更快捷地启用 v2"的关键。 */
@@ -851,6 +851,37 @@
 
       el('hudName').textContent = '离线重建世界';
       if (!el('hudPipe').textContent) setHudPipe('asset', '资产');
+
+      /* 视锥外的程序化延伸（v2.5）：资产世界此前只到网格边界，外面是雾。
+         接上 extend.js 之后，走出去能看到继续生成的地形，并且"实时变化"
+         （混乱度/记忆力）在这里也生效 —— 与在线链路同一套参数。
+         全部包在 try 里：延伸器依赖若干世界字段，缺一个都不该把资产世界弄坏。 */
+      // 默认关闭（?ext=1 打开）：extend.js 的 tile 布局是按在线链路的"无限地貌"
+      // 视锥参数设计的，直接套到资产世界会出现"一大片暗色地面 + 一道蓝色拉丝"
+      // （实测）。要真正接上，需要把资产世界的地面高度场/色板/边界契约喂给它，
+      // 这是一次独立的适配工作，不能靠一行开关。
+      const wantExt = new URLSearchParams(location.search).get('ext') === '1';
+      if (wantExt && window.PW.createExtender && !isWall) {
+        try {
+          w.extraMeshes = [];
+          if (!w.tex.ground) w.tex.ground = w.tex.photo;
+          // 地面基色（线性空间）：取照片地平线色，让延伸地形与照片同色系
+          const lin = (c) => Math.pow(Math.max(1e-4, c), 2.2);
+          w.groundBaseLin = [lin(col.bot[0]), lin(col.bot[1]), lin(col.bot[2])];
+          w.bbox = { A: 70, B: 130 };
+          const ext = window.PW.createExtender({
+            gl, world: w,
+            seed: hashString((current && current.name || 'asset') + '|ext'),
+            server: apiBase || '',
+            radius: 5,
+            live: liveState.on, chaos: liveState.chaos, memory: liveState.memory
+          });
+          w.extender = ext;
+          setHudPipe('v2', 'V2+延伸');
+        } catch (e) {
+          console.warn('[ext] 资产世界接入延伸器失败，保持仅有网格边界', e);
+        }
+      }
       el('hudSub').textContent = pointsMesh
         ? (pointsMesh.count.toLocaleString() + ' 点 · ' + (asset.bytes / 1048576).toFixed(1) + 'MB · 点云')
         : (asset.triangles.toLocaleString() + ' 三角 · ' + (asset.bytes / 1048576).toFixed(1) + 'MB · ' + asset.layers.length + ' 层');
