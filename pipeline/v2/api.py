@@ -167,7 +167,61 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
     cam = geom.Camera(hfov=hfov, vfov=vfov_of(hfov, tw, th), w=tw, h=th)
 
     proc, model = _load_model(opts["device"])
-    disp = depth_gpu.estimate(work, proc, model, opts["device"], opts["long_side"], True)
+
+    # ---- 外扩时的深度：**在原始照片上推理，再按列外延** -------------------
+    # 为什么不直接在扩展图上跑深度：生成区是扩散模型"画"出来的，
+    # 单目深度对它给出的估计只是"看起来合理"，与照片那侧的深度在接缝处对不上。
+    # 建面时那条深度跳变会被剪成一条竖缝，边缘像素被拉成一大片浅色幕
+    # （实测：校园灯柱那张的灯柱被拉成一根浅色柱子 + 横贯画面的白幕）。
+    # 正确做法是让几何**连续**：深度只在原图上算，左右两侧用边界列外延
+    # （并轻微加大远端，让两侧读作"远处"），纹理仍用生成出来的像素。
+    pad_lr = None
+    if isinstance(oinfo, dict):
+        p1 = oinfo.get("pass1") or {}
+        if p1.get("pad") and len(p1["pad"]) == 4:
+            pad_lr = p1["pad"]
+    if pad_lr and max(pad_lr) > 0:
+        base = img_src
+        # 原图区域（扩展画布去 pad 后的部分）
+        l, t, r0, b = pad_lr
+        core = base.crop((l, t, base.size[0] - r0, base.size[1] - b))
+        if max(core.size) > opts["work_side"]:
+            s = opts["work_side"] / float(max(core.size))
+            core = core.resize((max(1, round(core.size[0] * s)),
+                                max(1, round(core.size[1] * s))), Image.LANCZOS)
+        disp_core = depth_gpu.estimate(core, proc, model, opts["device"],
+                                       opts["long_side"], True)
+        if max(work.size) > opts["work_side"]:
+            s = opts["work_side"] / float(max(work.size))
+            tw2, th2 = (max(1, round(work.size[0] * s)), max(1, round(work.size[1] * s)))
+        else:
+            tw2, th2 = work.size
+        # 把 core 的深度放到整幅网格里，左右用边界列外延
+        disp = np.zeros((th2, tw2), dtype=np.float32)
+        cw = max(1, min(tw2, int(round(tw2 * core.size[0] / float(work.size[0])))))
+        ch = max(1, min(th2, int(round(th2 * core.size[1] / float(work.size[1])))))
+        core_r = np.asarray(Image.fromarray((np.clip(disp_core, 0, 1) * 255).astype(np.uint8))
+                            .resize((cw, ch), Image.BILINEAR), dtype=np.float32) / 255.0
+        y0 = max(0, (th2 - ch) // 2)
+        x0 = max(0, (tw2 - cw) // 2)
+        disp[y0:y0 + ch, x0:x0 + cw] = core_r[:min(ch, th2 - y0), :min(cw, tw2 - x0)]
+        if x0 > 0:
+            # 左边：复制第 x0 列，并向左轻微衰减（视差上读作"更远一点"）
+            colL = disp[y0:y0 + ch, x0]
+            ramp = np.linspace(0.85, 1.0, x0, dtype=np.float32)[None, :]
+            disp[y0:y0 + ch, :x0] = colL[:, None] * ramp
+        if x0 + cw < tw2:
+            colR = disp[y0:y0 + ch, x0 + cw - 1]
+            n = tw2 - (x0 + cw)
+            ramp = np.linspace(1.0, 0.85, n, dtype=np.float32)[None, :]
+            disp[y0:y0 + ch, x0 + cw:] = colR[:, None] * ramp
+        # 上下留空的行（正常不会有，扩展只做左右）用最近行补齐
+        if y0 > 0:
+            disp[:y0] = disp[y0]
+        if y0 + ch < th2:
+            disp[y0 + ch:] = disp[y0 + ch - 1]
+    else:
+        disp = depth_gpu.estimate(work, proc, model, opts["device"], opts["long_side"], True)
 
     # 外扩之后深度图变宽了：如果还在**整幅**上做标定，生成区的天空/地面会把
     # 分位锚点带偏，尺度整体漂移 —— 实测表现是"画面变暗、地平线抬高、地面占满"。
