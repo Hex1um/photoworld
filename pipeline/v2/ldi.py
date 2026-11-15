@@ -368,6 +368,86 @@ def build_points(P: np.ndarray, rgb: np.ndarray, valid: np.ndarray,
             "point_px": float(step_used) * 2.0}
 
 
+def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
+                    cell: float = 1.8, max_cells: int = 190,
+                    smooth: int = 1) -> dict | None:
+    """从点云生成一张"俯视高度图"顶面，供飞行时从上方看。
+
+    为什么需要它：v2 是单视图重建，只有一层**朝前的壳**。平视没有问题，
+    但飞到高处往下看，看到的是这层壳的背面 —— 竖直拉长的岩壁、被剪开的空洞、
+    透过去是天空（实测 56m 俯拍就是"一片竖直岩墙 + 白洞"）。
+
+    做法（标准的"点云 → 高度图"）：
+      1. 把每个有效像素投影到 (x,z) 网格里，**每格只保留 y 最大**的那个点
+         （从上方看，能看到的就是最高的那层表面），同时记住它的 UV；
+      2. 空格用最近邻补（`distance_transform_edt` 的索引就是"最近的有点的格"）；
+      3. 轻微平滑，避免逐点噪声变成刺；
+      4. 用这张网格建三角面，UV 用该格那个点的 UV —— 于是顶面天然带着照片的纹理，
+         高空中看下来就是"同一个峡谷的正俯视"，而不是另造一套颜色。
+
+    这只在**高空**可见（前端按视点高度开关），平视时它正好藏在墙顶轮廓里。
+    """
+    from scipy import ndimage
+    if not valid.any() or P.shape[0] < 4:
+        return None
+    xs = P[..., 0][valid]
+    ys = P[..., 1][valid]
+    zs = P[..., 2][valid]
+    uvs = uv[valid]
+    if xs.size < 64:
+        return None
+    x0, x1 = float(xs.min()), float(xs.max())
+    z0, z1 = float(zs.min()), float(zs.max())
+    if x1 - x0 < 2 or z1 - z0 < 2:
+        return None
+    nx = int(np.clip(round((x1 - x0) / cell) + 1, 8, max_cells))
+    nz = int(np.clip(round((z1 - z0) / cell) + 1, 8, max_cells))
+
+    ix = np.clip(((xs - x0) / max(1e-6, x1 - x0) * (nx - 1)).astype(np.int32), 0, nx - 1)
+    iz = np.clip(((zs - z0) / max(1e-6, z1 - z0) * (nz - 1)).astype(np.int32), 0, nz - 1)
+
+    hgt = np.full((nz, nx), -1e9, dtype=np.float32)
+    huv = np.zeros((nz, nx, 2), dtype=np.float32)
+    # 按 y 升序写入 → 后写的（更高的）覆盖前面的，天然得到"每格最高点"
+    order = np.argsort(ys)
+    hgt[iz[order], ix[order]] = ys[order]
+    huv[iz[order], ix[order]] = uvs[order]
+
+    filled = hgt > -1e8
+    if filled.sum() < 16:
+        return None
+    # 空格用最近的有值格补（索引数组就是最近邻）
+    idx = ndimage.distance_transform_edt(~filled, return_distances=False, return_indices=True)
+    hgt = hgt[tuple(idx)]
+    huv = huv[tuple(idx)]
+    if smooth > 0:
+        hgt = ndimage.uniform_filter(hgt, size=(3, 3), mode="nearest")
+
+    pos = np.zeros((nz, nx, 3), dtype=np.float32)
+    gx = x0 + (np.arange(nx, dtype=np.float32) / max(1, nx - 1)) * (x1 - x0)
+    gz = z0 + (np.arange(nz, dtype=np.float32) / max(1, nz - 1)) * (z1 - z0)
+    pos[..., 0] = gx[None, :]
+    pos[..., 1] = hgt
+    pos[..., 2] = gz[:, None]
+
+    P2 = pos.reshape(-1, 3)
+    U2 = huv.reshape(-1, 2)
+    N2 = np.tile(np.array([[0.0, 1.0, 0.0]], dtype=np.float32), (P2.shape[0], 1))
+    idx2 = []
+    for j in range(nz - 1):
+        row = j * nx
+        for i in range(nx - 1):
+            a = row + i
+            b = a + 1
+            c = a + nx
+            d = c + 1
+            idx2.extend([a, c, b, b, c, d])
+    if not idx2:
+        return None
+    return {"name": "top", "pos": P2, "nrm": N2, "uv": U2,
+            "index": np.asarray(idx2, dtype=np.uint32)}
+
+
 def build_photo_wall(cam, dist: float = 8.0, expand: float = 1.0) -> dict:
     """把整张照片做成一面"照片墙"（正对视线的四边形）。
 
@@ -564,7 +644,8 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
           # 结论：这一层要靠**语义**（SegFormer 的 sky 类占比）才能判，不是数值统计能到的。
           photo_wall_frac: float = 0.0, photo_wall: bool = False,
           card_flatten: bool = True,
-          ground_cells: int = 140, scatter_rocks: int = 0) -> dict:
+          ground_cells: int = 140, scatter_rocks: int = 0,
+          top_skin: bool = True, top_skin_cell: float = 1.8) -> dict:
     """主入口：深度（米）→ 分层网格。
 
     返回 {"layers": [...], "stats": {...}}，可直接交给 pipeline/glb.write_glb。
@@ -841,6 +922,24 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
                     "depth_p10": round(float(ground_radius * 0.3), 1),
                     "depth_p90": round(float(ground_radius), 1),
                 }
+
+    # 俯视顶面：飞行时从上方看到的是"同一片地貌的正俯视"，而不是单层壳的背面。
+    # 放在最后追加，前端按视点高度决定画不画。
+    if top_skin:
+        # 只用**近景、非天空**的像素建顶面。
+        # 不加这个限制，天空像素（y 高达几百米）会把顶面抬到 300m 以上：
+        # 阈值随之变成"飞到 313m 才显示"，等于这功能永远不生效（实测命中）。
+        near_mask = valid & (fwd < max(60.0, far_split * 1.5))
+        if sky is not None and sky.shape == near_mask.shape:
+            near_mask &= ~sky
+        skin = build_top_skin(P, uv, near_mask, cell=top_skin_cell)
+        if skin is not None:
+            layers.append(skin)
+            stats["top"] = {"vertices": int(skin["pos"].shape[0]),
+                            "triangles": int(skin["index"].size // 3),
+                            "skirt_quads": 0, "pixels": 0,
+                            "depth_p10": float(np.percentile(fwd[valid], 10)),
+                            "depth_p90": float(np.percentile(fwd[valid], 90))}
 
     stats["_global"] = {
         "grid": [int(hh), int(ww)], "step": int(step),

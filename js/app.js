@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.5.0';
+  const VERSION = '2.6.0';
 
   /* v2 服务的地址：显式 ?api= 优先，其次是自动发现（本机常见端口）。
      自动发现写在启动流程里，不需要使用者改 URL —— 这是"更快捷地启用 v2"的关键。 */
@@ -775,9 +775,18 @@
       }
       // 分层规则：名为 backdrop 的层做无视差远景；其余层合并成近景（真视差）
       const farLayers = triLayers.filter((l) => l.name === 'backdrop');
-      const nearLayers = triLayers.filter((l) => l.name !== 'backdrop');
+      /* 俯视顶面（v2.6）：从点云生成的高度图，只在**视点高于地形最高点**时才画。
+         它不能并进近景层 —— 近景是"朝前的壳"，顶面是一张水平的高度图，
+         混在一起会让平视时的轮廓变糊。 */
+      const topLayers = triLayers.filter((l) => l.name === 'top');
+      const nearLayers = triLayers.filter((l) => l.name !== 'backdrop' && l.name !== 'top');
       const farMesh = farLayers.length ? toMesh(mergeLayers(farLayers)) : null;
       const nearMesh = nearLayers.length ? toMesh(mergeLayers(nearLayers)) : null;
+      const topMesh = topLayers.length ? toMesh(mergeLayers(topLayers)) : null;
+      let topMaxY = 0;
+      for (const l of topLayers) {
+        for (let i = 1; i < l.pos.length; i += 3) if (l.pos[i] > topMaxY) topMaxY = l.pos[i];
+      }
       const tex = asset.img
         ? PW.GL.createTexture(gl, asset.img, { wrap: 'clamp', clampV: true, aniso: 8, flipY: false })
         : whiteTex(gl);
@@ -812,7 +821,9 @@
         sunDir: [0.3, 0.5, -0.8],
         lights: { fogDensity: 0.0016 },
         tex: { photo: tex, ground: null, sky: null, grass: null },
-        meshes: { relief: nearMesh, backdrop: farMesh, farRidge: null, nearRidge: null, sky: null, ground: null, rocks: null, grass: null, shrub: null },
+        meshes: { relief: nearMesh, backdrop: farMesh, farRidge: null, nearRidge: null, sky: null, ground: null, rocks: null, grass: null, shrub: null, top: topMesh },
+        // 视点高于"地形最高点 + 1m"才显示俯视顶面
+        topShowAbove: topMaxY + 1.0,
         particles: null,
         pointsMesh: null,
         points2Mesh: pointsMesh,

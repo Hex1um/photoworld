@@ -353,6 +353,20 @@
         gl.enable(gl.CULL_FACE);
       }
 
+      /* 俯视顶面（v2.6）：点云生成的"正俯视高度图"，只在视点高于地形最高点时显示。
+         作用是把"从上方看到的单层壳背面（竖直拉丝 + 白洞）"盖住 ——
+         高空中看到的是同一片地貌的俯视图，纹理仍是照片自己的。 */
+      if (world.meshes.top && cam.eye[1] > (world.topShowAbove === undefined ? 1e9 : world.topShowAbove)) {
+        gl.disable(gl.CULL_FACE);
+        /* mipBias 给到 2.6：单视图重建**没有俯视纹理**，顶面 UV 是从相邻像素借来的，
+           贴着看会是一圈圈放射状拉伸。高空看地表本来也该是低频的，
+           干脆重度模糊 —— 读作"远处地表"而不是"糊掉的照片"。 */
+        drawMesh(world, world.meshes.top, {
+          tex: world.tex.photo, mode: 4, fog: 0.55, mipBias: 2.6
+        });
+        gl.enable(gl.CULL_FACE);
+      }
+
       /* 世界坐标地面方格网（v1.20）：先画地面，再画照片表面。
          地面的几何与照片平面完全重合（都是 y=0），只是拓扑换成规则方格，
          贴图 UV 取自反投影场 —— 从任何角度看都没有放射状拉丝。 */
