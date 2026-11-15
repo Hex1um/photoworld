@@ -64,10 +64,22 @@
        旧的 289 在扫描半径拉到 12 之后会被顶满，导致刚生成的块被立刻回收
        （表现为走两步地形就"塌"一层）。 */
     const MAX_TILES = opts.maxTiles || 560;
+    /* 平面 tile 的绘制模式：默认 4（贴图 × 顶点色，在线链路用）。
+       资产世界要传 1（纯顶点色）—— tile 的 UV 是 x/40 这种"平铺坐标"，
+       拿它去采样照片贴图会取到照片里毫不相干的位置（实测：一道蓝色拉丝横插进沙漠）。
+       顶点色由 groundBaseLin/groundColorAt 算出来，本来就与照片同色系。 */
+    const FLAT_MODE = (opts.flatMode === undefined) ? 4 : opts.flatMode;
+    /* 纵向基准偏移。**在线链路里 y=0 就是地面**，而资产世界（GLB）里 y=0 在相机的
+       视平线、地面在 y≈-1.9 —— 直接复用会让那块 y=-0.06 的底板落到眼睛高度，
+       整个画面被一块暗板糊住（实测：三视图全黑）。所以资产世界传入 yBase=地面高度，
+       所有生成几何整体下移。 */
+    const YB = (typeof opts.yBase === 'number') ? opts.yBase : 0;
 
     const bb = world.bbox || { A: 55, B: 100 };
     const A = bb.A, B = bb.B;
-    const baseHeight = world.heightAt.bind(world);
+    /* 外部 heightAt 是**世界坐标**的高度；延伸器内部要"相对地面"的口径，
+       所以这里先减掉 YB，生成时再加回去。 */
+    const baseHeight = (x, z) => world.heightAt(x, z) - YB;
 
     const insideRect = (x, z) => (x >= -A && x <= A && z >= -B && z <= 0);
 
@@ -201,7 +213,7 @@
           const k = j * NX + i;
           const x = -A + (i / (NX - 1)) * 2 * A;
           const z = (j / (NZ - 1)) * B;          // z: 0 → -B
-          pos[k * 3] = x; pos[k * 3 + 1] = -0.06; pos[k * 3 + 2] = -z;
+          pos[k * 3] = x; pos[k * 3 + 1] = -0.06 + YB; pos[k * 3 + 2] = -z;
           nrm[k * 3 + 1] = 1;
           uv[k * 2] = x / 40; uv[k * 2 + 1] = z / 40;
           let r = 1, g = 1, b = 1;
@@ -245,7 +257,7 @@
           const k = j * NX + i;
           const x = -W2 + (i / (NX - 1)) * 2 * W2;
           const z = -W2 + (j / (NZ - 1)) * 2 * W2;
-          pos[k * 3] = x; pos[k * 3 + 1] = -0.05; pos[k * 3 + 2] = z;
+          pos[k * 3] = x; pos[k * 3 + 1] = -0.05 + YB; pos[k * 3 + 2] = z;
           nrm[k * 3 + 1] = 1;
           uv[k * 2] = x / 4.5; uv[k * 2 + 1] = z / 4.5;
           /* 颜色来源优先级：照片底行剖面（最贴边）→ 地面色场 → 单色。
@@ -324,7 +336,7 @@
           const k = j * RES + i;
           const x = x0 + i * step, z = z0 + j * step;
           const h = heights ? heights[k] : heightAt(x, z);
-          pos[k * 3] = x; pos[k * 3 + 1] = h; pos[k * 3 + 2] = z;
+          pos[k * 3] = x; pos[k * 3 + 1] = h + YB; pos[k * 3 + 2] = z;
           // 贴图密度：9m 一次重复在 40m 外已经糊成一片纯色，
           // 收到 4.5m 一次，远景还能看出地表明暗细节
           uv[k * 2] = x / 4.5; uv[k * 2 + 1] = z / 4.5;
@@ -475,7 +487,8 @@
       rec.steepTris = parts.steepTris;
       pending--;
       if (!world.extraMeshes) world.extraMeshes = [];
-      world.extraMeshes.push({ key, mesh: parts.flat, tex: world.tex.ground, fog: 0.22, mode: 4 });
+      world.extraMeshes.push({ key, mesh: parts.flat, tex: FLAT_MODE === 1 ? null : world.tex.ground,
+        fog: 0.22, mode: FLAT_MODE });
       if (parts.steep) {
         world.extraMeshes.push({ key: key + ':steep', mesh: parts.steep, tex: null, fog: 0.20, mode: 1 });
       }

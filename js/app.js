@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.4.2';
+  const VERSION = '2.4.3';
 
   /* v2 服务的地址：显式 ?api= 优先，其次是自动发现（本机常见端口）。
      自动发现写在启动流程里，不需要使用者改 URL —— 这是"更快捷地启用 v2"的关键。 */
@@ -864,16 +864,59 @@
       if (wantExt && window.PW.createExtender && !isWall) {
         try {
           w.extraMeshes = [];
-          if (!w.tex.ground) w.tex.ground = w.tex.photo;
-          // 地面基色（线性空间）：取照片地平线色，让延伸地形与照片同色系
+          /* ---- 资产世界 → extend.js 的适配层 ----
+             三个字段必须按"资产世界的事实"给，不能沿用在线链路的常数：
+               1) bbox：必须是**网格实际覆盖的矩形**。写小了 → insideRect 判错 →
+                  tile 生成在照片区内部，把照片盖成一片暗地面（实测就是这么翻车的）。
+               2) groundBaseLin：必须是照片里的**地面色**（线性空间），不是天空底部的颜色，
+                  否则延伸地形会偏色成灰蓝。
+               3) flatMode=1：平面 tile 用顶点色，不用照片贴图（UV 是平铺坐标，会采错）。 */
+          /* 只用**近景层**算照片区域：backdrop 层本身横跨 ±437m（蓝天/远山），
+             把它算进去会让 A/B 变成 800m —— tile 就只会在 800m 外生成，
+             而底板（±A × B 的一大片）会盖住整个近景（实测：三视图全黑）。 */
+          let maxFwd = 0, maxSide = 0;
+          for (const l of asset.layers) {
+            if (!l.pos || l.points) continue;
+            if (l.name === 'backdrop' || l.name === 'ground' || l.name === 'scatter') continue;
+            for (let i = 0; i < l.pos.length; i += 3) {
+              const x = l.pos[i], z = -l.pos[i + 2];
+              if (z > maxFwd) maxFwd = z;
+              if (Math.abs(x) > maxSide) maxSide = Math.abs(x);
+            }
+          }
+          if (maxFwd < 10) maxFwd = 60;
+          const B = clamp(maxFwd * 1.04, 25, 400);
+          const A = clamp(maxSide * 1.04, 25, 600);
+          w.bbox = { A, B };
+
+          // 地面基色：取照片最下方 16% 的平均色（那里一定是地面），转线性
+          let gcol = col.bot;
+          try {
+            if (asset.img) {
+              const cv = document.createElement('canvas');
+              cv.width = 32; cv.height = 32;
+              const c2 = cv.getContext('2d');
+              c2.drawImage(asset.img, 0, Math.floor(asset.img.height * 0.84),
+                           asset.img.width, Math.ceil(asset.img.height * 0.16), 0, 0, 32, 32);
+              const d = c2.getImageData(0, 0, 32, 32).data;
+              let r = 0, g2 = 0, b = 0;
+              for (let i = 0; i < d.length; i += 4) { r += d[i]; g2 += d[i + 1]; b += d[i + 2]; }
+              const n2 = d.length / 4;
+              gcol = [r / n2 / 255, g2 / n2 / 255, b / n2 / 255];
+            }
+          } catch (e) { /* 取不到就用通话色 */ }
           const lin = (c) => Math.pow(Math.max(1e-4, c), 2.2);
-          w.groundBaseLin = [lin(col.bot[0]), lin(col.bot[1]), lin(col.bot[2])];
-          w.bbox = { A: 70, B: 130 };
+          w.groundBaseLin = [lin(gcol[0]), lin(gcol[1]), lin(gcol[2])];
+          w.groundTint = gcol;
+          if (!w.tex.ground) w.tex.ground = w.tex.photo;
+
           const ext = window.PW.createExtender({
             gl, world: w,
             seed: hashString((current && current.name || 'asset') + '|ext'),
             server: apiBase || '',
-            radius: 5,
+            radius: 5, flatMode: 1,
+            // 资产世界的 y=0 在视平线，地面在 groundY：延伸几何要整体下移这么多
+            yBase: groundY,
             live: liveState.on, chaos: liveState.chaos, memory: liveState.memory
           });
           w.extender = ext;

@@ -32,6 +32,8 @@ const PER_IMAGE_TIMEOUT = parseInt(args.wait || '120', 10) * 1000;
 const W = parseInt(args.w || '1280', 10);
 const H = parseInt(args.h || '800', 10);
 const VIEWS = (args.views || 'front,side,back').split(',');
+// 追加到每个 URL 后面的查询串（例如 ext=1）；注意别直接塞进 --base
+const APPEND = args.append ? ('&' + String(args.append).replace(/^&/, '')) : '';
 const PORT = 9500 + Math.floor(Math.random() * 300);
 const EDGE = args.edge || 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 
@@ -120,7 +122,7 @@ try {
   await send('Page.enable');
   await send('Runtime.enable');
   await send('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false });
-  await send('Page.navigate', { url: `${BASE}/?instant=1&cb=${Date.now()}` });
+  await send('Page.navigate', { url: `${BASE}/?instant=1${APPEND}&cb=${Date.now()}` });
 
   // 等 __pw 就绪
   for (let i = 0; i < 120; i++) {
@@ -137,7 +139,7 @@ try {
     const t0 = Date.now();
     if (GLB_MODE) {
       // 资产模式：每次重新导航（GLB 加载走 URL 参数，没有页内 API）
-      await send('Page.navigate', { url: `${BASE}/?glb=${encodeURIComponent(it.src)}&instant=1&cb=${Date.now()}` });
+      await send('Page.navigate', { url: `${BASE}/?glb=${encodeURIComponent(it.src)}&instant=1${APPEND}&cb=${Date.now()}` });
       await sleep(300);
       for (let i = 0; i < 200; i++) {
         const ok = await evaluate(send, '!!(window.__pw && window.__pw.world)', false);
