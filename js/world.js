@@ -677,7 +677,8 @@
     // 深度图与照片同比例（见 js/depth.js 的等比 padding + 裁回），不再是方形拉伸图
     const dw = depth.width || depth.size;
     const dh = depth.height || depth.size;
-    const D = depth.data;
+    let D = depth.data;
+    D = shrinkDepth(D, dw, dh);
 
     /* 深度分布拉伸 */
     const hist = [];
@@ -1135,7 +1136,8 @@
 
     const dw = depth.width || depth.size;
     const dh = depth.height || depth.size;
-    const D = depth.data;
+    let D = depth.data;
+    D = shrinkDepth(D, dw, dh);
 
     /* 逐列天际线：用**未平滑**的原始轮廓做 alpha 判定，树冠/悬崖的锯齿才不会被
        平滑成一条水平直线（蓝调雪林的树梢被整排切掉就是这个原因）。
@@ -2592,6 +2594,28 @@
       uv: new Float32Array(uv), color: new Float32Array(col),
       index: [0, 2, 1, 1, 2, 3]
     };
+  }
+
+  /* 轮廓收缩（v1.27，方案 ①）：深度梯度大的像素是「遮挡过渡带」，
+     它们被赋予中间深度、颜色却取自前景轮廓，低角度一照就拉成竖条。
+     这里对这些像素取 3×3 内的**最近**深度，把过渡带压回前景轮廓。
+     O(N)、纯数组操作，一帧一次。 */
+  function shrinkDepth(data, w, h) {
+    const out = new Float32Array(data.length);
+    const EDGE = 0.10;            // 视差梯度阈值（归一化后）
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        const c = data[i];
+        const l = data[i - (x > 0 ? 1 : 0)];
+        const r = data[i + (x < w - 1 ? 1 : 0)];
+        const u = data[i - (y > 0 ? w : 0)];
+        const d = data[i + (y < h - 1 ? w : 0)];
+        const g = Math.max(Math.abs(c - l), Math.abs(c - r), Math.abs(c - u), Math.abs(c - d));
+        out[i] = g > EDGE ? Math.min(c, l, r, u, d) : c;
+      }
+    }
+    return out;
   }
 
   /* 程序化地平环：视锥外的延续（不是照片内容，是"推测"出的远景雾带）

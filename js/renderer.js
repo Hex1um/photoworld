@@ -244,7 +244,7 @@
       // 深度重建的远景层：>70m 的四边形，跟随相机平移（无视差），
       // 与 GLB 资产模式的 backdrop 同一策略，避免走动时整片照片跟着人滑。
       // 先画远层、再画近层，深度测试处理遮挡。
-      if (world.meshes.reliefBackdrop && !skip('shell')) {
+      if (world.meshes.reliefBackdrop && !skip('shell') && !skip('backdrop')) {
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(true);
