@@ -2497,10 +2497,30 @@
         /* 跳过天空/边缘顶点（alpha < 0.5）：手机上天空里的「黑点/雪花」
            就是这些被深度噪声顶到远处的孤立点，它们在天空背景上格外扎眼。 */
         if (relief.color[k * 4 + 3] < 0.5) continue;
-        pos.push(relief.pos[k * 3], relief.pos[k * 3 + 1], relief.pos[k * 3 + 2]);
+        const x0 = relief.pos[k * 3], y0 = relief.pos[k * 3 + 1], z0 = relief.pos[k * 3 + 2];
+        /* 遮挡边界柔化：与右/下邻的深度比 > 1.8 的点，正处在被拉长的竖面上
+           （岩壁正面那些竖直条纹）。实心贴图读起来是「条纹」，降到 0.35 后
+           退成一层薄雾，后面的补全层与天穹能透出来。 */
+        const dK = Math.hypot(x0, y0 - 1.7, z0) || 1;
+        let jump = 1;
+        const i2 = i + st, j2 = j + st;
+        if (i2 < GW) {
+          const k2 = j * GW + i2;
+          const d2 = Math.hypot(relief.pos[k2 * 3], relief.pos[k2 * 3 + 1] - 1.7,
+            relief.pos[k2 * 3 + 2]) || 1;
+          jump = Math.max(jump, Math.max(dK, d2) / Math.max(0.25, Math.min(dK, d2)));
+        }
+        if (j2 < GH) {
+          const k2 = j2 * GW + i;
+          const d2 = Math.hypot(relief.pos[k2 * 3], relief.pos[k2 * 3 + 1] - 1.7,
+            relief.pos[k2 * 3 + 2]) || 1;
+          jump = Math.max(jump, Math.max(dK, d2) / Math.max(0.25, Math.min(dK, d2)));
+        }
+        const aEdge = jump > 1.8 ? 0.35 : 1;
+        pos.push(x0, y0, z0);
         uv.push(relief.uv[k * 2], relief.uv[k * 2 + 1]);
         col.push(relief.color[k * 4], relief.color[k * 4 + 1], relief.color[k * 4 + 2],
-          relief.color[k * 4 + 3]);
+          relief.color[k * 4 + 3] * aEdge);
       }
     }
     return {
