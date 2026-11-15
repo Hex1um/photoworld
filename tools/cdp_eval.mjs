@@ -101,6 +101,12 @@ try {
   });
   const out = (r.result && r.result.value) || '(空)';
   console.log(out);
+  // --shot <path>：表达式执行完之后存一张截图（成套的"设置状态→看一眼"很有用）
+  if (args.shot) {
+    const shot = await send('Page.captureScreenshot', { format: 'png' });
+    fs.writeFileSync(args.shot, Buffer.from(shot.data, 'base64'));
+    console.log('截图 → ' + args.shot);
+  }
   ws.close();
 } catch (e) {
   console.error('失败：' + e.message);

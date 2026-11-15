@@ -20,15 +20,37 @@
       locked: false,
       enabled: true,
       speedMul: 1,
-      fovMul: 1.06
+      fovMul: 1.06,
+      /* 飞行（创意模式）：双击空格切换；空格升 / Shift 降，松开后自由下落。
+         flyY 是"绝对视点高度"，落地前一直用它 —— 不能复用 y，
+         因为 y 每帧都被贴地高度覆写。 */
+      flying: false,
+      flyY: EYE,
+      vy: 0
     };
 
     const keys = Object.create(null);
     const touch = { joy: null, look: null, jx: 0, jy: 0 };
 
+    let lastSpaceAt = 0;
     function onKey(e, down) {
       const k = e.key.toLowerCase();
       keys[k] = down;
+      /* 双击空格切换飞行。用 320ms 的双击窗口；e.repeat 要挡掉（按住空格会连发
+         keydown，不挡的话一直按着就等于"每帧双击"，飞机会疯狂开关）。 */
+      if (down && k === ' ' && !e.repeat) {
+        const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+        if (now - lastSpaceAt < 320) {
+          state.flying = !state.flying;
+          if (state.flying) {
+            state.flyY = state.y;
+            state.vy = 0;
+          }
+          lastSpaceAt = 0;          // 用完即清，避免三次点击又触发
+        } else {
+          lastSpaceAt = now;
+        }
+      }
       if (down && ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) {
         e.preventDefault();
       }
@@ -155,7 +177,8 @@
       if (len > 1) { fwd /= len; side /= len; }
 
       const sprint = (keys['shift'] || touch.jy < -0.85) ? 2.05 : 1;
-      const target = 4.5 * state.speedMul * sprint;
+      // 飞行时水平更快一点：飞行的用途就是快速看地形
+      const target = 4.5 * state.speedMul * sprint * (state.flying ? 1.5 : 1);
       const sy = Math.sin(state.yaw), cy = Math.cos(state.yaw);
       const tx = (sy * fwd + cy * side) * target;
       const tz = (-cy * fwd + sy * side) * target;
@@ -183,13 +206,37 @@
       state.bob = lerp(state.bob, bobTarget, 1 - Math.exp(-12 * dt));
 
       const groundY = world.heightAt(state.x, state.z);
-      // eyeOverride 供质检相机使用（鸟瞰/侧拍）：null 时就是正常眼高
-      state.y = groundY + (state.eyeOverride === null || state.eyeOverride === undefined ? EYE : state.eyeOverride) + state.bob;
+      const eyeH = (state.eyeOverride === null || state.eyeOverride === undefined) ? EYE : state.eyeOverride;
+      const floorY = groundY + eyeH;
+
+      if (state.flying) {
+        /* 飞行：空格升 / Shift 降（与《我的世界》创意模式一致），
+           水平速度不变（略微加速，飞起来更顺手）。 */
+        const up = (keys[' '] ? 1 : 0) - (keys['shift'] ? 1 : 0);
+        const vTarget = up * 9.0;
+        state.vy = lerp(state.vy, vTarget, 1 - Math.exp(-10 * dt));
+        state.flyY += state.vy * dt;
+        // 下限：不能钻到地面以下；上限：别飞出世界盒
+        state.flyY = clamp(state.flyY, floorY, groundY + 260);
+        state.y = state.flyY;
+        state.bob = 0;
+      } else if (state.y > floorY + 0.06) {
+        /* 关掉飞行后自由下落（简单重力），落地即贴回地面。
+           不做下落的话，关飞行会"啪"地瞬移回地面，很突兀。 */
+        state.vy = Math.max(-16, state.vy - 26 * dt);
+        state.y += state.vy * dt;
+        if (state.y <= floorY) { state.y = floorY; state.vy = 0; state.bob = 0; }
+      } else {
+        state.vy = 0;
+        state.y = floorY + state.bob;
+      }
 
       state.speed = speed;
     }
 
     function reset(x, z, yaw) {
+      state.flying = false;
+      state.vy = 0;
       state.eyeOverride = null;
       state.x = x || 0; state.z = z || 0;
       state.yaw = yaw || 0;

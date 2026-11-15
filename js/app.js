@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.4.4';
+  const VERSION = '2.5.0';
 
   /* v2 服务的地址：显式 ?api= 优先，其次是自动发现（本机常见端口）。
      自动发现写在启动流程里，不需要使用者改 URL —— 这是"更快捷地启用 v2"的关键。 */
@@ -856,11 +856,11 @@
          接上 extend.js 之后，走出去能看到继续生成的地形，并且"实时变化"
          （混乱度/记忆力）在这里也生效 —— 与在线链路同一套参数。
          全部包在 try 里：延伸器依赖若干世界字段，缺一个都不该把资产世界弄坏。 */
-      // 默认关闭（?ext=1 打开）：extend.js 的 tile 布局是按在线链路的"无限地貌"
-      // 视锥参数设计的，直接套到资产世界会出现"一大片暗色地面 + 一道蓝色拉丝"
-      // （实测）。要真正接上，需要把资产世界的地面高度场/色板/边界契约喂给它，
-      // 这是一次独立的适配工作，不能靠一行开关。
-      const wantExt = new URLSearchParams(location.search).get('ext') === '1';
+      /* 程序化延伸**默认开启**（?ext=0 关闭）：要求是"看到的地方都要补满" ——
+         照片只覆盖一个视锥，其余方向必须是继续生成的地形，不能是雾或空底。
+         适配层把资产世界的事实喂给它（近景层的 bbox、照片地面色、
+         顶点色 tile、纵向基准），四处契约冲突已在 v2.4.3/2.4.4 修完。 */
+      const wantExt = new URLSearchParams(location.search).get('ext') !== '0';
       if (wantExt && window.PW.createExtender && !isWall) {
         try {
           w.extraMeshes = [];
@@ -906,8 +906,29 @@
             }
           } catch (e) { /* 取不到就用通话色 */ }
           const lin = (c) => Math.pow(Math.max(1e-4, c), 2.2);
-          w.groundBaseLin = [lin(gcol[0]), lin(gcol[1]), lin(gcol[2])];
+          const fogLin = [lin(col.bot[0]), lin(col.bot[1]), lin(col.bot[2])];
+          /* 基色必须**抬到与雾同量级**再交给延伸器。
+             它的着色是 (colorAt*0.45 + fog*0.55) / base，base 若远小于雾色
+             （金色时刻地面线性值只有 0.02，雾 0.3），比值会顶到 clamp 上限 6，
+             整片地形变成发白的灰板 —— 就是上一版背视图那块"灰平原"。
+             做法：base 取 max(地面色, 雾色*0.6)，保证除出来的系数落在 1 左右。 */
+          w.groundBaseLin = [
+            Math.max(lin(gcol[0]), fogLin[0] * 0.60),
+            Math.max(lin(gcol[1]), fogLin[1] * 0.60),
+            Math.max(lin(gcol[2]), fogLin[2] * 0.60)
+          ];
           w.groundTint = gcol;
+          /* 空间配色变化：tile 只有顶点色，若全用同一个基色就是一块平板。
+             这里给"低频明暗（几十米尺度）+ 微弱冷暖漂移 + 中频扰动"三层，
+             返回的是与 base 同量级的目标色，除以 base 后落在 0.85~1.35。 */
+          const gb = w.groundBaseLin;
+          w.groundColorAt = function (x, z) {
+            const n1 = Math.sin(x * 0.019 + 1.7) * Math.cos(z * 0.023 - 0.4);
+            const n2 = Math.sin(x * 0.09 + z * 0.061 + 2.1);
+            const v = 0.94 + 0.16 * n1 + 0.06 * n2;
+            const warm = 1 + 0.07 * Math.sin(x * 0.008 + z * 0.005 + 0.9);
+            return [gb[0] * v * warm, gb[1] * v, gb[2] * v / warm];
+          };
           // 资产世界的地面**没有照片贴图可铺**（网格自带 UV），底板走顶点色
           w.floorMode = 1;
           w.floorTex = null;
