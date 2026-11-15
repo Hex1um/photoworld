@@ -368,7 +368,7 @@ def build_points(P: np.ndarray, rgb: np.ndarray, valid: np.ndarray,
             "point_px": float(step_used) * 2.0}
 
 
-def build_photo_wall(cam, dist: float = 8.0) -> dict:
+def build_photo_wall(cam, dist: float = 8.0, expand: float = 1.0) -> dict:
     """把整张照片做成一面"照片墙"（正对视线的四边形）。
 
     什么时候用：画面里几乎没有地面（云海、星空、从太空拍的地球、纯天空）。
@@ -384,7 +384,12 @@ def build_photo_wall(cam, dist: float = 8.0) -> dict:
         d = rays[j, i]
         p = d * dist
         pos.extend([float(p[0]), float(p[1]), float(-p[2])])
-        uv.extend([i / (w - 1.0), j / (h - 1.0)])
+        # expand>1 会把 UV 推�� [0,1] 之外、由 CLAMP 拉成边条（实测很难看），
+        # 所以默认 1.0：墙严格等于照片视场。让墙填满屏幕靠前端把视点放到原点
+        # （见 app.js 里 wall 世界的 eyeHeight=0）—— 视锥比照片窄时自然是裁切，不会露灰。
+        u = 0.5 + (i / (w - 1.0) - 0.5) * expand
+        v = 0.5 + (j / (h - 1.0) - 0.5) * expand
+        uv.extend([u, v])
     idx = [0, 2, 1, 1, 2, 3]
     return {
         "name": "backdrop",
@@ -397,7 +402,8 @@ def build_photo_wall(cam, dist: float = 8.0) -> dict:
 
 def build_ground_skirt(P: np.ndarray, ground: np.ndarray, uv: np.ndarray,
                        radius: float = 400.0, cells: int = 96,
-                       n_palette: int = 12, inner_frac: float = 0.28) -> dict | None:
+                       n_palette: int = 12, inner_frac: float = 0.06,
+                       footprint: tuple | None = None) -> dict | None:
     """重建区域之外补一整圈地面，让"视锥外的灰白"变成"远处地面 + 雾"。
 
     为什么需要它：v2 的几何止于照片的投影梯形，梯形外什么都没有 ——
@@ -406,7 +412,8 @@ def build_ground_skirt(P: np.ndarray, ground: np.ndarray, uv: np.ndarray,
 
     做法：
       * 地面高度取"地面像素的 y 中位数"（相机系里约等于 -eye）；
-      * 内圈留空（inner_frac），避免与重建网格重叠打架；
+      * 内圈很小（inner_frac*radius，默认 24m）：留太大就会在"照片边缘到裙边之间"
+        拉出一条空带 —— 实测那张沙漠截图里脚下的大片空白就是这么来的（旧值 112m）；
       * 颜色**从照片自己的地面像素里采样**：把地面像素的 UV 聚成 n_palette 个代表值，
         按位置哈希轮流贴到裙边顶点上。这样裙边天然带一点照片的地面杂色，
         不再是纯色板，也不需要额外贴图。
@@ -432,7 +439,16 @@ def build_ground_skirt(P: np.ndarray, ground: np.ndarray, uv: np.ndarray,
     X, Z = np.meshgrid(lin, lin)                 # Z 向 -Z 是前方，这里用世界 z
     Z = Z - radius * 0.35                        # 略向前铺，画面里主要是前方
     inner = radius * inner_frac
-    hole = (np.abs(X) < inner) & (np.abs(Z + radius * 0.35) < inner)
+    if footprint is not None:
+        # 用**照片投影的梯形**当洞，而不是圆：圆的半径要么盖住照片自己的地面
+        # （把细节挡掉），要么在照片边缘外留一条空带（用户截图里脚下那片空白）。
+        # footprint = (z_near, z_far, tan_h)，与世界坐标同向（前方 z 为负）。
+        z_near, z_far, tan_h = footprint
+        half_w = np.maximum(1e-3, -Z) * tan_h
+        hole = (-Z >= z_near * 0.8) & (-Z <= z_far * 1.05) & (np.abs(X) <= half_w * 1.02)
+        hole &= (Z <= 0)
+    else:
+        hole = (np.abs(X) < inner) & (np.abs(Z + radius * 0.35) < inner)
 
     pos, nrm, uvout, index = [], [], [], []
     vid = np.full(X.shape, -1, dtype=np.int64)
@@ -443,9 +459,10 @@ def build_ground_skirt(P: np.ndarray, ground: np.ndarray, uv: np.ndarray,
             vid[j, i] = len(pos) // 3
             pos.extend([float(X[j, i]), gy, float(Z[j, i])])
             nrm.extend([0.0, 1.0, 0.0])
-            # 按格子哈希挑一个色板 UV：既不是纯色，也不会出现明显重复
-            k = (j * 73856093 ^ i * 19349663) % palette.shape[0]
-            uvout.extend([float(palette[k, 0]), float(palette[k, 1])])
+            # **统一取一个色板 UV**：早先按格子哈希取不同色，结果在掠射角下
+            # 每个格子的颜色差异被放大成一圈圈同心橙环（实测），比纯色难看得多。
+            uvout.extend([float(palette[palette.shape[0] // 2, 0]),
+                          float(palette[palette.shape[0] // 2, 1])])
 
     for j in range(n):
         for i in range(n):
@@ -466,6 +483,68 @@ def build_ground_skirt(P: np.ndarray, ground: np.ndarray, uv: np.ndarray,
     }
 
 
+def build_scatter_rocks(palette_uv: np.ndarray, ground_y: float, radius: float,
+                        inner: float, count: int = 220, seed: int = 7) -> dict | None:
+    """在裙边上撒一批低模石块，让"视锥外"有地物而不只是一块地面。
+
+    参考效果（用户给的图）：远景是地貌，近中景散落着岩块、灌木。纯平面无论怎么雾化
+    都读作"空"，必须有不规则的立体物提供视差与轮廓。
+
+    做法：每块石头 = 上下两个不规则环 + 顶部一点（10 个三角形），半径 0.3~2.2m，
+    颜色/贴图取照片地面色板里的随机一个 UV（平色即可，远处看不清纹理）。
+    """
+    rng = np.random.default_rng(seed)
+    if palette_uv is None or palette_uv.size == 0 or count <= 0:
+        return None
+    pos, nrm, uv, idx = [], [], [], []
+    base = 0
+    for k in range(int(count)):
+        ang = rng.uniform(0, 2 * np.pi)
+        # 半径按面积均匀撒（sqrt），避免全挤在内圈
+        # 密度按"近多���少"分配：把 u 做平方，落点集中在中近景
+        u = rng.uniform(0.0, 1.0) ** 2.2
+        rr = (inner + 4.0) + u * (radius * 0.55 - inner - 4.0)
+        cx, cz = np.sin(ang) * rr, np.cos(ang) * rr
+        sc = float(np.clip(rng.normal(1.35, 0.7), 0.4, 3.2))        # 尺寸（米）
+        h = sc * rng.uniform(0.55, 1.15)
+        rot = rng.uniform(0, np.pi)
+        nv = 6
+        ring_lo = []
+        ring_hi = []
+        for v in range(nv):
+            th = rot + 2 * np.pi * v / nv
+            r0 = sc * rng.uniform(0.75, 1.15)
+            r1 = sc * rng.uniform(0.35, 0.7)
+            ring_lo.append((cx + np.sin(th) * r0, ground_y, cz + np.cos(th) * r0))
+            ring_hi.append((cx + np.sin(th) * r1, ground_y + h, cz + np.cos(th) * r1))
+        apex = (cx, ground_y + h * 1.15, cz)
+        u_pick = palette_uv[rng.integers(0, palette_uv.shape[0])]
+        for (x, y, z) in ring_lo + ring_hi + [apex]:
+            pos.extend([float(x), float(y), float(z)])
+        for i2 in range(nv):                                   # 侧面
+            a = base + i2
+            b = base + (i2 + 1) % nv
+            c = base + nv + i2
+            d = base + nv + (i2 + 1) % nv
+            idx.extend([a, b, c, b, d, c])
+        top = base + 2 * nv
+        for i2 in range(nv):                                   # 顶盖
+            a = base + nv + i2
+            b = base + nv + (i2 + 1) % nv
+            idx.extend([a, b, top])
+        for i2 in range(2 * nv + 1):
+            nrm.extend([0.0, 1.0, 0.0])
+            uv.extend([float(u_pick[0]), float(u_pick[1])])
+        base += 2 * nv + 1
+    if not idx:
+        return None
+    return {"name": "scatter",
+            "pos": np.asarray(pos, dtype=np.float32).reshape(-1, 3),
+            "nrm": np.asarray(nrm, dtype=np.float32).reshape(-1, 3),
+            "uv": np.asarray(uv, dtype=np.float32).reshape(-1, 2),
+            "index": np.asarray(idx, dtype=np.uint32)}
+
+
 def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
           far_split: float = 70.0, near_split: float = 12.0,
           sky: np.ndarray | None = None, edge_ratio: float = 2.4,
@@ -483,9 +562,9 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
           # 而"远景占比 / 纵深动态范围"在好坏图上完全不分离（远景占比全是 0，
           # 纵深比好的 29、坏的 80~148，但雪山这种好图也有 102）。
           # 结论：这一层要靠**语义**（SegFormer 的 sky 类占比）才能判，不是数值统计能到的。
-          photo_wall_frac: float = 0.0,
+          photo_wall_frac: float = 0.0, photo_wall: bool = False,
           card_flatten: bool = True,
-          ground_cells: int = 96) -> dict:
+          ground_cells: int = 140, scatter_rocks: int = 0) -> dict:
     """主入口：深度（米）→ 分层网格。
 
     返回 {"layers": [...], "stats": {...}}，可直接交给 pipeline/glb.write_glb。
@@ -577,7 +656,9 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
     # 云海、星空、太空地球这类图都会命中。
     gfrac = float(ground.mean())
     skyfrac = float((rays[..., 1] > 0.02).mean())
-    if photo_wall_frac > 0 and gfrac < photo_wall_frac and skyfrac > 0.55:
+    # 触发条件由调用方给（语义模型判定"这不是风景照"），不再用便宜的数值判据 ——
+    # 那些判据实测不成立，见 photo_wall_frac 的注释。
+    if photo_wall:
         wall = build_photo_wall(cam)
         return {"layers": [wall], "stats": {
             "wall": {"vertices": 4, "triangles": 2, "skirt_quads": 0,
@@ -728,10 +809,31 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
     if ground_radius > 0:
         gmask = ground if ground.shape == zs.shape else ground[::step, ::step]
         if gmask.shape == zs.shape:
+            fz = fwd[valid]
+            footprint = (float(np.percentile(fz, 2)), float(np.percentile(fz, 92)),
+                         math.tan(cam.hfov * 0.5))
             skirt = build_ground_skirt(P, gmask, uv,
-                                       radius=ground_radius, cells=ground_cells)
+                                       radius=ground_radius, cells=ground_cells,
+                                       footprint=footprint)
             if skirt is not None:
                 layers.append(skirt)
+                # 地物：在裙边上撒石块（同一套地面色板取色）
+                try:
+                    g_uv = uv[gmask]
+                    if g_uv.shape[0] > 8:
+                        pick = np.linspace(0, g_uv.shape[0] - 1,
+                                           min(16, g_uv.shape[0])).astype(int)
+                        rocks = build_scatter_rocks(g_uv[pick], float(np.median(P[gmask][:, 1])) - 0.15,
+                                                    ground_radius, ground_radius * 0.06,
+                                                    count=scatter_rocks)
+                        if rocks is not None:
+                            layers.append(rocks)
+                            stats["scatter"] = {"vertices": int(rocks["pos"].shape[0]),
+                                                "triangles": int(rocks["index"].size // 3),
+                                                "skirt_quads": 0, "pixels": 0,
+                                                "depth_p10": 0.0, "depth_p90": 0.0}
+                except Exception:
+                    pass
                 stats["ground"] = {
                     "vertices": int(skirt["pos"].shape[0]),
                     "triangles": int(skirt["index"].size // 3),

@@ -206,6 +206,32 @@ def outpaint(img: Image.Image, root: str, scale_x: float = 1.70, scale_y: float 
                         ga[..., c] = (ga[..., c] - gv.mean()) * (os_ / gs) * 0.85 + ov.mean() + (gv.mean() - ov.mean()) * 0.15
                 gen_full = Image.fromarray(np.clip(ga, 0, 255).astype(np.uint8))
 
+                # ---- 有效性判定：这次到底有没有"生成" --------------
+                # 扩散模型偶尔会基本不动（输出≈镜像初始值），此时两侧是原图的镜像
+                # 复制，看起来像"同一张照片贴了三遍"（实测灯柱那张）。用"输出与初始
+                # 画布在掩码区的平均绝对差"判定：太小就认为没生成，直接放弃外扩。
+                init_arr = np.asarray(canvas, dtype=np.float32)
+                diff = float(np.abs(np.asarray(gen_full, dtype=np.float32)[gmask]
+                                    - init_arr[gmask]).mean()) if gmask.any() else 0.0
+                # 更直接的判据：**左右两条生成带是不是互为镜像**。
+                # 扩散模型有时几乎原样保留镜像初始值，于是整幅看起来像"同一张照片
+                # 贴了三遍"（实测校园灯柱那张）。把左带翻转后与右带算相关系数，
+                # 接近 1 就说明没生成出东西。
+                corr = 0.0
+                if left > 8 and right > 8:
+                    Lb = np.asarray(gen_full.crop((0, top, left, top + h))
+                                    .convert("L").resize((64, 64)), dtype=np.float32).ravel()
+                    Rb = np.asarray(gen_full.crop((left + w, top, Wext, top + h))
+                                    .convert("L").resize((64, 64)), dtype=np.float32)
+                    Rb = np.fliplr(Rb).ravel()
+                    if Lb.std() > 1e-3 and Rb.std() > 1e-3:
+                        corr = float(np.corrcoef(Lb, Rb)[0, 1])
+                info["mirror_corr"] = round(corr, 3)
+                info["gen_diff"] = round(diff, 1)
+                if diff < 4.0 or corr > 0.90:
+                    info["reason"] = ("生成无效（镜像相关 %.2f / 平均差 %.1f）" % (corr, diff))
+                    raise RuntimeError(info["reason"])
+
                 # ---- 2) 宽羽化合成 ------------------------------------
                 # 中心保留原始像素，但从边界往里 feather 像素做线性过渡，
                 # 3px 的羽化挡不住色调差（实测就是一条硬线）。

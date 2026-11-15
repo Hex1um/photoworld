@@ -50,13 +50,14 @@ DEFAULTS = {
     # 但扩完之后 ① 视场从 69° 变成 99°，② 标定/取景没跟着重配，
     # 结果画面变暗、地平线抬高、地面占满 2/3 —— 比不扩更差。
     # 打开需要同时把"扩展后的相机与标定"一起调好，这是一项独立工作。
-    "outpaint": 1.0, "outpaint_y": 1.0, "outpaint_steps": 26,
+    # 开启模型外扩（只扩左右）：生成区能长出树/岩壁，正是"要有地物"要求的来源。
+    "outpaint": 1.70, "outpaint_y": 1.0, "outpaint_steps": 26,
     "outpaint_side": 1024, "outpaint_seed": 0,
     # 默认**不**用扩散模型：本机缓存里只有 SDXL-inpaint，8GB 显存上单张 15 分钟都跑不完
     # （实测）。不打开时走"镜像延展 + 渐隐到雾色"，同样能消掉视锥外的空白与硬边，
     # 只是没有新内容。等快速权重（dreamshaper-8-inpainting）下完整后，再开这个开关。
     "outpaint_model": True,
-    "ground_radius": 400.0,
+    "ground_radius": 400.0, "semantics": True,
     "long_side": 1540, "device": "cuda", "median_size": 3,
 }
 
@@ -117,7 +118,35 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
     # ---- 视锥外扩：把"照片只有一块梯形"补成"周围也有世界" --------------
     # 不做这一步，画面左右下三块是纯色，照片边界是一条刀切硬边。
     oinfo = {"mode": "off"}
-    if float(opts["outpaint"]) > 1.01:
+    wall = False
+    wall_why = ""
+    seg = None
+    if opts["semantics"]:
+        try:
+            import importlib
+            sem = importlib.import_module("semantics")
+            if sem.available(ROOT):
+                seg = sem.segment(rgb, ROOT)
+                ok, wall_why = sem.looks_like_scenery(seg)
+                wall = not ok
+            else:
+                wall_why = "缺少语义模型（models/segformer_b0_ade20k.onnx）"
+        except Exception as e:              # 语义只是加分项，失败不能中断烘焙
+            wall_why = "语义判定失败: %s" % e
+
+    # 外扩的"适用性"门控：城市/近景物体多的照片，扩散模型会把画面挤成中间一条、
+    # 两侧变成重复边条（实测校园灯柱那张）。这类图改走地面裙边。
+    urban = 0.0
+    if seg is not None:
+        urban = seg["frac"]["building"] + seg["frac"]["person"] + seg["frac"]["vehicle"]
+    if urban > 0.22 and not wall:
+        wall_why = (wall_why + f" | 建筑/人物/车辆占比 {urban*100:.0f}%，不启用模型外扩").strip(" |")
+
+    # 外扩只对**横构图**有意义：竖构图（宽高比 <1.15）横向扩 1.7 倍后，
+    # 照片内容会被挤成中间一条、两侧变成重复的边条（实测灯柱那张就是）。
+    # 竖构图继续走地面裙边。
+    aspect0 = src_size[0] / float(max(1, src_size[1]))
+    if float(opts["outpaint"]) > 1.01 and aspect0 >= 1.15 and urban <= 0.22:
         import importlib
         op = importlib.import_module("outpaint")
         img_src, oinfo = op.outpaint_two_pass(
@@ -140,10 +169,35 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
     proc, model = _load_model(opts["device"])
     disp = depth_gpu.estimate(work, proc, model, opts["device"], opts["long_side"], True)
 
-    rb = calib.robust_calibrate(disp, cam, eye=opts["eye"], horizon_far=opts["horizon_far"])
-    cam, z, cal = rb["cam"], rb["z"], rb["cal"]
+    # 外扩之后深度图变宽了：如果还在**整幅**上做标定，生成区的天空/地面会把
+    # 分位锚点带偏，尺度整体漂移 —— 实测表现是"画面变暗、地平线抬高、地面占满"。
+    # 所以标定只在原照片那一块做（像素密度不变 → 与原图同一套视场），
+    # 再把结果套到整幅扩展深度上。
+    disp_c, cam_c = disp, cam
+    pad = (oinfo or {}).get("pass1", {}).get("pad") if isinstance(oinfo, dict) else None
+    if pad and len(pad) == 4 and max(pad) > 0:
+        l, t, r, b = pad
+        h0, w0 = disp.shape[0] - t - b, disp.shape[1] - l - r
+        if h0 > 32 and w0 > 32:
+            disp_c = disp[t:t + h0, l:l + w0]
+            cam_c = geom.Camera(hfov=hfov0, vfov=vfov_of(hfov0, w0, h0), w=w0, h=h0)
+    rb = calib.robust_calibrate(disp_c, cam_c, eye=opts["eye"], horizon_far=opts["horizon_far"])
+    cal = rb["cal"]
+    cam = rb["cam"]
+    if disp_c is not disp:
+        # 同一套 A/p 应用到整幅；相机用扩展后的（视场更宽，像素密度一致）
+        z, cal = geom.apply_calibration(disp, cal, cal.get("far", 1800.0))
+        cam = geom.Camera(hfov=hfov, vfov=vfov_of(hfov, tw, th), w=tw, h=th,
+                          pitch=rb["cam"].pitch)
+    else:
+        z = rb["z"]
 
     rgb = np.asarray(work, dtype=np.float32) / 255.0
+
+    # ---- 语义判定：这是不是一张"可以建三维"的风景照 -----------------------
+    # 云海 / 星空 / 太空地球这类图，深度没有物理意义，硬建三维只会得到一团
+    # 黑色拉丝（验收批次里最惨的两张）。语义是唯一可靠的信号 —— 数值统计试过两次
+    # 都不成立。命中就退回"照片平贴"，观感等于一张高分辨率照片挂在正前方。
     far_m = cal.get("far", 1800.0)
     lum = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
     gx = np.abs(np.diff(lum, axis=1, prepend=lum[:, :1]))
@@ -160,7 +214,13 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
                     skirt_max=opts["skirt_max"], median_size=opts["median_size"],
                     stretch_clamp=opts["stretch_clamp"],
                     strong_median=opts["strong_median"], quantize=opts["quantize"],
-                    rgb=rgb, repr_mode=opts["repr"], scatter_thr=opts["scatter_thr"])
+                    rgb=rgb, repr_mode=opts["repr"], scatter_thr=opts["scatter_thr"],
+                    cliff_thr=opts["cliff_thr"], ground_tol=opts["ground_tol"],
+                    # 有外扩时不再铺裙边：扩展图已经把地面铺到 99° 视场，
+                    # 再压一层程序化地面只会在掠射角变成同心环带（实测）。
+                    ground_radius=(0.0 if (oinfo or {}).get("mode", "off").startswith("sd-")
+                                   else float(opts["ground_radius"])),
+                    photo_wall=wall)
 
     tex = img_src
     if max(tex.size) > opts["tex_max"]:
@@ -195,6 +255,7 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
                    "pitch_deg": round(math.degrees(cam.pitch), 2)},
         "calibration": {k: v for k, v in cal.items() if isinstance(v, (int, float, str, bool))},
         "repr": res["stats"]["_global"].get("repr", "mesh"),
+        "photo_wall": wall, "photo_wall_reason": wall_why,
         "scatter": res["stats"]["_global"].get("scatter", 0.0),
         "cliff": res["stats"]["_global"].get("cliff", 0.0),
         "layers": res["stats"], "glb": info,
