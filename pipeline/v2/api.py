@@ -47,7 +47,11 @@ DEFAULTS = {
     # 视锥外扩（模型补全）：倍数 >1 才启用。1.7 = 左右各多 35%，
     # 纵向 1.3 = 上 8% / 下 22%（地面比天空更需要内容）
     "outpaint": 1.70, "outpaint_y": 1.30, "outpaint_steps": 26,
-    "outpaint_side": 1024, "outpaint_seed": 0, "outpaint_model": True,
+    "outpaint_side": 1024, "outpaint_seed": 0,
+    # 默认**不**用扩散模型：本机缓存里只有 SDXL-inpaint，8GB 显存上单张 15 分钟都跑不完
+    # （实测）。不打开时走"镜像延展 + 渐隐到雾色"，同样能消掉视锥外的空白与硬边，
+    # 只是没有新内容。等快速权重（dreamshaper-8-inpainting）下完整后，再开这个开关。
+    "outpaint_model": False,
     "ground_radius": 400.0,
     "long_side": 1540, "device": "cuda", "median_size": 3,
 }

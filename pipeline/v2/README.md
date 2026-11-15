@@ -58,6 +58,23 @@ python pipeline/v2/bake.py photo.jpg --out out/x --debug-layers
 | `--quantize` | 0 | 深度量化倍数（枝叶类可试 1.3，实测帮助有限） |
 | `--no-flatten` / `--no-skirt` | — | A/B 用开关 |
 
+## 视锥外扩（outpaint）
+
+`--outpaint 1.7` 会把照片放进更大画布（左右 +35%、下 +22%、上 +8%）并把四周补出来，
+中心原图区域**严格保留原始像素**；视野按 `hfov_new = 2·atan(tan(hfov/2)·W_new/W_old)`
+换算，中心角分辨率不变。
+
+两种模式：
+
+| 模式 | 触发 | 效果 | 耗时 |
+|---|---|---|---|
+| 镜像延展 + 渐隐雾色 | 默认（`outpaint_model=False`） | 无空白、无刀切边，但没有新内容 | <0.2s |
+| 扩散模型补全 | `outpaint_model=True` 且权重可用 | 四周真的长出新地貌 | 取决于模型 |
+
+**权重注意**：不加门禁的可用权重是 `Lykon/dreamshaper-8-inpainting`（SD1.5 系，约 2GB）。
+`diffusers/stable-diffusion-xl-1.0-inpainting-0.1` 也能下（6.5GB），但在 8GB 显存的笔记本上
+单张 15 分钟都跑不完 —— 所以默认关闭模型模式，别默认去踩这个坑。
+
 ## 已知失败模式
 
 **密集枝叶/细枝前景**（`corpus_test/08_autumn_fg.jpg`）仍然不行：深度本身是对的
