@@ -300,7 +300,9 @@
       /* 世界坐标地面方格网（v1.20）：先画地面，再画照片表面。
          地面的几何与照片平面完全重合（都是 y=0），只是拓扑换成规则方格，
          贴图 UV 取自反投影场 —— 从任何角度看都没有放射状拉丝。 */
-      if (world.meshes.groundGrid && !skip('ground')) {
+      /* 点云模式下不再画地面方格网：手机低角度那张「放射长条」就是它的
+         近处三角形沿视线拉长、从点云缝隙里透出来的。地面交给点云自己覆盖。 */
+      if (world.meshes.groundGrid && !skip('ground') && !world.splatMode) {
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(true);

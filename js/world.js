@@ -1565,7 +1565,10 @@
            下半截留在几何里摊成一条横贯画面的灰带（截图实测）。
            误清保护交给语义本身：ADE20K 的 sky 概率在台地/水体上很低，
            真被误判的像素由下面的「地形占比」分支救回。 */
-        if (sem && grp === SGRP.SKY) aSky = 0;
+        /* 语义天空清零加深度上限：岩壁顶部经常被 ADE20K 误判成 sky，
+           一刀清零后岩壁顶消失、露出天穹的浅色 → 手机上那条「白色断层」。
+           只有确实很远的像素才清零。 */
+        if (sem && grp === SGRP.SKY && d0 < skyD + 0.35) aSky = 0;
         const aU = smoothstep(0, 0.02, u) * (1 - smoothstep(0.98, 1, u));
         const aV = smoothstep(0, 0.015, v) * (1 - smoothstep(0.985, 1, v));
         // 室外按深度裁掉天空（否则照片天空会被压到 100m 处，和地面分成两块）；
@@ -2491,6 +2494,9 @@
     for (let j = 0; j < GH; j += st) {
       for (let i = 0; i < GW; i += st) {
         const k = j * GW + i;
+        /* 跳过天空/边缘顶点（alpha < 0.5）：手机上天空里的「黑点/雪花」
+           就是这些被深度噪声顶到远处的孤立点，它们在天空背景上格外扎眼。 */
+        if (relief.color[k * 4 + 3] < 0.5) continue;
         pos.push(relief.pos[k * 3], relief.pos[k * 3 + 1], relief.pos[k * 3 + 2]);
         uv.push(relief.uv[k * 2], relief.uv[k * 2 + 1]);
         col.push(relief.color[k * 4], relief.color[k * 4 + 1], relief.color[k * 4 + 2],
