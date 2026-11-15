@@ -28,7 +28,11 @@ import os
 import numpy as np
 from PIL import Image, ImageFilter
 
-MODEL_ID = "diffusers/stable-diffusion-xl-1.0-inpainting-0.1"
+# 优先用 SD1.5 系（Lykon/dreamshaper-8-inpainting，约 2.6GB）：8GB 笔记本显存上
+# 单张 SDXL-inpaint 15 分钟都跑不完（实测），SD1.5 系几秒钟，画质对"补四周风景"够用。
+MODEL_ID = "Lykon/dreamshaper-8-inpainting"
+# 备选（更大更慢；显存 >=16GB 再考虑）
+FALLBACK_IDS = ["diffusers/stable-diffusion-xl-1.0-inpainting-0.1"]
 _PIPE = None
 _MODEL_DIR = None
 
@@ -43,11 +47,15 @@ def _model_dir(root: str) -> str:
     local = os.path.join(root, "models", "sd2_inpaint")
     if os.path.exists(os.path.join(local, "model_index.json")):
         return local
-    cache = os.path.expanduser(
-        "~/.cache/huggingface/hub/models--diffusers--stable-diffusion-xl-1.0-inpainting-0.1/snapshots")
-    for snap in sorted(glob.glob(os.path.join(cache, "*")), reverse=True):
-        if os.path.exists(os.path.join(snap, "model_index.json")):
-            return snap
+    hub = os.path.expanduser("~/.cache/huggingface/hub")
+    for mid in [MODEL_ID] + FALLBACK_IDS:
+        cache = os.path.join(hub, "models--" + mid.replace("/", "--"), "snapshots")
+        for snap in sorted(glob.glob(os.path.join(cache, "*")), reverse=True):
+            unet = os.path.join(snap, "unet")
+            # 必须确认 unet 权重真的在（下载中断时会只剩 config.json）
+            if os.path.exists(os.path.join(snap, "model_index.json")) and \
+               any(f.endswith(".safetensors") for f in os.listdir(unet)) if os.path.isdir(unet) else False:
+                return snap
     return local
 
 
@@ -181,16 +189,33 @@ def outpaint(img: Image.Image, root: str, scale_x: float = 1.70, scale_y: float 
                            guidance_scale=guidance, generator=gen).images[0]
                 gen_full = res.resize((Wext, Hext), Image.LANCZOS)
 
-                # 只取边缘：中心原图区域严格保留原始像素
+                # ---- 1) 色调对齐 --------------------------------------
+                # 扩散模型生成区的曝光/白平衡和原片常差一截，直接拼上去会看到
+                # 一圈明显的矩形硬边（实测：左半偏暗、底部偏亮）。
+                # 用生成区与原始区的均值/标准差做一次 Reinhard 迁移，
+                # 把生成区拉到原片的色彩统计上。
+                ga = np.asarray(gen_full, dtype=np.float32)
+                oa = np.asarray(img, dtype=np.float32)
+                gmask = np.asarray(mask.resize((Wext, Hext), Image.LANCZOS), dtype=np.float32) > 127
+                if gmask.sum() > 1000:
+                    for c in range(3):
+                        gv = ga[..., c][gmask]
+                        ov = oa[..., c]
+                        gs = max(1e-3, float(gv.std()))
+                        os_ = max(1e-3, float(ov.std()))
+                        ga[..., c] = (ga[..., c] - gv.mean()) * (os_ / gs) * 0.85 + ov.mean() + (gv.mean() - ov.mean()) * 0.15
+                gen_full = Image.fromarray(np.clip(ga, 0, 255).astype(np.uint8))
+
+                # ---- 2) 宽羽化合成 ------------------------------------
+                # 中心保留原始像素，但从边界往里 feather 像素做线性过渡，
+                # 3px 的羽化挡不住色调差（实测就是一条硬线）。
+                feather = max(12, int(min(w, h) * 0.05))
                 comp = gen_full.copy()
-                comp.paste(img, (left, top))
-                # 接缝 1~2px 用软过渡，避免"贴上去"的硬线
-                band = 3
-                if left or top or right or bottom:
-                    alpha = Image.new("L", (w, h), 0)
-                    alpha.paste(255, (band, band, w - band, h - band))
-                    alpha = alpha.filter(ImageFilter.GaussianBlur(band))
-                    comp.paste(img, (left, top), alpha)
+                alpha = Image.new("L", (w, h), 0)
+                alpha.paste(255, (feather, feather, max(feather + 1, w - feather),
+                                  max(feather + 1, h - feather)))
+                alpha = alpha.filter(ImageFilter.GaussianBlur(feather * 0.6))
+                comp.paste(img, (left, top), alpha)
                 info.update({"mode": "sd-inpaint", "model": MODEL_ID,
                              "gen_size": [gw, gh], "steps": steps, "seed": seed})
                 return comp, info
@@ -213,3 +238,29 @@ def outpaint(img: Image.Image, root: str, scale_x: float = 1.70, scale_y: float 
 def hfov_of_extended(hfov: float, w_src: int, w_ext: int) -> float:
     """像素密度不变时，扩展画布对应的水平视场。"""
     return 2.0 * math.atan(math.tan(hfov * 0.5) * (w_ext / float(w_src)))
+
+
+def outpaint_two_pass(img: Image.Image, root: str, scale_x: float = 1.70,
+                      scale_y: float = 1.30, **kw) -> tuple[Image.Image, dict]:
+    """分两趟扩：先左右、再上下。
+
+    为什么要两趟：一次生成 1.7×1.3 的画布时，长边压到 1280 后高度只剩 600 左右，
+    底部那条"又宽又扁"的条带会让模型横向**重复平铺**（实测底边出现 4 段重复的岩壁）。
+    拆成两趟后每趟的宽高比都接近模型熟悉的 1:1~16:9，重复消失，
+    而且第二趟是拿"已扩好的图"当输入，上下方向也能接上第一趟生成的岩壁。
+    """
+    info = {}
+    cur = img
+    if scale_x > 1.01:
+        cur, i1 = outpaint(cur, root, scale_x=scale_x, scale_y=1.0, **kw)
+        info["pass1"] = i1
+    if scale_y > 1.01:
+        cur, i2 = outpaint(cur, root, scale_x=1.0, scale_y=scale_y, **kw)
+        info["pass2"] = i2
+    if not info:
+        return img, {"mode": "off"}
+    modes = {v.get("mode") for v in info.values()}
+    info["mode"] = "sd-inpaint-2pass" if modes == {"sd-inpaint"} else "fallback-2pass"
+    info["size"] = list(cur.size)
+    info["model"] = MODEL_ID
+    return cur, info

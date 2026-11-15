@@ -46,12 +46,16 @@ DEFAULTS = {
     "repr": "auto", "scatter_thr": 0.002, "cliff_thr": 0.010, "ground_tol": 0.30,
     # 视锥外扩（模型补全）：倍数 >1 才启用。1.7 = 左右各多 35%，
     # 纵向 1.3 = 上 8% / 下 22%（地面比天空更需要内容）
-    "outpaint": 1.70, "outpaint_y": 1.30, "outpaint_steps": 26,
+    # 外扩默认**关闭**（1.0）：模型能生成可信的左右地貌（实测岩壁、树都接得上），
+    # 但扩完之后 ① 视场从 69° 变成 99°，② 标定/取景没跟着重配，
+    # 结果画面变暗、地平线抬高、地面占满 2/3 —— 比不扩更差。
+    # 打开需要同时把"扩展后的相机与标定"一起调好，这是一项独立工作。
+    "outpaint": 1.0, "outpaint_y": 1.0, "outpaint_steps": 26,
     "outpaint_side": 1024, "outpaint_seed": 0,
     # 默认**不**用扩散模型：本机缓存里只有 SDXL-inpaint，8GB 显存上单张 15 分钟都跑不完
     # （实测）。不打开时走"镜像延展 + 渐隐到雾色"，同样能消掉视锥外的空白与硬边，
     # 只是没有新内容。等快速权重（dreamshaper-8-inpainting）下完整后，再开这个开关。
-    "outpaint_model": False,
+    "outpaint_model": True,
     "ground_radius": 400.0,
     "long_side": 1540, "device": "cuda", "median_size": 3,
 }
@@ -116,7 +120,7 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
     if float(opts["outpaint"]) > 1.01:
         import importlib
         op = importlib.import_module("outpaint")
-        img_src, oinfo = op.outpaint(
+        img_src, oinfo = op.outpaint_two_pass(
             img_src, ROOT,
             scale_x=float(opts["outpaint"]), scale_y=float(opts["outpaint_y"]),
             device=opts["device"], use_model=bool(opts["outpaint_model"]),

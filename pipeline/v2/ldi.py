@@ -87,6 +87,38 @@ def cliff_mask(z: np.ndarray, step: int, edge_ratio: float = 2.4,
     return (ratio > edge_ratio) & (e > edge_tau), ratio, edge_str
 
 
+def smooth_ground_rows(zs: np.ndarray, rays: np.ndarray, width: int = 9,
+                       horizon_y: float = -0.04) -> np.ndarray:
+    """地平线以下的深度做**横向各向异性**低通（列方向平滑，行方向保留）。
+
+    为什么只压横向：脚下那片地面在同一行里深度应该几乎一样（它是一条水平等距线），
+    逐列抖动纯粹是模型噪声（草地纹理最容易被判成"忽远忽近"）。而**行方向**的
+    深度梯度是真实的（越往画面下方越近），抹掉它反而会把地面拍成一块板。
+
+    压掉列噪声之后，相邻顶点的三维距离变得和像素间距匹配，四边形不再被拉成
+    长条 —— 也就是实测截图里"中景草地那条横向暗带"。
+    （在线链路 js/world.js 早就有这一手："地平线以下横向 7 列低通"，这里是同一招。）
+    """
+    from scipy import ndimage
+    ry = rays[..., 1]
+    below = ry < horizon_y
+    if not below.any() or width < 3:
+        return zs
+    lz = np.log(np.maximum(zs, 1e-3))
+    # 只沿 x 方向做盒式均值（size=(1,width)），行方向完全不动
+    sm = ndimage.uniform_filter(lz, size=(1, int(width)), mode="nearest")
+    # **只在"横向噪声大"的地方平滑**：整片无差别低通会把纹理干净的地面
+    # （沙漠那种均匀砂地）也抹成一块色板 —— 实测就是这么把近景纹理做没了。
+    # 用横向一阶差分的绝对值当噪声度量。
+    gx = np.abs(np.diff(lz, axis=1, prepend=lz[:, :1]))
+    noise = ndimage.uniform_filter(gx, size=(1, int(width)), mode="nearest")
+    thr = np.percentile(noise[below], 60) if below.any() else 0.0
+    mix = np.clip((noise - thr) / max(1e-4, thr * 1.5), 0.0, 1.0)
+    out = lz * (1.0 - mix) + sm * mix
+    out[~below] = lz[~below]
+    return np.exp(out).astype(np.float32)
+
+
 def cliff_to_pixels(cliff: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     """把 (H-1,W-1) 的"格掩码"摊到 (H,W) 的像素上（一格传播到它的四个角）。
 
@@ -412,6 +444,7 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
           sky: np.ndarray | None = None, edge_ratio: float = 2.4,
           flatten: bool = True, skirt_min: float = 0.12, skirt_max: float = 6.0,
           dist_min: float = 0.5, median_size: int = 3, ground_tol: float = 0.30,
+          ground_smooth: int = 9,
           skirt_cap: float = 3.0,
           stretch_clamp: float = 12.0, strong_median: int = 7,
           quantize: float = 0.0, rgb: np.ndarray | None = None,
@@ -444,6 +477,8 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
         z, ground = flatten_ground(z, rays_full, eye=eye, tol=ground_tol)
     else:
         ground = np.zeros_like(z, dtype=bool)
+    if ground_smooth > 1:
+        z = smooth_ground_rows(z, rays_full, width=ground_smooth)
 
     z_full = z                      # 点云用全分辨率（见下面的表示选择）
     zs = z[::step, ::step]
