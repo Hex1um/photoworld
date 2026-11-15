@@ -185,7 +185,8 @@
         uTex: 0,
         uFogColor: world.fogColor,
         uFogDensity: world.lights.fogDensity,
-        uFogAmt: opt.fog === undefined ? 0.5 : opt.fog
+        uFogAmt: opt.fog === undefined ? 0.5 : opt.fog,
+        uMipBias: opt.mip || 0
       });
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, opt.tex || null);
@@ -285,7 +286,8 @@
       if (world.meshes.floor && !skip('floor')) {
         gl.disable(gl.CULL_FACE);
         drawMesh(world, world.meshes.floor, {
-          tex: world.tex.ground, mode: 4, fog: 0.42, mipBias: 2.6
+          // mipBias 2.6 会把底板糊成一块灰（手机端画面最下方那条灰带），收到 1.0。
+          tex: world.tex.ground, mode: 4, fog: 0.42, mipBias: 1.0
         });
         /* 近景补片：竖向视场比照片大时，照片底边以下那条地面靠它提供细节，
            否则是一块糊平的灰板（底板 UV 放大 40m + mipBias 2.6）。 */
@@ -361,9 +363,19 @@
           }
           /* 点云路径（?splat=1）：三角形网格在掠射角会拉丝、单层壳侧面是竖幕，
              点云没有「连接」，天然不会出现这两类病。 */
-          drawSplat(world, world.meshes.splat, {
-            tex: world.tex.photo, fog: 0.5, scale: world.splatScale || 30
-          });
+          if (world.meshes.splatGround && world.meshes.splatBody) {
+            /* 层化：地面用 mip 2.2 的低频照片色（掠射不拉丝），主体保持原图清晰。 */
+            drawSplat(world, world.meshes.splatGround, {
+              tex: world.tex.photo, fog: 0.5, scale: world.splatScale || 30, mip: 2.2
+            });
+            drawSplat(world, world.meshes.splatBody, {
+              tex: world.tex.photo, fog: 0.5, scale: world.splatScale || 30, mip: 0
+            });
+          } else {
+            drawSplat(world, world.meshes.splat, {
+              tex: world.tex.photo, fog: 0.5, scale: world.splatScale || 30
+            });
+          }
         } else {
           const cullRelief = world.reliefCull !== false;
           if (cullRelief) { gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); }

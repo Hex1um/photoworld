@@ -2339,6 +2339,8 @@
       /* 底部裙边网格（照片底行向下连续延伸）：消掉照片底边的几何断口 */
       skirt,
       semGroups: sem ? sem.groups : null,
+      /* 逐顶点语义组（v1.26.7 层化用：地面层与主体层分开绘制，贴图 mip 不同） */
+      grp: gGrp,
       semSize: sem ? [sem.width, sem.height] : null,
       /* 信息保留率诊断：哪一步丢了多少面，直接决定「图片丢信息」的排查方向 */
       stats: {
@@ -2493,13 +2495,22 @@
   /* 点云 / surfel（v1.24.7）：把反投影后的顶点降采样成点，供 renderer 的
      POINTS 路径绘制。参考 ImgCloud / WebPointCloud 的做法 —— 点云没有三角形
      连接，掠射角不会把贴图拉成条，也不会出现单层壳的「竖幕」。 */
-  function buildSplat(relief, gl, step) {
+  function buildSplat(relief, gl, step, which) {
     const GW = relief.grid.GW, GH = relief.grid.GH;
     const st = step || 2;
     const pos = [], uv = [], col = [];
+    const GND = 4, WATER = 5, TERRAIN = 11, SKY = 1;
     for (let j = 0; j < GH; j += st) {
       for (let i = 0; i < GW; i += st) {
         const k = j * GW + i;
+        /* 层化（v1.26.7）：ground 层只取地面/水面/地形，body 层取其余（天空除外）。
+           两层用不同 mipBias 绘制 —— 地面用低频照片色（不拉丝），主体保持清晰。 */
+        if (which && relief.grp) {
+          const g = relief.grp[k];
+          const isGnd = (g === GND || g === WATER || g === TERRAIN);
+          if (which === 'ground' && !isGnd) continue;
+          if (which === 'body' && (isGnd || g === SKY)) continue;
+        }
         /* 跳过天空/边缘顶点（alpha < 0.5）：手机上天空里的「黑点/雪花」
            就是这些被深度噪声顶到远处的孤立点，它们在天空背景上格外扎眼。 */
         if (relief.color[k * 4 + 3] < 0.5) continue;
@@ -2754,6 +2765,9 @@
     const m = {
       relief: relief ? PWGL.createMesh(gl, relief) : null,
       splat: (relief && relief.grid) ? PWGL.createMesh(gl, buildSplat(relief, gl, 2)) : null,
+      /* 层化（v1.26.7）：地面层用低频贴图、主体层保持清晰 */
+      splatGround: (relief && relief.grid) ? PWGL.createMesh(gl, buildSplat(relief, gl, 2, 'ground')) : null,
+      splatBody: (relief && relief.grid) ? PWGL.createMesh(gl, buildSplat(relief, gl, 2, 'body')) : null,
       flat: (analysis.meanLum < 0.22
         || !!(opts && opts.sem && opts.sem.stats
           && opts.sem.stats.water > 0.55 && opts.sem.stats.sky < 0.1))

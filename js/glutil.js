@@ -324,12 +324,13 @@ uniform sampler2D uTex;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
 uniform float uFogAmt;
+uniform float uMipBias;
 out vec4 fragColor;
 void main() {
   vec2 d = gl_PointCoord - 0.5;
   float r = length(d) * 2.0;
   if (r > 1.0) discard;
-  vec3 col = texture(uTex, vUV).rgb * vC.rgb;
+  vec3 col = texture(uTex, vUV, uMipBias).rgb * vC.rgb;
   float f = clamp(1.0 - exp(-pow(vDist * uFogDensity, 2.2)), 0.0, 1.0);
   col = mix(col, uFogColor, f * uFogAmt);
   fragColor = vec4(col, (1.0 - r * r) * 0.9 * vC.a);
