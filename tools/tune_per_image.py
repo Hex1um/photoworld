@@ -108,7 +108,9 @@ def main() -> int:
     ap.add_argument("--variants", default="mesh,points")
     ap.add_argument("--views", type=int, default=32)
     ap.add_argument("--gl", default="hw", choices=["hw", "sw"])
-    ap.add_argument("--base", default="http://127.0.0.1:8199")
+    # 端口曾写死 8199，跑了一小时的烘焙最后卡在渲染（那个服务早就不在了）。
+    # 默认从环境变量取，其次 8199；也可以 --base 显式指定。
+    ap.add_argument("--base", default=os.environ.get("PW_BASE", "http://127.0.0.1:8199"))
     ap.add_argument("--report", default="reports/tune")
     ap.add_argument("--far-split", type=float, default=120.0)
     ap.add_argument("--edge-ratio", type=float, default=2.4)
