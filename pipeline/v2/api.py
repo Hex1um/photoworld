@@ -101,6 +101,31 @@ def _hash(data: bytes, opts: dict) -> str:
 
 
 
+def _sem_ground_aligned(sem, seg, work_size=None):
+    """"可走人的地面"掩码：ground + water + terrain。
+
+    用途：用它单独做一张**常驻地面**。不取 max 高度（那会把崖壁顶当屋顶），
+    而是只用地面的深度 —— 于是悬空的薄板下面、四周都有地，不会被"屋顶"盖住。
+    """
+    if seg is None:
+        return None
+    try:
+        from semantics import GROUND, WATER, TERRAIN
+        g = seg.get("groups")
+        if g is None:
+            return None
+        m = np.isin(g, [GROUND, WATER, TERRAIN])
+    except Exception:
+        return None
+    if not m.any():
+        return m
+    if work_size is None or (m.shape[1], m.shape[0]) == tuple(work_size):
+        return m
+    from PIL import Image as _Im
+    up = _Im.fromarray((m.astype(np.uint8) * 255), mode="L").resize(tuple(work_size), _Im.NEAREST)
+    return np.asarray(up) > 127
+
+
 def _sem_obj_aligned(sem, seg, work_size=None):
     """语义物体掩码，必要时缩放到工作图（可能被外扩过）的分辨率。
 
@@ -305,6 +330,7 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
                     # 实测 lake/alpine 用深度分割一个候选都分不出来）
                     # rgb 就是工作图（可能已外扩），掩码按它的分辨率对齐
                     sem_obj=_sem_obj_aligned(sem, seg, (rgb.shape[1], rgb.shape[0])),
+                    sem_ground=_sem_ground_aligned(sem, seg, (rgb.shape[1], rgb.shape[0])),
                     flatten=opts["flatten"], skirt_min=opts["skirt_min"],
                     skirt_max=opts["skirt_max"], median_size=opts["median_size"],
                     stretch_clamp=opts["stretch_clamp"],

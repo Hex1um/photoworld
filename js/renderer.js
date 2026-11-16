@@ -356,7 +356,9 @@
 
       /* 地面裙边（v2.7.1）：顶点色、不吃贴图。它铺在照片区域之外，
          给"视锥外"一块有颜色的地面；用照片贴图会整片偏色（UV 只指向一个像素）。 */
-      if (world.meshes.ground && !world.showPlan) {
+      /* 有地面层时裙边让位：两者都是"照片区域之外的地"，同时画会在交界处
+         出现一圈横条纹（实测底部那些蓝色条带）。 */
+      if (world.meshes.ground && !world.showPlan && !world.meshes.top) {
         gl.disable(gl.CULL_FACE);
         /* fog 给满（1.0）：400m 外那条边缘如果只吃到 55% 的雾，会和天空的
            horizon 色差出一条明显的白脊（实测背视图远处那条亮线）。
@@ -389,7 +391,11 @@
          于是这片水平顶面在地平线处露成一条亮带（实测：背后那条白带就是它，
          去掉裙边、去掉顶面后就消失 —— 靠这个对照才定位到）。 */
       const topLift = world.heightAt ? cam.eye[1] - world.heightAt(cam.eye[0], cam.eye[2]) : 1e9;
-      if (world.meshes.top && (world.showPlan || topLift > 6.0)) {
+      /* **常驻绘制**（v2.13）：以前只在"俯视模式 / 高于地面 6m"时画，
+         结果低视角和旋转视角下，照片那块薄板下面是空的（实测截图：悬空的板 +
+         底部横条纹）。现在这一层由**语义地面像素**构成，不会变成盖住崖壁的屋顶，
+         所以可以一直画，把"四周和远处"补上。 */
+      if (world.meshes.top) {
         gl.disable(gl.CULL_FACE);
         /* mipBias 给到 2.6：单视图重建**没有俯视纹理**，顶面 UV 是从相邻像素借来的，
            贴着看会是一圈圈放射状拉伸。高空看地表本来也该是低频的，

@@ -890,6 +890,7 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
           seg_edge_tau: float = 0.10, quad_stretch_max: float = 0.0,
           depth_cap: float = 1.35,
           solid_objs: bool = True, sem_obj: np.ndarray | None = None,
+          sem_ground: np.ndarray | None = None,
           # 默认关闭：试过"地面像素占比 < 0.4%"当"非风景照"的判据，实测**不成立** ——
           # 云海/星空/太空地球这几张图的地面占比也有 3.7~5.2%（压平判据把它们误判成地面），
           # 而"远景占比 / 纵深动态范围"在好坏图上完全不分离（远景占比全是 0，
@@ -1316,7 +1317,18 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
         near_mask = valid & (fwd < max(60.0, far_split * 1.5))
         if sky is not None and sky.shape == near_mask.shape:
             near_mask &= ~sky
-        skin = build_top_skin(P, uv, near_mask, cell=top_skin_cell * 1.6, rgb=rgb,
+        # 有语义地面掩码时，顶面**只用地面的像素**：否则"每格取最高点"会把崖壁顶
+        # 连成一片屋顶，低视角看就是一块悬空的板（实测截图）。
+        gm = near_mask
+        if sem_ground is not None:
+            g2 = sem_ground
+            if g2.shape != seg.shape:
+                _iy2 = (np.arange(seg.shape[0]) * g2.shape[0] // seg.shape[0]).astype(np.int32)
+                _ix2 = (np.arange(seg.shape[1]) * g2.shape[1] // seg.shape[1]).astype(np.int32)
+                g2 = g2[_iy2][:, _ix2]
+            if g2.any() and int((g2 & near_mask).sum()) > 500:
+                gm = near_mask & g2
+        skin = build_top_skin(P, uv, gm, cell=top_skin_cell * 1.6, rgb=rgb,
                               extent=float(ground_radius) * 1.15, max_cells=300)
         if skin is not None:
             layers.append(skin)
