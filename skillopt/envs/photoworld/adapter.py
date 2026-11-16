@@ -216,7 +216,13 @@ class PhotoWorldAdapter(EnvAdapter):
 
         p = dict(params or {})
         p.setdefault("outpaint", 1.0)          # 训练里关 SD 外扩（一张 40~150s）
-        tmp = os.path.join(self.root, "out", "_score", "inproc")
+        # **按图片分工作目录**：一个 batch 里两张图会并行跑，共用一个目录时
+        # world.glb / mv.json 互相覆盖 —— 表现为"某几步只花 3~5 秒、分数 0"
+        # （实测 STEP1~6 全 0，只有 7~8 步是真跑）。
+        # 用 id 的哈希取模做环形复用（8 个），只覆盖不删除，避开批量删除保护。
+        import hashlib
+        slot = int(hashlib.md5(str(item["id"]).encode()).hexdigest()[:6], 16) % 8
+        tmp = os.path.join(self.root, "out", "_score", f"inproc_{slot}")
         os.makedirs(tmp, exist_ok=True)
         import time as _t
         t0 = _t.time()
