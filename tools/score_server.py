@@ -31,6 +31,18 @@ _LOCK = threading.Lock()          # GPU/模型不是线程安全的：串行处�
 _STATE = {"loaded": False, "hits": 0, "api": None, "error": ""}
 
 
+def _decode_output(stdout: bytes, stderr: bytes) -> tuple[str, str]:
+    """把 node 子进程的字节输出安全解码为文本。
+
+    multiview（node）经管道吐出的字节里混着 GBK 片段（实测 position 4 的 0xcf）；
+    subprocess.run(text=True) 会在 reader 线程抛 UnicodeDecodeError，主线程只看到
+    一堆 None，表现为"评分失败、stderr 为空"。与 score_params.py 的 render_score
+    保持一致：收字节、自己按 utf-8 + replace 解码。
+    """
+    return ((stdout or b"").decode("utf-8", "replace"),
+            (stderr or b"").decode("utf-8", "replace"))
+
+
 def _load_api():
     import importlib.util
     spec = importlib.util.spec_from_file_location(
@@ -79,9 +91,11 @@ def _score(image: str, params: dict, base: str, views: int) -> dict:
         cmd = ["node", os.path.join(ROOT, "tools", "multiview.mjs"),
                "--base", base, "--glb-list", lst, "--views", str(views),
                "--out", os.path.join(tmp, "shots"), "--json", js, "--gl", "hw"]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900, cwd=ROOT)
+        # 不用 text=True：multiview 字节流混 GBK 会抛 UnicodeDecodeError（见 _decode_output）
+        r = subprocess.run(cmd, capture_output=True, timeout=900, cwd=ROOT)
+        out, err = _decode_output(r.stdout, r.stderr)
         if r.returncode != 0:
-            raise RuntimeError(f"multiview 失败({r.returncode}): {(r.stderr or r.stdout or '')[-600:]}")
+            raise RuntimeError(f"multiview 失败({r.returncode}): {(err or out)[-600:]}")
         d = json.load(open(js, encoding="utf-8"))
         res = (d.get("results") or [])
         if not res:

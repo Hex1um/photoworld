@@ -38,6 +38,28 @@ _DEFAULT_ROOT = os.environ.get(
     os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "photoworld")),
 )
 
+
+# ── 评分可用性与重试早停（纯函数，便于单测；不依赖 skillopt/GPU）──────
+def _score_usable(d) -> bool:
+    """评分结果是否可用于判分。
+
+    旧实现用 `if not d` 判断是否需要降级；但失败路径返回的是
+    `{"ok": False, "error": ...}` —— 非空字典是 truthy，导致 score_server
+    和子进程两级兜底**永不触发**，一次瞬时异常就把整图记成 0 分。
+    只有非空且显式 `ok is True` 才算成功。
+    """
+    return isinstance(d, dict) and bool(d) and d.get("ok") is True
+
+
+def _params_unchanged(params, prev_params) -> bool:
+    """LLM 本轮参数与上一轮完全相同（temperature 0.2 + 同 prompt 极易重复）。"""
+    return prev_params is not None and params == prev_params
+
+
+def _gain_too_small(soft, prev_soft, eps: float = 1e-4) -> bool:
+    """相对上一轮提升不足 eps（含负提升）——再烘焙一次的收益可忽略。"""
+    return prev_soft is not None and (soft - prev_soft) < eps
+
 _YAML_BLOCK = re.compile(r"```ya?ml\s*\n(.*?)```", re.S)
 
 
@@ -179,7 +201,7 @@ class PhotoWorldAdapter(EnvAdapter):
                 d = self._score_inproc(item, params)
             except Exception as e:                       # noqa: BLE001
                 d = {"ok": False, "error": f"进程内评分失败: {str(e)[:240]}"}
-        if not d and self.score_server:
+        if not _score_usable(d) and self.score_server:
             import urllib.parse
             import urllib.request
             qs = urllib.parse.urlencode({"image": item["image"],
@@ -191,7 +213,9 @@ class PhotoWorldAdapter(EnvAdapter):
                     d = json.loads(r.read().decode("utf-8"))
             except Exception as e:                           # noqa: BLE001
                 d = {"ok": False, "error": f"评分服务不可用: {str(e)[:240]}"}
-        if not d:
+        # 兜底判定必须用 _score_usable 而非 `not d`：上面失败路径留下的
+        # {"ok": False, ...} 是 truthy，用 `not d` 会让子进程兜底永不触发。
+        if not _score_usable(d):
             cmd = [os.sys.executable, os.path.join(self.root, "tools", "score_params.py"),
                    "--image", item["image"], "--base", self.base_url,
                    "--views", str(self.views), "--params", json.dumps(params, ensure_ascii=False)]
@@ -289,19 +313,36 @@ class PhotoWorldAdapter(EnvAdapter):
             return parse_params(skill)
 
     def _rollout_llm(self, item: dict, skill: str, default_params: dict) -> dict:
-        """最多 llm_rounds 轮：出参 → 烘焙评分 →（不达标）把指标喂回去再要一次。"""
+        """最多 llm_rounds 轮：出参 → 烘焙评分 →（不达标）把指标喂回去再要一次。
+
+        早停：参数与上一轮完全相同（temperature 0.2 + 同 prompt 几乎必同输出）、
+        或 soft 相对上一轮提升 < 1e-4（含负提升）时提前结束——这两种情况下
+        再烘焙一次只会白费 70~95 秒。
+        """
         best: dict = {}
         feedback = ""
         rounds: list[dict] = []
+        prev_params = None
+        prev_soft = None
         for _ in range(self.llm_rounds):
             params = self._ask_params(skill, item, feedback) or default_params
+            if _params_unchanged(params, prev_params):
+                print("[photoworld] LLM 参数未变，早停重试（省一次烘焙）", flush=True)
+                break
+            prev_params = params
             row = self._score_one(item, params)
             row["params"] = params
             rounds.append(row)
-            if not best or row["soft"] >= best["soft"]:
+            # 严格大于才覆盖：平局保留上轮 best，避免用更晚的相同分数覆盖
+            if not best or row["soft"] > best["soft"]:
                 best = row
             if row["hard"] == 1:
                 break
+            if _gain_too_small(row["soft"], prev_soft):
+                print(f"[photoworld] LLM soft 提升不足（{prev_soft} → {row['soft']}），早停重试",
+                      flush=True)
+                break
+            prev_soft = row["soft"]
             m = row.get("metrics") or {}
             if not m:
                 break
