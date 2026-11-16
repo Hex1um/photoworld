@@ -485,7 +485,8 @@ def build_solid(P: np.ndarray, uv: np.ndarray, mask: np.ndarray, z: np.ndarray,
 def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
                     cell: float = 1.8, max_cells: int = 190,
                     smooth: int = 1, rgb: np.ndarray | None = None,
-                    extent: float = 240.0) -> dict | None:
+                    extent: float = 240.0, tile_uv: float = 32.0,
+                    hole_poly: tuple | None = None) -> dict | None:
     """从点云生成一张"俯视高度图"顶面，供飞行时从上方看。
 
     为什么需要它：v2 是单视图重建，只有一层**朝前的壳**。平视没有问题，
@@ -589,6 +590,54 @@ def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
 
     P2 = pos.reshape(-1, 3)
     U2 = huv.reshape(-1, 2)
+
+    # ---- UV：把"照片里的地面区域"当作可平铺纹理 ---------------------
+    # 直接用 huv（每个格子借一个像素的 UV）有两个问题：
+    #   ① 同一片地面来自照片不同位置，颜色跳；② 起伏大处会拉出条纹。
+    # 改成按世界坐标平铺，但**限制在照片的地面 bbox 内** —— 这样绝不会把天空采进地面。
+    if tile_uv:
+        gxs = uv[..., 0][valid]
+        gys = uv[..., 1][valid]
+        if gxs.size:
+            u0, u1 = float(np.percentile(gxs, 5)), float(np.percentile(gxs, 95))
+            v0, v1 = float(np.percentile(gys, 5)), float(np.percentile(gys, 95))
+            # 保证有足够的采样范围，太窄就退化成一条线
+            if (u1 - u0) < 0.08:
+                u0, u1 = max(0.0, u0 - 0.04), min(1.0, u1 + 0.04)
+            if (v1 - v0) < 0.08:
+                v0, v1 = max(0.0, v0 - 0.04), min(1.0, v1 + 0.04)
+            # 在"地面 bbox"里挑**最平坦的一块**当纹理源：
+            # 直接铺整段地面会把石头/树一起铺满，九米一重复非常扎眼（实测）。
+            # 做法：把 bbox 划成若干窗口，按亮度标准差挑最平滑的那个。
+            if rgb is not None and rgb.size:
+                H2, W2 = rgb.shape[:2]
+                _lum = 0.2126 * rgb[..., 0] + 0.7152 * rgb[..., 1] + 0.0722 * rgb[..., 2]
+                best = None
+                for wv in (0.22, 0.30, 0.38):
+                    for wy in (0.22, 0.30):
+                        for du in np.linspace(0.0, max(0.0, 1.0 - wv), 5):
+                            for dv in np.linspace(0.0, max(0.0, 1.0 - wy), 4):
+                                su0, su1 = du, du + wv
+                                sv0, sv1 = dv, dv + wy
+                                # 只接受"整块都在地面里"的窗口
+                                m_win = ((gxs >= su0) & (gxs <= su1) &
+                                         (gys >= sv0) & (gys <= sv1))
+                                if m_win.mean() < 0.92:
+                                    continue
+                                iy0, iy1 = int(sv0 * (H2 - 1)), int(sv1 * (H2 - 1))
+                                ix0, ix1 = int(su0 * (W2 - 1)), int(su1 * (W2 - 1))
+                                if iy1 - iy0 < 16 or ix1 - ix0 < 16:
+                                    continue
+                                patch = _lum[iy0:iy1, ix0:ix1]
+                                sd = float(patch.std())
+                                if best is None or sd < best[0]:
+                                    best = (sd, su0, su1, sv0, sv1)
+                if best is not None:
+                    _, u0, u1, v0, v1 = best
+            T = float(tile_uv) if isinstance(tile_uv, (int, float)) and tile_uv > 0 else 32.0
+            uu = np.mod(P2[:, 0] / T, 1.0) * (u1 - u0) + u0
+            vv = np.mod(P2[:, 2] / T, 1.0) * (v1 - v0) + v0
+            U2 = np.stack([uu, vv], axis=1).astype(np.float32)
     # 法线用高度场梯度算。法线一律朝上时 ndl 恒定 → 什么起伏都看不出来，
     # 整片就是均匀色块（换色也没用）。有了坡面法线，从空中才有山脊/谷地的明暗。
     gz_, gx_ = np.gradient(hgt, float(cell), float(cell))
@@ -637,20 +686,49 @@ def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
         Ld /= np.linalg.norm(Ld)
         ndl_fixed = np.clip(N2 @ Ld, 0.0, 1.0)
         shade = 0.42 + 0.85 * ndl_fixed
-        # **格级细噪声**：整片只有一个基色 + 平滑的坡面明暗时，近看像一块塑料。
-        # 加两层细噪声（约 3m / 1m 尺度）打散它 —— 只动颜色，不动几何。
-        _fx = np.sin(P2[:, 0] * 0.62 + P2[:, 2] * 0.41 + 1.7)
-        _fz = np.sin(P2[:, 0] * 1.71 - P2[:, 2] * 1.33 + 0.4)
-        grain = 1.0 + 0.055 * _fx + 0.03 * _fz
+        # **多尺度顶点色噪声**（无接缝、无重复）。
+        # 试过"把照片地面区域当纹理平铺"，必然出现拼布感（一块块重复的石头/树，
+        # 接缝明显）。顶点色噪声没有这个问题，代价是细节是"统计意义上像"而不是"真实纹理"。
+        # 四档尺度：25m 大块色斑 / 8m 斑块 / 3m 颗粒 / 1m 细砂。
+        X3 = P2[:, 0]
+        Z3 = P2[:, 2]
+        n_big = np.sin(X3 * 0.041 + Z3 * 0.037 + 1.1) * np.cos(Z3 * 0.033 - 0.6)
+        n_mid = np.sin(X3 * 0.13 - Z3 * 0.11 + 2.4) * np.cos(X3 * 0.09 + Z3 * 0.12 + 0.2)
+        n_fine = np.sin(X3 * 0.37 + Z3 * 0.41 + 4.1) * np.cos(Z3 * 0.33 - X3 * 0.29 + 1.3)
+        n_sand = np.sin(X3 * 1.13 - Z3 * 0.97 + 0.7) * np.cos(X3 * 0.91 + Z3 * 1.07 + 2.9)
+        grain = (1.0
+                 + 0.16 * n_big
+                 + 0.12 * n_mid
+                 + 0.07 * n_fine
+                 + 0.035 * n_sand)
+        # 轻微冷暖漂移：同一片地不该是同一个色相
+        warm = 1.0 + 0.05 * np.sin(X3 * 0.017 + Z3 * 0.013 + 3.1)
         v2 = v * shade * grain
-        C2 = np.stack([np.clip(base_c[0] * v2 * 0.82, 0, 1),
-                       np.clip(base_c[1] * v2 * 0.82, 0, 1),
-                       np.clip(base_c[2] * v2 * 0.82, 0, 1),
+        _c0 = np.clip(base_c[0] * v2 * warm * 0.82, 0, 1)
+        _c2 = np.clip(base_c[2] * v2 / warm * 0.82, 0, 1)
+        C2 = np.stack([_c0, np.clip(base_c[1] * v2 * 0.82, 0, 1), _c2,
                        np.ones_like(v)], axis=1).astype(np.float32)
+
+    # ---- 照片足迹打洞 --------------------------------------------------
+    # 站在原点时，视锥内的地面必须**就是照片本身**（纹理/明暗都要一致）。
+    # 这一层如果铺到足迹上，就会把近景壳盖住 —— 表现是"什么纹理都没了"。
+    hole_mask = None
+    if hole_poly is not None:
+        _zn, _zf, _th = hole_poly
+        _X = pos[..., 0]
+        _Z = pos[..., 2]
+        hole_mask = ((-_Z >= _zn * 0.90) & (-_Z <= _zf * 1.02) &
+                     (np.abs(_X) <= (-_Z) * _th * 1.04) & (_Z <= 0))
+        # 内缩一格：宁可留细缝，也不能盖住照片
+        hole_mask = ndimage.binary_erosion(hole_mask, np.ones((3, 3), bool))
+
     idx2 = []
     for j in range(nz - 1):
         row = j * nx
         for i in range(nx - 1):
+            if (hole_mask is not None and hole_mask[j, i] and hole_mask[j, i + 1]
+                    and hole_mask[j + 1, i] and hole_mask[j + 1, i + 1]):
+                continue                       # 照片足迹：这里归近景壳，地面层不画
             a = row + i
             b = a + 1
             c = a + nx
@@ -1336,8 +1414,14 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
                 g2 = g2[_iy2][:, _ix2]
             if g2.any() and int((g2 & near_mask).sum()) > 500:
                 gm = near_mask & g2
+        # 足迹：用有效像素的前方距离分位 + 水平半视场的 tan
+        _fv = fwd[valid]
+        _z_near = float(np.percentile(_fv, 2)) if _fv.size else 2.0
+        _z_far = float(np.percentile(_fv, 92)) if _fv.size else 60.0
+        _tan_h = float(np.max(np.abs(rays[..., 0]) / np.maximum(np.abs(rays[..., 2]), 1e-6)))
         skin = build_top_skin(P, uv, gm, cell=top_skin_cell * 1.6, rgb=rgb,
-                              extent=float(ground_radius) * 1.15, max_cells=300)
+                              extent=float(ground_radius) * 1.15, max_cells=300,
+                              hole_poly=(_z_near, _z_far, _tan_h))
         if skin is not None:
             layers.append(skin)
             stats["top"] = {"vertices": int(skin["pos"].shape[0]),
