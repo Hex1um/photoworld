@@ -1007,7 +1007,14 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
             mask = (lay == lid)
         if not mask.any():
             continue
-        q = (ok_quad & mask[:-1, :-1] & mask[1:, :-1] & mask[:-1, 1:] & mask[1:, 1:])
+        m4 = mask[:-1, :-1] & mask[1:, :-1] & mask[:-1, 1:] & mask[1:, 1:]
+        if lid == 2:
+            # 远景层是**幕布**，不需要断崖剪面（剪了反而在它与近景的交界处留下一条缝：
+            # 交界处的深度比极大 → 两层都被 cliff 剪掉 → 透出 clear color 的深棕线，
+            # 用 ?dbg=layers 直接看得到）。这里只要求四角都在掩码内。
+            q = valid_q & m4
+        else:
+            q = ok_quad & m4
         if not q.any():
             continue
         # 该层对应的天空掩码（与 zs 同形状）；没有就传 None
