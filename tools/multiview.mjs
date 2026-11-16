@@ -234,7 +234,48 @@ function metrics(png) {
       cells++;
     }
   }
+  /* ---- 新判据：块数而非只算占比 ---- */
+  // 1/4 分辨率的掩码：空白块 / 拉丝块
+  const sw = Math.max(8, w >> 2), sh = Math.max(6, h >> 2);
+  const vmask = new Uint8Array(sw * sh);
+  const smask = new Uint8Array(sw * sh);
+  const scale = w / sw;
+  for (let y = 0; y < sh; y++) {
+    for (let x = 0; x < sw; x++) {
+      const sx = Math.min(w - 1, Math.floor((x + 0.5) * scale));
+      const sy = Math.min(h - 1, Math.floor((y + 0.5) * scale));
+      const o = (sy * w + sx) * bpp;
+      const r = data[o], g = data[o + 1], b = data[o + 2];
+      vmask[y * sw + x] = (Math.abs(r - mr) <= 6 && Math.abs(g - mg) <= 6 && Math.abs(b - mb) <= 6) ? 1 : 0;
+      // 拉丝像素：竖直差分明显大于水平差分（竖条/拉花），且不是噪点
+      if (sy > 0 && sx > 0) {
+        const k = sy * w + sx;
+        const dv = Math.abs(L[k] - L[k - w]);
+        const dh = Math.abs(L[k] - L[k - 1]);
+        smask[y * sw + x] = (dv > 0.055 && dv > 2.2 * dh) ? 1 : 0;
+      }
+    }
+  }
+  const vb = blobStats(vmask, sw, sh, 3);
+  const sb = blobStats(smask, sw, sh, 3);
+  // 最长横向空白段（贯穿式的"缝"最难受）：逐行找最长连续空白
+  let runMax = 0;
+  for (let y = 0; y < h; y += 2) {
+    let run = 0;
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * bpp;
+      const isVoid = Math.abs(data[o] - mr) <= 4 && Math.abs(data[o + 1] - mg) <= 4
+        && Math.abs(data[o + 2] - mb) <= 4;
+      if (isVoid) { run++; if (run > runMax) runMax = run; } else run = 0;
+    }
+  }
+
   return {
+    voidBlobs: vb.count,
+    voidBlobMax: +(vb.totalArea / Math.max(1, sw * sh)).toFixed(4),
+    voidRunMax: +(runMax / Math.max(1, w)).toFixed(4),
+    streakBlobs: sb.count,
+    streakBlobFrac: +(sb.totalArea / Math.max(1, sw * sh)).toFixed(4),
     voidFrac: +(voidN / total).toFixed(4),
     innerVoid: +(innerN ? innerVoid / innerN : 0).toFixed(4),
     lowVoid: +(lowN ? lowVoid / lowN : 0).toFixed(4),
@@ -244,6 +285,34 @@ function metrics(png) {
     detail: +(detail / Math.max(1, cells)).toFixed(4),
     ...clarityMetrics(L, w, h)
   };
+}
+
+
+/* ---------------- 连通域统计（新判据用） ----------------
+   原本只有"占比"类指标（voidFrac / stripe），没有"块数"。
+   可一个画面里 3% 的空白如果散成 200 个小点，观感远好过 1 块 3% 的大洞；
+   拉丝也一样 —— 一条贯穿的竖条比满屏细纹更难受。所以补上"块数/最大块"。
+   为了快，连通域在 1/4 分辨率的掩码上做（观感尺度足够）。 */
+function blobStats(mask, w, h, minArea) {
+  const seen = new Uint8Array(w * h);
+  const stack = new Int32Array(w * h);
+  let count = 0, maxArea = 0, totalArea = 0;
+  for (let i = 0; i < w * h; i++) {
+    if (!mask[i] || seen[i]) continue;
+    let sp = 0, area = 0;
+    stack[sp++] = i; seen[i] = 1;
+    while (sp > 0) {
+      const k = stack[--sp];
+      area++;
+      const x = k % w, y = (k / w) | 0;
+      if (x > 0 && mask[k - 1] && !seen[k - 1]) { seen[k - 1] = 1; stack[sp++] = k - 1; }
+      if (x < w - 1 && mask[k + 1] && !seen[k + 1]) { seen[k + 1] = 1; stack[sp++] = k + 1; }
+      if (y > 0 && mask[k - w] && !seen[k - w]) { seen[k - w] = 1; stack[sp++] = k - w; }
+      if (y < h - 1 && mask[k + w] && !seen[k + w]) { seen[k + w] = 1; stack[sp++] = k + w; }
+    }
+    if (area >= minArea) { count++; totalArea += area; if (area > maxArea) maxArea = area; }
+  }
+  return { count, maxArea, totalArea };
 }
 
 /* ---------------- CDP ---------------- */
@@ -396,12 +465,19 @@ try {
       ...Object.fromEntries(CLARITY_KEYS.map((k) => [k, mean(k)])),
       worstInner: +Math.max(...rec.views.map((v) => v.innerVoid)).toFixed(4),
       worstLow: +Math.max(...rec.views.map((v) => v.lowVoid)).toFixed(4),
-      worstStripe: +Math.max(...rec.views.map((v) => v.stripe)).toFixed(3)
+      worstStripe: +Math.max(...rec.views.map((v) => v.stripe)).toFixed(3),
+      // 块数类：看"碎成多少块"，而不只是总占比
+      voidBlobs: Math.max(...rec.views.map((v) => v.voidBlobs || 0)),
+      streakBlobs: Math.max(...rec.views.map((v) => v.streakBlobs || 0)),
+      voidRunMax: +Math.max(...rec.views.map((v) => v.voidRunMax || 0)).toFixed(4),
+      voidBlobMax: +Math.max(...rec.views.map((v) => v.voidBlobMax || 0)).toFixed(4),
+      streakBlobFrac: +Math.max(...rec.views.map((v) => v.streakBlobFrac || 0)).toFixed(4)
     };
     results.push(rec);
     const el = ((Date.now() - t0) / 1000).toFixed(0);
     console.log(`✓ ${path.basename(rel)}  void ${rec.agg.voidFrac} inner ${rec.agg.innerVoid} `
-      + `low ${rec.agg.lowVoid} stripe ${rec.agg.stripe} detail ${rec.agg.detail} `
+      + `low ${rec.agg.lowVoid} stripe ${rec.agg.stripe} vB ${rec.agg.voidBlobs} sB ${rec.agg.streakBlobs} `
+      + `run ${rec.agg.voidRunMax} detail ${rec.agg.detail} `
       + `hf ${rec.agg.centerHF} lap ${rec.agg.centerLapVar}  `
       + `[${n + 1}/${images.length}, ${el}s]`);
     fs.writeFileSync(JSONOUT, JSON.stringify({ base: BASE, views: VIEWS, capture: CAPTURE, results }, null, 1));

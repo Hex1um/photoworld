@@ -29,18 +29,72 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 与 tools/acc_report.py 一致的判定阈值（改这里要同步改那边）
 THRESH = {
-    "stripe": 2.0,
-    "innerVoid": 0.06,
-    "voidFrac": 0.10,
-    "lowVoid": 0.08,
+    "stripe": 2.0,          # 拉丝强度
+    "innerVoid": 0.06,      # 中景空洞占比
+    "voidFrac": 0.10,       # 露空白占比
+    "lowVoid": 0.08,        # 脚下空洞占比
+    "voidBlobs": 260,       # **空白块数**：同样占比，碎成很多小块比一大块好，但要有限度
+    "streakBlobs": 200,     # **拉丝块数**：竖条/拉花的连通域个数
+    "voidRunMax": 0.50,     # **最长横向空段**（按画面宽度归一）：贯穿式的缝最难受
+    "voidBlobMax": 0.22,    # 单块空白最大占比：避免"一块就占了半屏"
 }
-# soft 分数里各项的权重（拉丝最影响观感，权重最高）
+# soft 分数里各项的权重（拉丝与贯穿缝最影响观感）
 WEIGHT = {
-    "stripe": 0.40,
-    "innerVoid": 0.20,
-    "voidFrac": 0.20,
-    "lowVoid": 0.20,
+    "stripe": 0.24,
+    "innerVoid": 0.12,
+    "voidFrac": 0.12,
+    "lowVoid": 0.12,
+    "voidBlobs": 0.12,
+    "streakBlobs": 0.16,
+    "voidRunMax": 0.08,
+    "voidBlobMax": 0.04,
 }
+
+
+
+def _gpu_lock():
+    """全局文件锁：保证同一时刻只有一个 multiview 在跑。
+
+    multiview.mjs 启动浏览器用固定调试端口，两个实例并发会互相抢端口并失败
+    （症状就是"multiview 失败:" 后面 stderr 空）。训练里一个 batch 有 2 张图，
+    并发是常态，所以必须串行化。
+    """
+    import contextlib
+    import time as _t
+
+    lock_path = os.path.join(ROOT, "out", "_score", ".mv.lock")
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+
+    @contextlib.contextmanager
+    def cm():
+        fh = None
+        for _ in range(1800):                      # 最多等 30 分钟（别的任务可能很慢）
+            try:
+                fh = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fh, str(os.getpid()).encode())
+                break
+            except FileExistsError:
+                # 陈旧锁（>15 分钟）直接清掉，否则崩溃会永久锁死
+                try:
+                    if _t.time() - os.path.getmtime(lock_path) > 900:
+                        os.remove(lock_path)
+                        continue
+                except OSError:
+                    pass
+                _t.sleep(1.0)
+        try:
+            yield
+        finally:
+            if fh is not None:
+                try:
+                    os.close(fh)
+                except OSError:
+                    pass
+                try:
+                    os.remove(lock_path)
+                except OSError:
+                    pass
+    return cm()
 
 
 def bake(image: str, params: dict, out_glb: str) -> dict:
@@ -105,22 +159,48 @@ def main() -> int:
     ap.add_argument("--base", default=os.environ.get("PW_BASE", "http://127.0.0.1:8199"))
     ap.add_argument("--views", type=int, default=4)
     ap.add_argument("--keep", action="store_true", help="保留中间产物便于排查")
+    ap.add_argument("--server", default=os.environ.get("PW_SCORE_SERVER", ""),
+                    help="常驻评分服务地址（如 http://127.0.0.1:8300）；给了就走它，不再本地烘焙")
     args = ap.parse_args()
     os.makedirs(os.path.join(ROOT, "out", "_score"), exist_ok=True)
 
     t0 = time.time()
     params = json.loads(args.params or "{}")
+    if args.server:
+        # 常驻服务：模型只加载一次，单图 ~15s（本地起进程要 60~80s）
+        import urllib.parse
+        import urllib.request
+        qs = urllib.parse.urlencode({"image": args.image, "params": json.dumps(params),
+                                     "base": args.base, "views": args.views})
+        try:
+            with urllib.request.urlopen(f"{args.server.rstrip('/')}/score?{qs}", timeout=1800) as r:
+                d = json.loads(r.read().decode("utf-8"))
+        except Exception as e:                          # noqa: BLE001
+            print(json.dumps({"ok": False, "hard": 0, "soft": 0.0, "error": str(e)[:300],
+                              "secs": round(time.time() - t0, 1)}, ensure_ascii=False))
+            return 0
+        agg = d.get("metrics") or {}
+        hard, soft, fail = score(agg) if agg else (0, 0.0, ["no-metrics"])
+        print(json.dumps({"ok": bool(d.get("ok")), "hard": hard, "soft": soft,
+                          "metrics": {k: round(float(v), 4) for k, v in agg.items()
+                                      if isinstance(v, (int, float))},
+                          "fail": fail, "repr": d.get("repr"),
+                          "secs": round(time.time() - t0, 1)}, ensure_ascii=False))
+        return 0
     # 训练循环里默认关掉 SD 外扩：它一张图要 40~150 秒，会把 rollout 拖成不可用。
     params.setdefault("outpaint", 1.0)
 
     # 产物必须落在**站点根目录内**：静态服务只服务 ROOT，放到系统 temp 里
     # 转出来的相对路径是 ../../AppData/...，multiview 拿不到（实测报错）。
-    tmp = tempfile.mkdtemp(prefix="score-", dir=os.path.join(ROOT, "out", "_score"))
+    # 固定工作目录（见 score_server.py 的说明：频繁 rmtree 会触发批量删除保护）
+    tmp = os.path.join(ROOT, "out", "_score", "cli")
+    os.makedirs(tmp, exist_ok=True)
     try:
-        glb = os.path.join(tmp, "world.glb")
-        man = bake(args.image, params, glb)
-        rel = os.path.relpath(glb, ROOT).replace("\\", "/")
-        agg = render_score(rel, args.base, args.views, tmp)
+        with _gpu_lock():
+            glb = os.path.join(tmp, "world.glb")
+            man = bake(args.image, params, glb)
+            rel = os.path.relpath(glb, ROOT).replace("\\", "/")
+            agg = render_score(rel, args.base, args.views, tmp)
         hard, soft, fail = score(agg)
         print(json.dumps({
             "ok": True, "hard": hard, "soft": soft,
@@ -132,8 +212,11 @@ def main() -> int:
                           "secs": round(time.time() - t0, 1)}, ensure_ascii=False))
     finally:
         if not args.keep:
-            import shutil
-            shutil.rmtree(tmp, ignore_errors=True)
+            for name in ("world.glb", "_list.txt", "mv.json"):
+                try:
+                    os.remove(os.path.join(tmp, name))
+                except OSError:
+                    pass
     return 0
 
 
