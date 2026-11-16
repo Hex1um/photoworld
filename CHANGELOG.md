@@ -3,6 +3,45 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [2.9.2] - 2026-11-16  · 训练独立启动器（双击即跑）
+
+### 新增
+
+* `tools/start_train.ps1` + 桌面 `PHOTOWORLD 训练.bat` / `PHOTOWORLD 训练 -停止.bat`
+* 与 `start_v2.ps1`（打开世界）分开，互不干扰：
+
+| 步骤 | 内容 |
+|---|---|
+| 1 | 静态站 `:8199`（评分器渲染要用） |
+| 2 | 评分服务 `:8300 --warm`（深度模型只加载一次） |
+| 3 | 轮询 `/health` 直到 `loaded=true` |
+| 4 | 前台跑训练，进度打在窗口 + 写 `logs/train.log`（UTF-8） |
+
+* `-SkipTrain` 只起服务；`-Stop` 按 `logs/pids_train.json` 精确关闭；
+* 前置检查：找不到 python / `tools_skillopt` / 模型凭据时，直接给出该敲什么命令。
+
+### 实测
+
+通过启动器跑完整流程，**分数终于是真的了**（此前一直全 0）：
+
+```
+[photoworld] alpine hard=0 soft=0.9908 {'stripe': 2.0768, 'voidFrac': 0.0196, ...}
+[photoworld] desert hard=0 soft=0.9490 {'stripe': 1.7423, 'voidFrac': 0.0235, ...}
+[photoworld] lake   hard=0 soft=0.8056 {'lowVoid': 0.1657, 'stripe': 1.3490, ...}
+```
+
+### 当前卡点（下一步）
+
+反射阶段**一直产出 0 条编辑**（`[skip] no usable patches`）。
+我们的 trajectory 是一串指标数字，不是"模型的一段对话"，分析器没有可据以改技能的材料。
+下一步：让 rollout 把每张图的**失败项 + 图像特征**整理成自然语言轨迹
+（如"lake：lowVoid 0.30，脚下地面塌了"），分析器才有得可说。
+
+### 顺带
+
+* 日志改用 `Add-Content -Encoding utf8`：PS 5.1 的 `Tee-Object` 写 UTF-16，
+  用文本工具看是"每字符夹空格"的乱码（实测）。
+
 ## [2.9.1] - 2026-11-16  · 判据扩充（块数）+ 常驻评分服务
 
 ### 1. 判据从"占比"扩到"形态"

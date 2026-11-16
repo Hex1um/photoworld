@@ -26,19 +26,41 @@ photoworld/
 rollout 只从 skill 文档里读 yaml 参数 → 烘焙 → 渲染 → 打分。
 优化器模型只负责改 skill 文本，所以评分的可信度完全来自我们自己的指标。
 
-## 运行
+## 运行：双击「PHOTOWORLD 训练」
+
+桌面上的 `PHOTOWORLD 训练.bat` 会依次做四件事（**不需要**手工开终端）：
+
+1. 起静态站 `127.0.0.1:8199`（评分器渲染要用）；
+2. 起评分服务 `127.0.0.1:8300 --warm`（深度模型只加载一次）；
+3. 轮询 `/health`，等 `loaded=true` 才算就绪；
+4. 前台跑训练，进度直接打在窗口里，同时写 `logs/train.log`（UTF-8）。
+
+收尾用 `PHOTOWORLD 训练 -停止.bat`：按 `logs/pids_train.json` 里的 PID 精确关闭，
+不误杀别的 python。
+
+只想起服务不跑训练：`PHOTOWORLD 训练.bat -SkipTrain`。
+
+### 命令行等价写法
 
 ```bash
-# 1) 静态站（score_params 要用它渲染）
-cd photoworld && python -m http.server 8199 --bind 127.0.0.1 &
-
-# 2) 训练（DeepSeek 走 OpenAI 兼容协议）
+# 终端 1：静态站
+python -m http.server 8199 --bind 127.0.0.1
+# 终端 2：评分服务（常驻！训练脚本自己起的子进程会被回收）
+python tools/score_server.py --port 8300 --warm
+# 终端 3：训练
 cd ../tools_skillopt
 OPENAI_COMPATIBLE_BASE_URL=https://api.deepseek.com/v1 \
-OPENAI_COMPATIBLE_API_KEY=$DEEPSEEK_API_KEY \
-OPENAI_COMPATIBLE_MODEL=deepseek-chat \
+OPENAI_COMPATIBLE_API_KEY=$DEEPSEEK_API_KEY OPENAI_COMPATIBLE_MODEL=deepseek-chat \
+PW_SCORE_SERVER=http://127.0.0.1:8300 \
 python scripts/train.py --config configs/photoworld/default.yaml
 ```
+
+### 已知问题（当前卡点）
+
+训练能跑、分数是真的，但**反射阶段一直产出 0 条编辑**（`[skip] no usable patches`）。
+原因：我们的 trajectory 是一堆指标数字，而不是"模型的一段对话"，
+分析器没有可据以改技能文本的材料。下一步要让 rollout 把**每张图的失败项 + 图像特征**
+整理成自然语言轨迹（例如"这张 lake：lowVoid 0.30，地面在脚下塌了"），分析器才有的可说。
 
 单图评分可以单独跑，便于手工试参数：
 
