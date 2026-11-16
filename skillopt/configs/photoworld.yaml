@@ -37,6 +37,8 @@ env:
   base_url: http://127.0.0.1:8199
   score_server: ""            # 留空 = 训练进程内直接烘焙（推荐；常驻服务在本机不稳）
   inproc: true
+  llm_target: true     # 用 LLM 读技能准则并输出参数
+  llm_rounds: 2        # 不达标就把指标喂回去再要一次
   limit: 0
 
 # 门控与更新方式。

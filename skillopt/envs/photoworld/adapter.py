@@ -88,7 +88,8 @@ class PhotoWorldAdapter(EnvAdapter):
                  workers: int = 1, analyst_workers: int = 2, failure_only: bool = False,
                  minibatch_size: int = 1, edit_budget: int = 3, seed: int = 42, limit: int = 0,
                  max_completion_tokens: int = 4096, base_url: str = "", views: int = 4,
-                 root: str = "", score_server: str = "", inproc: bool = True) -> None:
+                 root: str = "", score_server: str = "", inproc: bool = True,
+                 llm_target: bool = True, llm_model: str = "", llm_rounds: int = 2) -> None:
         self.workers = workers
         self.analyst_workers = analyst_workers
         self.failure_only = failure_only
@@ -102,6 +103,13 @@ class PhotoWorldAdapter(EnvAdapter):
         # inproc=True：不依赖任何常驻服务，训练进程内直接烘焙（默认，最稳）
         self.inproc = bool(inproc) and os.environ.get("PW_SCORE_INPROC", "1") != "0"
         self._mod = None
+        # **target = LLM**：由模型读技能准则、结合图像与上一轮指标，输出一组参数。
+        # 这是让"技能文本"真正影响结果的唯一办法 —— 流水线自己不读规则
+        # （实测：patch/full_rewrite 都只改到文字，参数一字未动）。
+        self.llm_target = bool(llm_target)
+        self.llm_model = llm_model or os.environ.get("OPENAI_COMPATIBLE_MODEL", "deepseek-chat")
+        self.llm_rounds = max(1, int(llm_rounds))
+        self._client = None
         self.dataloader = PhotoWorldDataLoader(
             split_dir=split_dir, data_path=data_path, split_mode=split_mode,
             split_ratio=split_ratio, split_seed=split_seed,
@@ -137,7 +145,10 @@ class PhotoWorldAdapter(EnvAdapter):
         rows: list[dict] = []
         pred_dir = os.path.join(out_dir, "predictions")
         for item in env_manager:
-            row = self._score_one(item, params)
+            if self.llm_target:
+                row = self._rollout_llm(item, skill_content, params)
+            else:
+                row = self._score_one(item, params)
             # **写自然语言轨迹**：分析器读的是 predictions/<id>/conversation.json，
             # 而且里面得是"执行过程 + 反馈"。早先只把指标数字塞进结果字典，
             # 分析器拿到的是一堆裸数字 → 每次都产出 0 条编辑（[skip] no usable patches）。
@@ -185,8 +196,9 @@ class PhotoWorldAdapter(EnvAdapter):
                    "--image", item["image"], "--base", self.base_url,
                    "--views", str(self.views), "--params", json.dumps(params, ensure_ascii=False)]
             try:
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, cwd=self.root)
-                line = (r.stdout or "").strip().splitlines()[-1] if r.stdout else ""
+                r = subprocess.run(cmd, capture_output=True, timeout=1800, cwd=self.root)
+                sout = (r.stdout or b"").decode("utf-8", "replace")
+                line = sout.strip().splitlines()[-1] if sout.strip() else ""
                 d = json.loads(line) if line.startswith("{") else {}
             except Exception as e:                           # noqa: BLE001
                 d = {"ok": False, "error": str(e)[:300]}
@@ -236,6 +248,74 @@ class PhotoWorldAdapter(EnvAdapter):
         return {"ok": True, "metrics": agg, "hard": hard, "soft": soft, "fail": fail,
                 "repr": (man or {}).get("repr"), "secs": round(_t.time() - t0, 1)}
 
+
+    # ── target = LLM：读技能 → 出参数 → 评分（失败则带指标再要一轮）──────
+    def _llm(self):
+        if self._client is None:
+            from openai import OpenAI
+            self._client = OpenAI(
+                base_url=os.environ.get("OPENAI_COMPATIBLE_BASE_URL", "https://api.deepseek.com/v1"),
+                api_key=os.environ.get("OPENAI_COMPATIBLE_API_KEY")
+                or os.environ.get("DEEPSEEK_API_KEY", ""),
+                timeout=120,
+            )
+        return self._client
+
+    def _ask_params(self, skill: str, item: dict, feedback: str = "") -> dict:
+        """让模型按技能准则给出一组参数。解析失败就退回技能里那组。"""
+        sys_prompt = (
+            "你是一个图像重建流水线的调参器。严格按【技能】里的规则与输出格式回答。"
+            "只输出一段 yaml 代码块，形如 params://n  key: value。不要解释。"
+        )
+        user = (f"【技能】\n{skill}\n\n"
+                f"【这张图】id={item['id']}，类型={item.get('task_type', 'landscape')}，"
+                f"文件={item['image']}\n"
+                f"判据（越小越好，全部达标才算通过）：stripe≤2.0、streakBlobs≤200、"
+                f"innerVoid≤0.06、voidFrac≤0.10、voidBlobs≤260、voidBlobMax≤0.22、"
+                f"voidRunMax≤0.50、lowVoid≤0.08\n")
+        if feedback:
+            user += f"\n【上一轮实测】\n{feedback}\n请按技能里的对症规则改动，再给一组参数。\n"
+        try:
+            r = self._llm().chat.completions.create(
+                model=self.llm_model,
+                messages=[{"role": "system", "content": sys_prompt},
+                          {"role": "user", "content": user}],
+                temperature=0.2, max_tokens=400)
+            txt = r.choices[0].message.content or ""
+            got = parse_params(txt)
+            return got or parse_params(skill)
+        except Exception as e:                            # noqa: BLE001
+            print(f"[photoworld] LLM 出参失败，退回技能参数：{str(e)[:160]}", flush=True)
+            return parse_params(skill)
+
+    def _rollout_llm(self, item: dict, skill: str, default_params: dict) -> dict:
+        """最多 llm_rounds 轮：出参 → 烘焙评分 →（不达标）把指标喂回去再要一次。"""
+        best: dict = {}
+        feedback = ""
+        rounds: list[dict] = []
+        for _ in range(self.llm_rounds):
+            params = self._ask_params(skill, item, feedback) or default_params
+            row = self._score_one(item, params)
+            row["params"] = params
+            rounds.append(row)
+            if not best or row["soft"] >= best["soft"]:
+                best = row
+            if row["hard"] == 1:
+                break
+            m = row.get("metrics") or {}
+            if not m:
+                break
+            feedback = ("参数 " + json.dumps(params, ensure_ascii=False) + "\n失败项：" +
+                        (row.get("fail_reason") or "、".join(row.get("fail") or [])) +
+                        "\n实测：" + json.dumps({k: round(float(v), 4) for k, v in m.items()
+                                                if k in ("stripe", "streakBlobs", "innerVoid",
+                                                         "voidFrac", "voidBlobs", "voidBlobMax",
+                                                         "voidRunMax", "lowVoid")},
+                                               ensure_ascii=False))
+        best["rounds"] = len(rounds)
+        best["round_log"] = [(r.get("params"), r["hard"], r["soft"]) for r in rounds]
+        return best
+
     # ── 轨迹：把"这次做了什么、哪里坏了"写成分析器能读的对话 ──────────
     def _write_trajectory(self, pred_dir: str, item: dict, params: dict, row: dict) -> None:
         seg = task_output_segment(item["id"])
@@ -252,10 +332,12 @@ class PhotoWorldAdapter(EnvAdapter):
             lines.append(f"  {k:16s} = {v:<10.4f} [{mark}]")
         table = "\n".join(lines) if lines else "  (没有拿到指标)"
 
+        used = row.get("params") or params
         conv = [
             {"step": 1,
-             "action": f"按技能参数烘焙 {item['image']}（{item.get('task_type', 'landscape')}）",
-             "env_feedback": "参数：" + json.dumps(params, ensure_ascii=False)},
+             "action": f"按技能准则为 {item['image']}（{item.get('task_type', 'landscape')}）选定参数并烘焙",
+             "env_feedback": "参数：" + json.dumps(used, ensure_ascii=False)
+                             + (f"（共试了 {row.get('rounds')} 轮）" if row.get("rounds") else "")},
             {"step": 2,
              "action": "渲染 4 个机位并计算判据（阈值见技能文档）",
              "env_feedback": "指标：\n" + table},

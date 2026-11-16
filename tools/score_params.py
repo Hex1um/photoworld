@@ -89,8 +89,13 @@ def _gpu_lock():
                             pid = 0
                         if pid:
                             import subprocess as _sp
-                            out = _sp.run(["tasklist", "/FI", f"PID eq {pid}"],
-                                          capture_output=True, text=True).stdout
+                            # tasklist 在中文 Windows 上输出 **GBK**，
+                            # text=True 会抛 UnicodeDecodeError（0xcf），
+                            # 而这个异常发生在子线程里，主线程只看到 None →
+                            # 评分直接失败（实测整轮训练全 0 分）。
+                            _r = _sp.run(["tasklist", "/FI", f"PID eq {pid}"],
+                                         capture_output=True)
+                            out = (_r.stdout or b"").decode("cp936", "replace")
                             if str(pid) not in out:      # 进程没了 → 锁是遗产
                                 stale = True
                 except OSError:
@@ -143,9 +148,15 @@ def render_score(glb_rel: str, base: str, views: int, out_dir: str) -> dict:
     cmd = ["node", os.path.join(ROOT, "tools", "multiview.mjs"),
            "--base", base, "--glb-list", lst, "--views", str(views),
            "--out", os.path.join(out_dir, "shots"), "--json", js, "--gl", "hw"]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    # **不要用 text=True / encoding=**：multiview（node）经由管道吐出的字节里
+    # 混着 GBK 片段（实测 position 4 的 0xcf），text 模式会在 reader 线程里
+    # 直接抛 UnicodeDecodeError，而且异常发生在子线程、主线程只看到一堆 None。
+    # 收字节、自己按 utf-8 + replace 解码，稳。
+    r = subprocess.run(cmd, capture_output=True, timeout=600)
+    out = (r.stdout or b"").decode("utf-8", "replace")
+    err = (r.stderr or b"").decode("utf-8", "replace")
     if r.returncode != 0:
-        raise RuntimeError(f"multiview 失败: {r.stderr[-800:]}")
+        raise RuntimeError(f"multiview 失败({r.returncode}): {(err or out)[-800:]}")
     d = json.load(open(js, encoding="utf-8"))
     res = d.get("results") or []
     if not res:
