@@ -78,6 +78,16 @@ def write_glb(path: str, layers: list, texture_jpeg: bytes, name: str = "world",
             v = add_view(uv.tobytes(), 34962)
             accessors.append({"bufferView": v, "componentType": 5126,
                               "count": int(uv.shape[0]), "type": "VEC2"})
+            # 三角面层也可以带顶点色（v2.7.1：地面裙边用它上色，
+            # 因为它的 UV 是从照片里借的一个像素，采样出来偏色严重）。
+            if layer.get("color") is not None:
+                col = np.asarray(layer["color"], dtype=np.float32).reshape(-1, 4)
+                if col.shape[0] == pos.shape[0]:
+                    a_col = len(accessors)
+                    v = add_view(col.tobytes(), 34962)
+                    accessors.append({"bufferView": v, "componentType": 5126,
+                                      "count": int(col.shape[0]), "type": "VEC4"})
+                    attrs["COLOR_0"] = a_col
             attrs["NORMAL"] = a_nrm
             attrs["TEXCOORD_0"] = a_uv
             a_idx = len(accessors)

@@ -353,6 +353,16 @@
         gl.enable(gl.CULL_FACE);
       }
 
+      /* 地面裙边（v2.7.1）：顶点色、不吃贴图。它铺在照片区域之外，
+         给"视锥外"一块有颜色的地面；用照片贴图会整片偏色（UV 只指向一个像素）。 */
+      if (world.meshes.ground) {
+        gl.disable(gl.CULL_FACE);
+        drawMesh(world, world.meshes.ground, {
+          tex: null, mode: 1, fog: 0.55, mipBias: 0
+        });
+        gl.enable(gl.CULL_FACE);
+      }
+
       /* 俯视顶面（v2.6）：点云生成的"正俯视高度图"，只在视点高于地形最高点时显示。
          作用是把"从上方看到的单层壳背面（竖直拉丝 + 白洞）"盖住 ——
          高空中看到的是同一片地貌的俯视图，纹理仍是照片自己的。 */

@@ -484,7 +484,7 @@ def build_ground_skirt(P: np.ndarray, ground: np.ndarray, uv: np.ndarray,
                        radius: float = 400.0, cells: int = 96,
                        n_palette: int = 12, inner_frac: float = 0.06,
                        footprint: tuple | None = None, amp: float = 2.2,
-                       rgb: np.ndarray | None = None) -> dict | None:
+                       rgb: np.ndarray | None = None, eye: float = 1.7) -> dict | None:
     """重建区域之外补一整圈地面，让"视锥外的灰白"变成"远处地面 + 雾"。
 
     为什么需要它：v2 的几何止于照片的投影梯形，梯形外什么都没有 ——
@@ -507,7 +507,13 @@ def build_ground_skirt(P: np.ndarray, ground: np.ndarray, uv: np.ndarray,
     # 画面里表现成"上半是景、下半是一整块地面"的硬地平线。
     # 再压低 0.2m 并往内延伸：裙子要钻到重建网格下面，
     # 否则两者交界（网格远端 vs 平坦裙边）会留一条亮缝。
-    gy = float(np.median(P[ground][:, 1])) - 0.20
+    # 高度要钳在"相机脚下的地面"附近（世界系里约 -eye）。
+    # 直接取地面像素 y 的中位数会翻车：峡谷照里被判成"地面"的像素大量在台地顶部，
+    # 中位数把裙边抬到几十米高，于是它在画面里变成一张**横贯视野的亮平面**
+    # （实测：正视图正中那条亮横线就是它）。
+    gy_raw = float(np.median(P[ground][:, 1])) - 0.20
+    ref = -float(eye)
+    gy = float(np.clip(gy_raw, ref - 1.5, ref + 1.5))
     # 用地面像素的 UV 做色板
     g_uv = uv[ground]
     if g_uv.shape[0] < 8:
@@ -572,11 +578,25 @@ def build_ground_skirt(P: np.ndarray, ground: np.ndarray, uv: np.ndarray,
 
     if not index:
         return None
+    # 顶点色：用上面选出的那一个"日照地面"像素的 RGB。
+    # 裙边的 UV 只能指向照片里的某一个点，采样出来是整片单色且偏色（实测偏暗红）；
+    # 直接给顶点色反而可控 —— 前端用 mode 1 画，颜色就是这里给的值。
+    if rgb is not None and rgb.size and palette.size:
+        u0, v0 = float(palette[0, 0]), float(palette[0, 1])
+        iy = int(np.clip(v0 * (rgb.shape[0] - 1), 0, rgb.shape[0] - 1))
+        ix0 = int(np.clip(u0 * (rgb.shape[1] - 1), 0, rgb.shape[1] - 1))
+        c = np.clip(np.asarray(rgb[iy, ix0], dtype=np.float32), 0, 1) * 0.88
+        colv = np.tile(np.array([c[0], c[1], c[2], 1.0], dtype=np.float32),
+                       (len(pos) // 3, 1))
+    else:
+        n = len(pos) // 3
+        colv = np.tile(np.array([0.55, 0.45, 0.36, 1.0], dtype=np.float32), (n, 1))
     return {
         "name": "ground",
         "pos": np.asarray(pos, dtype=np.float32).reshape(-1, 3),
         "nrm": np.asarray(nrm, dtype=np.float32).reshape(-1, 3),
         "uv": np.asarray(uvout, dtype=np.float32).reshape(-1, 2),
+        "color": colv,
         "index": np.asarray(index, dtype=np.uint32),
     }
 
@@ -913,7 +933,7 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
                          math.tan(cam.hfov * 0.5))
             skirt = build_ground_skirt(P, gmask, uv,
                                        radius=ground_radius, cells=ground_cells,
-                                       footprint=footprint, rgb=rgb)
+                                       footprint=footprint, rgb=rgb, eye=eye)
             if skirt is not None:
                 layers.append(skirt)
                 # 地物：在裙边上撒石块（同一套地面色板取色）

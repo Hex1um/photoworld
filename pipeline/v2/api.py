@@ -56,11 +56,8 @@ DEFAULTS = {
     # 默认**不**用扩散模型：本机缓存里只有 SDXL-inpaint，8GB 显存上单张 15 分钟都跑不完
     # （实测）。不打开时走"镜像延展 + 渐隐到雾色"，同样能消掉视锥外的空白与硬边，
     # 只是没有新内容。等快速权重（dreamshaper-8-inpainting）下完整后，再开这个开关。
-    # 默认**关**：这台机器的显存与其它程序共享，SD 管线的加载时快时卡死
-    # （同一份权重，有时 42s 载完，有时卡在 "Loading pipeline components 29%" 几分钟
-    # 没有任何输出）。烘焙不该被它拖死，所以默认走"镜像延展 + 渐隐"的快速回退
-    # （<1s）；确认显存空闲时再开。
-    "outpaint_model": False,
+    # 显存充足时开启（有守卫：可用显存 <3.2GB 会自动退回快速路径，不会卡死）
+    "outpaint_model": True,
     "ground_radius": 400.0, "semantics": True,
     "long_side": 1540, "device": "cuda", "median_size": 3,
 }
