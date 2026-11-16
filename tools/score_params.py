@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -123,14 +124,44 @@ def _gpu_lock():
     return cm()
 
 
-def bake(image: str, params: dict, out_glb: str) -> dict:
-    """按参数烘焙一张图，返回 manifest。"""
+# api.py 模块单例。它顶层持有两个**进程级**状态：_model（1.3GB 深度权重）
+# 和 _cache（按图片内容哈希的 GLB 缓存，24 条上限）。旧实现每次 bake() 都
+# spec_from_file_location + exec_module 重建模块，把这两个状态清零：
+#   · 每张图重新加载 1.3GB 权重（单步 290~380 秒的主要来源）；
+#   · 内容哈希缓存永远命中不了，adapter 注释"共享已加载的模型"与事实不符。
+# 这里缓存模块实例，并用 (mtime_ns, size) 指纹在 api.py 变更时自动重载。
+# 状态放 sys.modules 而非本模块全局变量：score_server 每次都会重建
+# score_params 模块（为拿 _gpu_lock），放本模块会被反复清零，等于没修。
+_API_REGISTRY_KEY = "_photoworld_v2_api_registry"
+_API_LOAD_LOCK = threading.Lock()
+
+
+def _get_api():
+    """返回进程内共享的 api.py 模块；文件变更时自动重建。"""
     import importlib.util
 
-    spec = importlib.util.spec_from_file_location(
-        "v2api", os.path.join(ROOT, "pipeline", "v2", "api.py"))
-    api = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(api)
+    path = os.path.join(ROOT, "pipeline", "v2", "api.py")
+    st = os.stat(path)
+    fingerprint = (st.st_mtime_ns, st.st_size)
+    with _API_LOAD_LOCK:
+        reg = sys.modules.get(_API_REGISTRY_KEY)
+        if reg is None:
+            reg = {"fingerprint": None, "module": None, "loads": 0}
+            sys.modules[_API_REGISTRY_KEY] = reg
+        if reg["module"] is not None and reg["fingerprint"] == fingerprint:
+            return reg["module"]
+        spec = importlib.util.spec_from_file_location("v2api", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        reg["fingerprint"] = fingerprint
+        reg["module"] = mod
+        reg["loads"] += 1
+        return mod
+
+
+def bake(image: str, params: dict, out_glb: str) -> dict:
+    """按参数烘焙一张图，返回 manifest。"""
+    api = _get_api()
 
     with open(os.path.join(ROOT, image) if not os.path.isabs(image) else image, "rb") as f:
         data = f.read()
