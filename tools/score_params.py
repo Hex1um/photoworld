@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -165,19 +166,41 @@ def render_score(glb_rel: str, base: str, views: int, out_dir: str) -> dict:
 
 
 def score(agg: dict) -> tuple[int, float, list[str]]:
-    """把指标折成 (hard, soft, 失败项)。"""
+    """把指标折成 (hard, soft, 失败项)。
+
+    契约（2026-11-16 v2.13.2）：**指标缺项 = 无效，不是满分**。
+    agg 必须给出 THRESH 的全部键；少任意一项（或为空）一律返回
+    hard=0 / soft=0.0，并在失败项里标 `invalid:missing:<key>`。
+    旧实现里 `v is None` 被跳过 → 渲染坏了却算不出指标时反而拿满分，
+    是奖励作弊入口。失败项统一带 `invalid:` 前缀，便于上层把"无效"
+    和"真实低分"区分开（无效样本不该进反馈/择优）。
+    """
+    if not isinstance(agg, dict) or not agg:
+        return 0, 0.0, ["invalid:empty"]
+    missing = [k for k in THRESH if agg.get(k) is None]
+    if missing:
+        return 0, 0.0, ["invalid:missing:" + k for k in missing]
+    # 非数值 / NaN / Inf 同样按无效处理：
+    # NaN 让所有 `v > t` 为假 → 旧逻辑会判 hard=1 soft=1.0（满分），必须堵住。
+    bad = []
+    for k in THRESH:
+        try:
+            if not math.isfinite(float(agg[k])):
+                bad.append(k)
+        except (TypeError, ValueError):
+            bad.append(k)
+    if bad:
+        return 0, 0.0, ["invalid:nonnumeric:" + k for k in bad]
     fail = []
     for k, t in THRESH.items():
-        v = agg.get(k)
-        if v is not None and v > t:
+        v = agg[k]
+        if v > t:
             fail.append(k)
     hard = 1 if not fail else 0
     # soft：每项按"超阈值程度"扣分，越界越多扣得越多（用阈值归一）
     soft = 1.0
     for k, t in THRESH.items():
-        v = agg.get(k)
-        if v is None:
-            continue
+        v = agg[k]
         over = max(0.0, v - t) / max(1e-6, t)
         soft -= WEIGHT[k] * min(1.0, over)
     return hard, round(max(0.0, soft), 4), fail
@@ -211,7 +234,7 @@ def main() -> int:
                               "secs": round(time.time() - t0, 1)}, ensure_ascii=False))
             return 0
         agg = d.get("metrics") or {}
-        hard, soft, fail = score(agg) if agg else (0, 0.0, ["no-metrics"])
+        hard, soft, fail = score(agg)   # 空/缺项由 score() 统一判 invalid
         print(json.dumps({"ok": bool(d.get("ok")), "hard": hard, "soft": soft,
                           "metrics": {k: round(float(v), 4) for k, v in agg.items()
                                       if isinstance(v, (int, float))},
