@@ -378,7 +378,7 @@
            merge 时会填 1.0，所以效果就是"贴该物体自己的照片像素"。
            用 mode 1 会变成纯白板（实测侧视图里那几块浅灰片）。 */
         drawMesh(world, world.meshes.solid, {
-          tex: world.tex.photo, mode: 4, fog: 0.26, mipBias: 0
+          tex: world.tex.photo, mode: 4, fog: 0.12, mipBias: 0
         });
         gl.enable(gl.CULL_FACE);
       }
@@ -534,8 +534,14 @@
               world.dbgLayers
                 ? { mode: 9, debugCol: [0.95, 0.2, 0.2] }
                 : {
-                  tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.26, mipBias: 0,
-                  backdrop: [0, 0]
+                  /* fog 从 0.26 降到 0.12：0.26 让站在原点看到的画面比原片"淡一层"
+                     （山脊对比度被雾色压平）。近景本来就是照片本身，不需要雾去遮。 */
+                  tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.16, mipBias: 0,
+                  backdrop: [0, 0],
+                  /* 近景壳单独提一点天光：实测 fog 调到 0.12 后对比度对了，但整体
+                     比原片暗（均值 0.494 对 0.582）。雾量再往上加已无变化 ——
+                     差的不是雾，是光照。 */
+                  skyAmb: (world.ambient || [1, 1, 1]).map((v) => v * 1.18)
                 });
           }
         }

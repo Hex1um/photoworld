@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.14.1';
+  const VERSION = '2.14.2';
 
   /* v2 服务的地址：显式 ?api= 优先，其次是自动发现（本机常见端口）。
      自动发现写在启动流程里，不需要使用者改 URL —— 这是"更快捷地启用 v2"的关键。 */
@@ -830,7 +830,12 @@
         sunColor: [0.9, 0.9, 0.9],
         sunPower: 0.4,
         exposure: 1.0,
-        targetLum: Math.min(0.55, Math.max(0.28, col.lum * 0.82)),
+        /* 曝光目标 = 原片平均亮度 × 0.95（上限 0.62）。
+           原来 × 0.82 且上限 0.55 → 亮照片被压暗约 18%，
+           站在原点看明显比原片暗（实测 0.495 vs 原片 0.582）。
+           注意：这个值只影响**自动曝光的目标**，改光照参数是无效的
+           （expо 循环会把任何光照变化归一化掉）。 */
+        targetLum: Math.min(0.62, Math.max(0.28, col.lum * 0.95)),
         sunDir: [0.3, 0.5, -0.8],
         lights: { fogDensity: 0.0016 },
         tex: { photo: tex, ground: null, sky: null, grass: null },
