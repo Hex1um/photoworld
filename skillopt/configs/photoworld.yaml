@@ -33,7 +33,8 @@ env:
   split_mode: split_dir
   split_dir: ../photoworld/data/photoworld
   workers: 1
-  views: 4
+  views: 8            # 八方位环拍：4 个机位会漏掉侧后方的问题
+  views_note: 4→8
   base_url: http://127.0.0.1:8199
   score_server: ""            # 留空 = 训练进程内直接烘焙（推荐；常驻服务在本机不稳）
   inproc: true
