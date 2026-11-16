@@ -3,6 +3,32 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [2.9.5] - 2026-11-16  · SkillOpt 集成纳入版本管理（+ 参数兜底解析补中文句式）
+
+### 问题
+
+`skillopt/envs/photoworld/` 与 `configs/` 之前只写在 SkillOpt 的**独立 clone**
+（`../tools_skillopt`）里 —— 重克隆就丢，也不进本仓库的 git。
+这轮改的 adapter（轨迹、进程内评分、参数兜底）全都只存在那台机器的 clone 里。
+
+### 做法
+
+* 权威副本放到本仓库：`skillopt/envs/photoworld/`、`skillopt/configs/photoworld.yaml`；
+* `tools/sync_skillopt.py` 把它推到 clone 并自动补 `_ENV_REGISTRY` 注册：
+  ```bash
+  python tools/sync_skillopt.py --check   # 只比对
+  python tools/sync_skillopt.py           # 同步
+  ```
+
+### 参数兜底解析补中文句式
+
+分析器写的是散文（"建议把 far_split 调到 120"），只认 `key: value` 会漏。现在三种都认：
+
+```
+parse_params('建议把 far_split 调到 120，ground_radius: 300 也够，seg_edge_tau 改为 0.08。')
+→ {'far_split': 120.0, 'ground_radius': 300.0, 'seg_edge_tau': 0.08}
+```
+
 ## [2.9.4] - 2026-11-16  · 让"散文式编辑"也能生效（参数兜底解析）
 
 ### 发现的问题

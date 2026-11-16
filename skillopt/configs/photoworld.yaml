@@ -1,0 +1,40 @@
+# PHOTOWORLD：把"烘焙参数"当作可训练技能。
+#
+# 与其它基准最大的不同：target **不是 LLM**，而是一条确定性流水线。
+# rollout 只读 skill 里的 yaml 参数、跑烘焙+渲染+评分，所以 target 的模型名并不重要；
+# 真正花钱的是 **optimizer**（它负责改 skill 文本）。
+#
+# 后端用 openai_compatible（DeepSeek 兼容 OpenAI 协议）。凭据走环境变量：
+#   OPENAI_COMPATIBLE_BASE_URL / OPENAI_COMPATIBLE_API_KEY / OPENAI_COMPATIBLE_MODEL
+_base_: ../_base_/default.yaml
+
+model:
+  backend: openai_compatible
+  optimizer: deepseek-chat
+  target: deepseek-chat
+  optimizer_backend: openai_compatible
+  target_backend: openai_compatible
+  reasoning_effort: low
+
+train:
+  batch_size: 2          # 两张图一个 batch：一张烘焙+渲染要 1~1.5 分钟
+  accumulation: 1
+
+gradient:
+  minibatch_size: 2
+  merge_batch_size: 2
+
+optimizer:
+  learning_rate: 2       # 每轮最多改 2 处
+
+env:
+  name: photoworld
+  skill_init: skillopt/envs/photoworld/seed_skill.md
+  split_mode: split_dir
+  split_dir: ../photoworld/data/photoworld
+  workers: 1
+  views: 4
+  base_url: http://127.0.0.1:8199
+  score_server: ""            # 留空 = 训练进程内直接烘焙（推荐；常驻服务在本机不稳）
+  inproc: true
+  limit: 0
