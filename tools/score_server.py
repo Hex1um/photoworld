@@ -22,7 +22,7 @@ import shutil
 import threading
 import time
 import uuid
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -174,7 +174,12 @@ def main() -> int:
         except Exception as e:                           # noqa: BLE001
             print(f"[score_server] 预热失败: {e}", flush=True)
 
-    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    # **单线程**服务器，不是 ThreadingHTTPServer。
+    # 用线程跑请求时，torch 的 CUDA 上下文在非主线程里会直接崩掉进程
+    # （表现为客户端收到 "Remote end closed connection without response"，
+    #  服务端没有任何 traceback）—— 实测连挂几次，换成主线程处理后就稳了。
+    # 顺带：评分本来就该串行（一把 GPU），多线程没有收益。
+    srv = HTTPServer((args.host, args.port), Handler)
     print(f"[score_server] http://{args.host}:{args.port}  (render base={args.base})", flush=True)
     srv.serve_forever()
     return 0

@@ -3,6 +3,51 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [2.9.3] - 2026-11-16  · SkillOpt 训练循环真正转起来了（三个契约层修复）
+
+前两版"分数全 0 / 0 条编辑"都不是调参问题，是契约和环境问题。这版逐个修掉。
+
+### 1. 轨迹必须写成"对话"
+
+分析器读的是 `predictions/<id>/conversation.json`，要的是"做了什么 + 环境反馈"。
+我们原来只把指标塞进结果字典 → 分析器拿到一堆裸数字 → 每次 0 条编辑
+（`[skip] no usable patches`）。
+
+现在 `adapter._write_trajectory` 写三步：烘焙（含参数）→ 渲染并列出每项指标 vs 阈值
+（标 ok/FAIL）→ 判定；结果里再补 `task_description` 与 `fail_reason`
+（如"lake：lowVoid 0.1616（脚下空洞占比）未达标"）。
+
+**效果**：`[analyst] → 1 edits` / `→ 2 edits`，`skill_len 1422 → 1994`。
+
+### 2. 评分改在训练进程内（`inproc: true`）
+
+常驻评分服务（HTTP）在本机反复被回收（`Remote end closed` / `WinError 10061`），
+整轮 rollout 变 0 分。改成训练进程内直接烘焙（CUDA 在主线程），渲染仍交给 node。
+既避开服务生命周期问题，也省掉每张图一次的模型加载。
+
+### 3. 验证集必须"有失败可分"，门控用 soft
+
+* 原来 val 用了本来就满分的图（hard=1）→ 任何编辑都不可能"严格提升"→ 门控全拒。
+  换成 `lake`（soft 0.80，`lowVoid` 0.16 / `voidRunMax` 0.45 超阈值）。
+* `evaluation.gate_metric: soft`：`hard` 要求"一次编辑让验证图从不过变全过"，
+  门槛过高。实测编辑确实让技能变长了、`lowVoid` 也降了，但 hard 仍 0 就被整条拒掉。
+
+### 实测数据（单轮 rollout）
+
+| 图 | soft | 失败项 |
+|---|---|---|
+| snow | 1.000 | — |
+| coast | 0.910 | `streakBlobs` 268 |
+| lake | 0.803 | `lowVoid` 0.162、`voidRunMax` 0.446、`voidBlobMax` 0.478 |
+| desert | 0.975 | `voidRunMax` 0.605 |
+
+单步耗时约 110~370 秒（rollout 73s + reflect 7s + evaluate 28s，另加一次评估波动）。
+
+### 顺带
+
+* 评分服务改**单线程**（`HTTPServer`）：`ThreadingHTTPServer` 在非主线程调用 CUDA
+  会让进程直接崩掉，客户端只看到连接被关。
+
 ## [2.9.2] - 2026-11-16  · 训练独立启动器（双击即跑）
 
 ### 新增

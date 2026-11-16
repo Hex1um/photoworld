@@ -55,12 +55,30 @@ PW_SCORE_SERVER=http://127.0.0.1:8300 \
 python scripts/train.py --config configs/photoworld/default.yaml
 ```
 
-### 已知问题（当前卡点）
+### 训练循环现在真的转起来了
 
-训练能跑、分数是真的，但**反射阶段一直产出 0 条编辑**（`[skip] no usable patches`）。
-原因：我们的 trajectory 是一堆指标数字，而不是"模型的一段对话"，
-分析器没有可据以改技能文本的材料。下一步要让 rollout 把**每张图的失败项 + 图像特征**
-整理成自然语言轨迹（例如"这张 lake：lowVoid 0.30，地面在脚下塌了"），分析器才有的可说。
+三个关键修复（都不是"调参"，是"环境/契约"层面的）：
+
+1. **轨迹要写成对话**（`adapter._write_trajectory`）：
+   分析器读的是 `predictions/<id>/conversation.json`，内容是"做了什么 + 环境反馈"。
+   早先只把指标数字放结果字典里 → 每次都是 0 条编辑。
+   现在每条轨迹带：用了哪些参数、每项指标 vs 阈值（标 ok/FAIL）、判定结果，
+   结果字典里再补 `task_description` / `fail_reason`（如"lake：lowVoid 0.1616 未达标"）。
+2. **评分在训练进程内跑**（`inproc: true`）：不依赖任何常驻服务。
+   评分服务（HTTP）在本机反复被回收，症状是 `Remote end closed` / `WinError 10061`，
+   整轮 rollout 变 0 分。进程内跑还省掉每张图一次的模型加载。
+3. **验证集必须"有失败可分"**：原先 val 用了本来就满分的图（hard=1），
+   任何编辑都不可能"严格提升"→ 门控必然全拒（实测 `action=reject`）。
+   换成有超阈值的图后，STEP 1 就产出了 3 条编辑、合并成 2 条、技能从 1422 增到 1994 字符。
+
+观察到的实际数据（一轮 rollout）：
+
+| 图 | soft | 失败项 |
+|---|---|---|
+| snow | 1.000 | — |
+| coast | 0.910 | `streakBlobs` 268 |
+| lake | 0.803 | `lowVoid` 0.162、`voidRunMax` 0.446、`voidBlobMax` 0.478 |
+| desert | 0.975 | `voidRunMax` 0.605 |
 
 单图评分可以单独跑，便于手工试参数：
 
