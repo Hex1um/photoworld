@@ -56,7 +56,11 @@ DEFAULTS = {
     # 默认**不**用扩散模型：本机缓存里只有 SDXL-inpaint，8GB 显存上单张 15 分钟都跑不完
     # （实测）。不打开时走"镜像延展 + 渐隐到雾色"，同样能消掉视锥外的空白与硬边，
     # 只是没有新内容。等快速权重（dreamshaper-8-inpainting）下完整后，再开这个开关。
-    "outpaint_model": True,
+    # 默认**关**：这台机器的显存与其它程序共享，SD 管线的加载时快时卡死
+    # （同一份权重，有时 42s 载完，有时卡在 "Loading pipeline components 29%" 几分钟
+    # 没有任何输出）。烘焙不该被它拖死，所以默认走"镜像延展 + 渐隐"的快速回退
+    # （<1s）；确认显存空闲时再开。
+    "outpaint_model": False,
     "ground_radius": 400.0, "semantics": True,
     "long_side": 1540, "device": "cuda", "median_size": 3,
 }
@@ -270,10 +274,11 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
                     strong_median=opts["strong_median"], quantize=opts["quantize"],
                     rgb=rgb, repr_mode=opts["repr"], scatter_thr=opts["scatter_thr"],
                     cliff_thr=opts["cliff_thr"], ground_tol=opts["ground_tol"],
-                    # 有外扩时不再铺裙边：扩展图已经把地面铺到 99° 视场，
-                    # 再压一层程序化地面只会在掠射角变成同心环带（实测）。
-                    ground_radius=(0.0 if (oinfo or {}).get("mode", "off").startswith("sd-")
-                                   else float(opts["ground_radius"])),
+                    # 裙边**始终**铺：外扩只覆盖左右两侧的 99° 视场，
+                    # 转身看背后仍然是空的（实测：背后只有雾色和一条远处瓦楞）。
+                    # 之前"有外扩就关裙边"是怕同心环带 —— 那个环带来自每格取不同色板，
+                    # 现在改成单一色 + 低频起伏，不会再有环。
+                    ground_radius=float(opts["ground_radius"]),
                     photo_wall=wall)
 
     tex = img_src

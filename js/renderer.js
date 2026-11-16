@@ -356,7 +356,12 @@
       /* 俯视顶面（v2.6）：点云生成的"正俯视高度图"，只在视点高于地形最高点时显示。
          作用是把"从上方看到的单层壳背面（竖直拉丝 + 白洞）"盖住 ——
          高空中看到的是同一片地貌的俯视图，纹理仍是照片自己的。 */
-      if (world.meshes.top && cam.eye[1] > (world.topShowAbove === undefined ? 1e9 : world.topShowAbove)) {
+      /* 显示条件：视点必须**明显高于脚下的地面**（+6m），而不只是"高于顶面最高点"。
+         平地的顶面高度接近 0，早先的判据（顶面最高点+1m）在站姿下也成立，
+         于是这片水平顶面在地平线处露成一条亮带（实测：背后那条白带就是它，
+         去掉裙边、去掉顶面后就消失 —— 靠这个对照才定位到）。 */
+      const topLift = world.heightAt ? cam.eye[1] - world.heightAt(cam.eye[0], cam.eye[2]) : 1e9;
+      if (world.meshes.top && topLift > 6.0) {
         gl.disable(gl.CULL_FACE);
         /* mipBias 给到 2.6：单视图重建**没有俯视纹理**，顶面 UV 是从相邻像素借来的，
            贴着看会是一圈圈放射状拉伸。高空看地表本来也该是低频的，

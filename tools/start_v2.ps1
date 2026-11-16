@@ -92,7 +92,7 @@ function Resolve-Python {
   $cands = @()
   $cands += (Get-Command python -ErrorAction SilentlyContinue | Select-Object -First 1).Source
   $cands += (Get-Command python3 -ErrorAction SilentlyContinue | Select-Object -First 1).Source
-  # WorkBuddy 自带的解释器：PATH 里没有时的兜底
+  # 常见安装位置兜底：PATH 里找不到 python 时，按下面的顺序再试一次
   $cands += (Get-ChildItem "$env:USERPROFILE\.workbuddy\binaries\python\versions\*\python.exe" `
              -ErrorAction SilentlyContinue | Sort-Object FullName -Descending |
              Select-Object -First 1).FullName

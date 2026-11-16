@@ -59,7 +59,34 @@ def _model_dir(root: str) -> str:
     return local
 
 
-def available(model_dir: str) -> dict:
+def free_vram_gb(device: str = "cuda") -> float:
+    """当前可用显存（GB）。查不到时返回 -1 表示"未知，按可用来处理"。"""
+    if device != "cuda":
+        return -1.0
+    # ① torch 的 mem_get_info（新版本才有）
+    try:
+        import torch
+        if torch.cuda.is_available():
+            free, _total = torch.cuda.mem_get_info()
+            return free / (1024 ** 3)
+    except Exception:
+        pass
+    # ② nvidia-smi 兜底 —— 这台机器的 torch 就没有 mem_get_info，
+    #    早先返回 -1 被当成"未知→随便用"，于是守卫形同虚设，加载卡死 400s 无输出。
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            stderr=subprocess.DEVNULL, timeout=8).decode("ascii", "ignore")
+        vals = [float(x) for x in out.split() if x.strip()]
+        if vals:
+            return max(vals) / 1024.0
+    except Exception:
+        pass
+    return -1.0
+
+
+def available(model_dir: str, device: str = "cuda", need_gb: float = 3.2) -> dict:
     """权重在不在、diffusers 装没装。缺任何一项就走边缘延展的降级路径。"""
     ok = True
     why = []
@@ -72,6 +99,13 @@ def available(model_dir: str) -> dict:
     if not os.path.exists(os.path.join(model_dir, "model_index.json")):
         ok = False
         why.append("没找到 inpainting 权重（models/sd2_inpaint 或 HF 缓存，见 pipeline/v2/README）")
+    # 显存守卫：模型加载要 ~2.5GB，若卡上已被别的程序占满，加载会**长时间卡住**
+    # （不是报错，是一直在换页 —— 实测 400s 不出结果）。宁可立刻退回镜像延展。
+    fv = free_vram_gb(device)
+    if ok and fv >= 0 and fv < need_gb:
+        ok = False
+        why.append("显存不足：可用 %.1fGB < 需要 %.1fGB（关掉些占用显存的程序，或关掉模型外扩）"
+                   % (fv, need_gb))
     return {"ok": ok, "reason": "; ".join(why)}
 
 
@@ -165,7 +199,7 @@ def outpaint(img: Image.Image, root: str, scale_x: float = 1.70, scale_y: float 
 
     mdir = _model_dir(root)
     if not force_fallback and use_model:
-        av = available(mdir)
+        av = available(mdir, device)
         if not av["ok"]:
             info["reason"] = av["reason"]
         else:

@@ -176,9 +176,13 @@
       const len = Math.hypot(fwd, side);
       if (len > 1) { fwd /= len; side /= len; }
 
-      const sprint = (keys['shift'] || touch.jy < -0.85) ? 2.05 : 1;
+      /* 键位（用户指定）：Ctrl 疾跑、Shift 缓行。
+         飞行时 Shift 另有用途（下降），所以缓行只在非飞行时生效；
+         触屏摇杆拉到最上仍然是疾跑。 */
+      const sprint = (keys['control'] || touch.jy < -0.85) ? 2.05 : 1;
+      const slow = (!state.flying && keys['shift']) ? 0.42 : 1;
       // 飞行时水平更快一点：飞行的用途就是快速看地形
-      const target = 4.5 * state.speedMul * sprint * (state.flying ? 1.5 : 1);
+      const target = 4.5 * state.speedMul * sprint * slow * (state.flying ? 1.5 : 1);
       const sy = Math.sin(state.yaw), cy = Math.cos(state.yaw);
       const tx = (sy * fwd + cy * side) * target;
       const tz = (-cy * fwd + sy * side) * target;

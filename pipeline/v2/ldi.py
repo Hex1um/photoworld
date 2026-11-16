@@ -483,7 +483,8 @@ def build_photo_wall(cam, dist: float = 8.0, expand: float = 1.0) -> dict:
 def build_ground_skirt(P: np.ndarray, ground: np.ndarray, uv: np.ndarray,
                        radius: float = 400.0, cells: int = 96,
                        n_palette: int = 12, inner_frac: float = 0.06,
-                       footprint: tuple | None = None) -> dict | None:
+                       footprint: tuple | None = None, amp: float = 2.2,
+                       rgb: np.ndarray | None = None) -> dict | None:
     """重建区域之外补一整圈地面，让"视锥外的灰白"变成"远处地面 + 雾"。
 
     为什么需要它：v2 的几何止于照片的投影梯形，梯形外什么都没有 ——
@@ -511,8 +512,21 @@ def build_ground_skirt(P: np.ndarray, ground: np.ndarray, uv: np.ndarray,
     g_uv = uv[ground]
     if g_uv.shape[0] < 8:
         return None
-    idx = np.linspace(0, g_uv.shape[0] - 1, min(n_palette, g_uv.shape[0])).astype(int)
-    palette = g_uv[np.argsort(g_uv[:, 1] * 1.0 + g_uv[:, 0] * 0.37 + np.random.rand(g_uv.shape[0]) * 0.0)[idx]]
+    # 色板均匀抽样，然后**取最亮的那一档**。
+    # 取中位数会挑到阴影里的地面（金色时刻一片暗褐），整个裙边变成近黑色的地皮
+    # （实测：背后一整片近黑 + 远处白带）。远景地面本来就该是平均日照色。
+    order = np.argsort(g_uv[:, 1] * 1.0 + g_uv[:, 0] * 0.37)
+    pick = np.linspace(0, g_uv.shape[0] - 1, min(n_palette * 3, g_uv.shape[0])).astype(int)
+    palette = g_uv[order[pick]]
+    if rgb is not None and rgb.size and palette.size:
+        lum = []
+        for (u, v) in palette:
+            iy = int(np.clip(v * (rgb.shape[0] - 1), 0, rgb.shape[0] - 1))
+            ix2 = int(np.clip(u * (rgb.shape[1] - 1), 0, rgb.shape[1] - 1))
+            c = rgb[iy, ix2]
+            lum.append(0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2])
+        order2 = np.argsort(lum)
+        palette = palette[[order2[min(len(order2) - 1, int(len(order2) * 0.70))]]]
 
     n = int(cells)
     lin = np.linspace(-radius, radius, n + 1, dtype=np.float32)
@@ -537,7 +551,11 @@ def build_ground_skirt(P: np.ndarray, ground: np.ndarray, uv: np.ndarray,
             if hole[j, i]:
                 continue
             vid[j, i] = len(pos) // 3
-            pos.extend([float(X[j, i]), gy, float(Z[j, i])])
+            # 低频起伏：纯平面在未来任何视角都读作"空地"，加一点沙丘式起伏
+            # 才有了地面的体积感（±amp 米，尺度约 80m）
+            dune = (np.sin(X[j, i] * 0.021 + 1.3) * np.cos(Z[j, i] * 0.017 - 0.7)
+                    + 0.5 * np.sin(X[j, i] * 0.0071 + Z[j, i] * 0.0093))
+            pos.extend([float(X[j, i]), gy + float(dune) * amp, float(Z[j, i])])
             nrm.extend([0.0, 1.0, 0.0])
             # **统一取一个色板 UV**：早先按格子哈希取不同色，结果在掠射角下
             # 每个格子的颜色差异被放大成一圈圈同心橙环（实测），比纯色难看得多。
@@ -895,7 +913,7 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
                          math.tan(cam.hfov * 0.5))
             skirt = build_ground_skirt(P, gmask, uv,
                                        radius=ground_radius, cells=ground_cells,
-                                       footprint=footprint)
+                                       footprint=footprint, rgb=rgb)
             if skirt is not None:
                 layers.append(skirt)
                 # 地物：在裙边上撒石块（同一套地面色板取色）

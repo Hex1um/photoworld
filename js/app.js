@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.6.0';
+  const VERSION = '2.7.0';
 
   /* v2 服务的地址：显式 ?api= 优先，其次是自动发现（本机常见端口）。
      自动发现写在启动流程里，不需要使用者改 URL —— 这是"更快捷地启用 v2"的关键。 */
@@ -900,45 +900,45 @@
           const A = clamp(maxSide * 1.04, 25, 600);
           w.bbox = { A, B };
 
-          // 地面基色：取照片最下方 16% 的平均色（那里一定是地面），转线性
+          /* ---- 延伸地形的地面配色（这一段踩过三次坑，按结论写） ----
+             延伸器的顶点色是 col = (colorAt*0.45 + fog*0.55) / groundBaseLin
+             （见 extend.js 的 buildTileMesh）。两个要求：
+
+             ① base 必须与 fog **同量级**。取照片地面线性色（0.033）而 fog 是 0.19 时，
+                比值 3.6 → 整片地形刷成浅灰（背后那条"白带"）。
+             ② colorAt 必须接，且返回值 ≈ base。不接时顶点色恒为 1，渲染成白色。
+
+             所以：base = 雾色均值×1.05，colorAt 返回 base 加一点低频扰动。
+             比值 ≈ 0.45 + 0.55×(fog/base) ≈ 1，延伸地形与雾自然衔接。 */
           let gcol = col.bot;
           try {
             if (asset.img) {
+              // 取照片下方 30% 里**70 分位亮度**的像素：平均值会混进大片阴影（偏黑），
+              // 最大值会撞上岩石高光（偏砖红），70 分位接近"日照下的地面"。
               const cv = document.createElement('canvas');
-              cv.width = 32; cv.height = 32;
+              cv.width = 24; cv.height = 24;
               const c2 = cv.getContext('2d');
-              c2.drawImage(asset.img, 0, Math.floor(asset.img.height * 0.84),
-                           asset.img.width, Math.ceil(asset.img.height * 0.16), 0, 0, 32, 32);
-              const d = c2.getImageData(0, 0, 32, 32).data;
-              let r = 0, g2 = 0, b = 0;
-              for (let i = 0; i < d.length; i += 4) { r += d[i]; g2 += d[i + 1]; b += d[i + 2]; }
-              const n2 = d.length / 4;
-              gcol = [r / n2 / 255, g2 / n2 / 255, b / n2 / 255];
+              c2.drawImage(asset.img, 0, Math.floor(asset.img.height * 0.70),
+                           asset.img.width, Math.ceil(asset.img.height * 0.30), 0, 0, 24, 24);
+              const d = c2.getImageData(0, 0, 24, 24).data;
+              const arr = [];
+              for (let i = 0; i < d.length; i += 4) {
+                arr.push([0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2],
+                          d[i], d[i + 1], d[i + 2]]);
+              }
+              arr.sort((a, b2) => a[0] - b2[0]);
+              const px = arr[Math.min(arr.length - 1, Math.floor(arr.length * 0.70))];
+              gcol = [px[1] / 255, px[2] / 255, px[3] / 255];
             }
-          } catch (e) { /* 取不到就用通话色 */ }
-          const lin = (c) => Math.pow(Math.max(1e-4, c), 2.2);
-          const fogLin = [lin(col.bot[0]), lin(col.bot[1]), lin(col.bot[2])];
-          /* 基色必须**抬到与雾同量级**再交给延伸器。
-             它的着色是 (colorAt*0.45 + fog*0.55) / base，base 若远小于雾色
-             （金色时刻地面线性值只有 0.02，雾 0.3），比值会顶到 clamp 上限 6，
-             整片地形变成发白的灰板 —— 就是上一版背视图那块"灰平原"。
-             做法：base 取 max(地面色, 雾色*0.6)，保证除出来的系数落在 1 左右。 */
-          w.groundBaseLin = [
-            Math.max(lin(gcol[0]), fogLin[0] * 0.60),
-            Math.max(lin(gcol[1]), fogLin[1] * 0.60),
-            Math.max(lin(gcol[2]), fogLin[2] * 0.60)
-          ];
+          } catch (e) { /* 取不到就用底色 */ }
+
+          const fogBase = Math.max(0.02, (col.bot[0] + col.bot[1] + col.bot[2]) / 3);
+          w.groundBaseLin = [fogBase * 1.05, fogBase * 1.0, fogBase * 0.96];
           w.groundTint = gcol;
-          /* 空间配色变化：tile 只有顶点色，若全用同一个基色就是一块平板。
-             这里给"低频明暗（几十米尺度）+ 微弱冷暖漂移 + 中频扰动"三层，
-             返回的是与 base 同量级的目标色，除以 base 后落在 0.85~1.35。 */
           const gb = w.groundBaseLin;
           w.groundColorAt = function (x, z) {
-            const n1 = Math.sin(x * 0.019 + 1.7) * Math.cos(z * 0.023 - 0.4);
-            const n2 = Math.sin(x * 0.09 + z * 0.061 + 2.1);
-            const v = 0.94 + 0.16 * n1 + 0.06 * n2;
-            const warm = 1 + 0.07 * Math.sin(x * 0.008 + z * 0.005 + 0.9);
-            return [gb[0] * v * warm, gb[1] * v, gb[2] * v / warm];
+            const v = 1 + 0.09 * Math.sin(x * 0.018 + 1.7) * Math.cos(z * 0.021 - 0.4);
+            return [gb[0] * v, gb[1] * v, gb[2] * v];
           };
           // 资产世界的地面**没有照片贴图可铺**（网格自带 UV），底板走顶点色
           w.floorMode = 1;
