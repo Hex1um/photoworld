@@ -572,7 +572,10 @@ def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
         fbm = (30.0 * np.sin(X2 * 0.0038 + Z2 * 0.0033 + 0.7)
                + 16.0 * np.sin(X2 * 0.0093 - Z2 * 0.0071 + 2.1) * np.cos(Z2 * 0.0088 + 0.3)
                + 7.0 * np.sin(X2 * 0.021 + Z2 * 0.017 + 4.4)
-               + 2.6 * np.sin(X2 * 0.047 - Z2 * 0.039 + 1.2))
+               + 2.6 * np.sin(X2 * 0.047 - Z2 * 0.039 + 1.2)
+               # 更高的两档：只加细节不抬整体，否则会变成一团团隆起
+               + 1.1 * np.sin(X2 * 0.093 + Z2 * 0.081 + 0.9)
+               + 0.45 * np.sin(X2 * 0.19 - Z2 * 0.17 + 3.3))
         hgt = hgt + fbm * ramp
     if smooth > 0:
         hgt = ndimage.uniform_filter(hgt, size=(3, 3), mode="nearest")
@@ -634,7 +637,12 @@ def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
         Ld /= np.linalg.norm(Ld)
         ndl_fixed = np.clip(N2 @ Ld, 0.0, 1.0)
         shade = 0.42 + 0.85 * ndl_fixed
-        v2 = v * shade
+        # **格级细噪声**：整片只有一个基色 + 平滑的坡面明暗时，近看像一块塑料。
+        # 加两层细噪声（约 3m / 1m 尺度）打散它 —— 只动颜色，不动几何。
+        _fx = np.sin(P2[:, 0] * 0.62 + P2[:, 2] * 0.41 + 1.7)
+        _fz = np.sin(P2[:, 0] * 1.71 - P2[:, 2] * 1.33 + 0.4)
+        grain = 1.0 + 0.055 * _fx + 0.03 * _fz
+        v2 = v * shade * grain
         C2 = np.stack([np.clip(base_c[0] * v2 * 0.82, 0, 1),
                        np.clip(base_c[1] * v2 * 0.82, 0, 1),
                        np.clip(base_c[2] * v2 * 0.82, 0, 1),
