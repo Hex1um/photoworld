@@ -215,7 +215,8 @@ def _vertex_normals(P: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
 def build_layer(P: np.ndarray, uv: np.ndarray, mask: np.ndarray, filled: np.ndarray,
                 zgrid: np.ndarray, dir_world: np.ndarray, skirt_delta_min: float,
-                skirt_delta_max: float, skirt_cap: float = 3.0) -> dict:
+                skirt_delta_max: float, skirt_cap: float = 3.0,
+                no_skirt: np.ndarray | None = None) -> dict:
     """单层网格 + 裙边。
 
     mask    : (H,W) 该层拥有哪些顶点
@@ -271,6 +272,10 @@ def build_layer(P: np.ndarray, uv: np.ndarray, mask: np.ndarray, filled: np.ndar
         # 内端在本层、这条边没被本层四边形用到；且要么外端无效（层内空洞），
         # 要么本层更近（剪影时只从近的一侧挤出）
         want = m_in & no_quad & (~m_out | (z_in <= z_out))
+        # **外端是天空的边不挤裙边**：那里没有"洞"要堵（天空由天穹画），
+        # 挤出来的是把照片亮度像素往后拉的一圈亮边 —— 地面视角里山脊上那条白线。
+        if no_skirt is not None:
+            want &= ~no_skirt[iout]
         # **图像四边不挤裙边**：边框外没有任何内容，挤出的是"一堵粉墙"
         # （雪山那张底部那条粉红尖刺带就是这么来的），留着洞没人看得见。
         want[0, :] = False
@@ -943,6 +948,8 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
 
     same_seg = (s00 == s10) & (s00 == s01) & (s00 == s11)
 
+
+
     ok_quad = valid_q & ~cliff & same_seg
     if quad_stretch_max > 0:
         # 可选：把"纹理拉伸超过 N 倍"的格子也剪掉。
@@ -977,8 +984,12 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
         q = (ok_quad & mask[:-1, :-1] & mask[1:, :-1] & mask[:-1, 1:] & mask[1:, 1:])
         if not q.any():
             continue
+        # 该层对应的天空掩码（与 zs 同形状）；没有就传 None
+        sky_slice = None
+        if sky is not None and sky.shape == zs.shape:
+            sky_slice = sky
         L = build_layer(P, uv, mask, q, zs, dir_world, skirt_min, skirt_max,
-                        skirt_cap=skirt_cap)
+                        skirt_cap=skirt_cap, no_skirt=sky_slice)
         L["name"] = names[lid]
         layers.append(L)
         stats[names[lid]] = {
