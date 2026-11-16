@@ -186,6 +186,11 @@ function decodePNG(buf) {
 /* ---------------- 指标 ---------------- */
 const luma = (r, g, b) => (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
 
+// 空洞判据：以渲染背景色（clearColor = world.fogColor）为参照的容差。
+// 三处使用（整幅像素 / 1/4 掩码 / 最长横段）必须共用这一个值：
+// 改前掩码是 ±8、另两处 ±6，导致块数类指标比占比类多算边界像素、口径不齐。
+const VOID_TOL = 6;
+
 function metrics(png, refBg = null) {
   const { w, h, bpp, data } = png;
   const L = new Float32Array(w * h);
@@ -219,7 +224,7 @@ function metrics(png, refBg = null) {
       // 而不是"画面主色"。否则水面/雪原这种大面积单色的场景会被整片误判成洞
       // （实测 lake 从侧后方看就是一片平坦湖面，被算成 voidFrac 0.43）。
       const isVoid = refBg
-        ? (Math.abs(r - refBg[0]) <= 6 && Math.abs(g - refBg[1]) <= 6 && Math.abs(b - refBg[2]) <= 6)
+        ? (Math.abs(r - refBg[0]) <= VOID_TOL && Math.abs(g - refBg[1]) <= VOID_TOL && Math.abs(b - refBg[2]) <= VOID_TOL)
         : (Math.abs(r - mr) <= 4 && Math.abs(g - mg) <= 4 && Math.abs(b - mb) <= 4);
       if (isVoid) voidN++;
       const inMid = x >= x0 && x < x1 && y >= y0 && y < y1;
@@ -252,7 +257,7 @@ function metrics(png, refBg = null) {
       const o = (sy * w + sx) * bpp;
       const r = data[o], g = data[o + 1], b = data[o + 2];
       vmask[y * sw + x] = (refBg
-        ? (Math.abs(r - refBg[0]) <= 8 && Math.abs(g - refBg[1]) <= 8 && Math.abs(b - refBg[2]) <= 8)
+        ? (Math.abs(r - refBg[0]) <= VOID_TOL && Math.abs(g - refBg[1]) <= VOID_TOL && Math.abs(b - refBg[2]) <= VOID_TOL)
         : (Math.abs(r - mr) <= 6 && Math.abs(g - mg) <= 6 && Math.abs(b - mb) <= 6)) ? 1 : 0;
       // 拉丝像素：竖直差分明显大于水平差分（竖条/拉花），且不是噪点
       if (sy > 0 && sx > 0) {
@@ -272,8 +277,8 @@ function metrics(png, refBg = null) {
     for (let x = 0; x < w; x++) {
       const o = (y * w + x) * bpp;
       const isVoid = refBg
-        ? (Math.abs(data[o] - refBg[0]) <= 6 && Math.abs(data[o + 1] - refBg[1]) <= 6
-           && Math.abs(data[o + 2] - refBg[2]) <= 6)
+        ? (Math.abs(data[o] - refBg[0]) <= VOID_TOL && Math.abs(data[o + 1] - refBg[1]) <= VOID_TOL
+           && Math.abs(data[o + 2] - refBg[2]) <= VOID_TOL)
         : (Math.abs(data[o] - mr) <= 4 && Math.abs(data[o + 1] - mg) <= 4
            && Math.abs(data[o + 2] - mb) <= 4);
       if (isVoid) { run++; if (run > runMax) runMax = run; } else run = 0;
@@ -282,7 +287,9 @@ function metrics(png, refBg = null) {
 
   return {
     voidBlobs: vb.count,
-    voidBlobMax: +(vb.totalArea / Math.max(1, sw * sh)).toFixed(4),
+    // **单块**空白最大占比（防"一块就占半屏"）：必须取 blobStats 的 maxArea。
+    // 曾用 totalArea（= 空白总覆盖率，与 voidFrac 重复），"大洞"判据形同虚设。
+    voidBlobMax: +(vb.maxArea / Math.max(1, sw * sh)).toFixed(4),
     voidRunMax: +(runMax / Math.max(1, w)).toFixed(4),
     streakBlobs: sb.count,
     streakBlobFrac: +(sb.totalArea / Math.max(1, sw * sh)).toFixed(4),
@@ -475,7 +482,8 @@ try {
       const top = Buffer.from((await send('Page.captureScreenshot', { format: 'png' })).data, 'base64');
       const topFile = path.join(OUTDIR, `${path.basename(rel).replace(/\.[a-z0-9]+$/i, '')}_top.png`);
       fs.writeFileSync(topFile, top);
-      rec.top = { ...metrics(decodePNG(top)), file: topFile.replace(/\\/g, '/') };
+      // 俯视也传 refBg：此前主视角用背景色、俯视用画面主色，同一份报告里口径不齐。
+      rec.top = { ...metrics(decodePNG(top), refBg), file: topFile.replace(/\\/g, '/') };
     }
 
     rec.ok = true;
