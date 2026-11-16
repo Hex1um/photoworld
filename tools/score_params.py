@@ -74,13 +74,33 @@ def _gpu_lock():
                 os.write(fh, str(os.getpid()).encode())
                 break
             except FileExistsError:
-                # 陈旧锁（>15 分钟）直接清掉，否则崩溃会永久锁死
+                # 陈旧锁必须清掉，否则一次崩溃就把后续所有评分永久卡死。
+                # 判据两条：① 超过 300 秒必定陈旧（单次 multiview ≤ 120s）；
+                #          ② 锁里记的 PID 已经不在了。
+                stale = False
                 try:
-                    if _t.time() - os.path.getmtime(lock_path) > 900:
+                    age = _t.time() - os.path.getmtime(lock_path)
+                    if age > 300:
+                        stale = True
+                    else:
+                        try:
+                            pid = int(open(lock_path).read().strip() or 0)
+                        except Exception:
+                            pid = 0
+                        if pid:
+                            import subprocess as _sp
+                            out = _sp.run(["tasklist", "/FI", f"PID eq {pid}"],
+                                          capture_output=True, text=True).stdout
+                            if str(pid) not in out:      # 进程没了 → 锁是遗产
+                                stale = True
+                except OSError:
+                    stale = True
+                if stale:
+                    try:
                         os.remove(lock_path)
                         continue
-                except OSError:
-                    pass
+                    except OSError:
+                        pass
                 _t.sleep(1.0)
         try:
             yield

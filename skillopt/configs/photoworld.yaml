@@ -38,3 +38,12 @@ env:
   score_server: ""            # 留空 = 训练进程内直接烘焙（推荐；常驻服务在本机不稳）
   inproc: true
   limit: 0
+
+# 门控与更新方式。
+evaluation:
+  # hard 要求"一次编辑让验证图从不过变全过"，门槛过高 → 用 soft 接受部分改善
+  gate_metric: soft
+  # 整篇重写，绕开"补丁锚点必须逐字匹配"。
+  # 实测补丁模式下 skill_v0001 → v0002 **文件内容没有任何实际变化**
+  # （唯一 diff 是自动插入的占位注释），参数自然也没动，训练等于空转。
+  skill_update_mode: full_rewrite

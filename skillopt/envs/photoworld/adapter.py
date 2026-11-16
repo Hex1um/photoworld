@@ -130,6 +130,9 @@ class PhotoWorldAdapter(EnvAdapter):
     # ── rollout ────────────────────────────────────────────────────
     def rollout(self, env_manager, skill_content: str, out_dir: str, **kwargs) -> list[dict]:
         params = parse_params(skill_content)
+        # 打出来：这是判断"技能到底改到参数没有"的唯一依据。
+        # 之前的坑是分析器只改散文、params 一字未动，训练看着在跑其实没生效。
+        print(f"[photoworld] 本轮参数：{json.dumps(params, ensure_ascii=False)}", flush=True)
         os.makedirs(out_dir, exist_ok=True)
         rows: list[dict] = []
         pred_dir = os.path.join(out_dir, "predictions")
