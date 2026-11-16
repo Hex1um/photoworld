@@ -373,6 +373,35 @@ def build_points(P: np.ndarray, rgb: np.ndarray, valid: np.ndarray,
             "point_px": float(step_used) * 2.0}
 
 
+
+def cap_depth_gradient(z: np.ndarray, k: float = 1.35, iters: int = 10) -> np.ndarray:
+    """限制相邻像素之间的**深度跳变**，把"拉向远方的长尾"截断。
+
+    问题：剪影处一个像素内深度从前景（2m）跳到远景（300m），建面时那个四边形
+    只能把前景像素沿射线拉出去 —— 画面上表现成一条从物体尾部射向远处的细丝。
+
+    观察：真实物体是**前后对称**的，看不见的背面最多和正面差不多厚。
+    所以这里不让深度一步跳超过 k 倍：反复做"若 z 大于四邻域最小值的 k 倍，
+    就把 z 压回 k 倍"，跳变会被摊成一段有限的斜坡（物体的厚度），而不是无限长的尾。
+
+    对真正持续后退的地面（每步比值 ~1.02）完全无影响。
+    """
+    z = np.array(z, dtype=np.float32, copy=True)
+    if k <= 1.0:
+        return z
+    for _ in range(max(1, int(iters))):
+        nb = np.minimum.reduce([
+            np.roll(z, 1, 0), np.roll(z, -1, 0),
+            np.roll(z, 1, 1), np.roll(z, -1, 1),
+        ])
+        limit = nb * k
+        over = z > limit
+        if not over.any():
+            break
+        z[over] = limit[over]
+    return z
+
+
 def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
                     cell: float = 1.8, max_cells: int = 190,
                     smooth: int = 1, rgb: np.ndarray | None = None,
@@ -458,10 +487,12 @@ def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
         X2 = gx1[None, :]
         Z2 = gz1[:, None]
         ramp = np.clip(dist_c / 260.0, 0.0, 1.0)
-        fbm = (14.0 * np.sin(X2 * 0.0041 + Z2 * 0.0037 + 0.7)
-               + 8.0 * np.sin(X2 * 0.0093 - Z2 * 0.0071 + 2.1) * np.cos(Z2 * 0.0088 + 0.3)
-               + 3.4 * np.sin(X2 * 0.021 + Z2 * 0.017 + 4.4)
-               + 1.3 * np.sin(X2 * 0.047 - Z2 * 0.039 + 1.2))
+        # 振幅按"从 120m 高空能看出地貌"来定：14m 在 500m 跨度上几乎是平的
+        # （实测起飞后是一张均匀的褐色板）。现在最大约 45m，并补了一层中频。
+        fbm = (30.0 * np.sin(X2 * 0.0038 + Z2 * 0.0033 + 0.7)
+               + 16.0 * np.sin(X2 * 0.0093 - Z2 * 0.0071 + 2.1) * np.cos(Z2 * 0.0088 + 0.3)
+               + 7.0 * np.sin(X2 * 0.021 + Z2 * 0.017 + 4.4)
+               + 2.6 * np.sin(X2 * 0.047 - Z2 * 0.039 + 1.2))
         hgt = hgt + fbm * ramp
     if smooth > 0:
         hgt = ndimage.uniform_filter(hgt, size=(3, 3), mode="nearest")
@@ -498,7 +529,12 @@ def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
         if u_v.size:
             iy2 = np.clip((u_v[:, 1] * (H2 - 1)).astype(np.int32), 0, H2 - 1)
             ix2 = np.clip((u_v[:, 0] * (W2 - 1)).astype(np.int32), 0, W2 - 1)
-            base_c = np.clip(rgb[iy2, ix2].mean(axis=0), 0, 1).astype(np.float32)
+            # 用 **75 分位亮度**的那一档颜色，而不是均值：
+            # 均值会把大片阴影（峡谷照的暗部）算进去，俯视整片发灰发闷（实测是泥浆色）。
+            _px = np.clip(rgb[iy2, ix2], 0, 1)
+            _lum = 0.2126 * _px[:, 0] + 0.7152 * _px[:, 1] + 0.0722 * _px[:, 2]
+            _pick = _px[np.argsort(_lum)[min(len(_lum) - 1, int(len(_lum) * 0.75))]]
+            base_c = _pick.astype(np.float32)
         else:
             base_c = np.array([0.5, 0.42, 0.34], dtype=np.float32)
         hmin, hmax = float(hgt.min()), float(hgt.max())
@@ -511,9 +547,17 @@ def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
             v = v * np.clip(1.0 - dist_c.reshape(-1) / (extent * 5.0), 0.85, 1.0)
         # 0.62：俯视是"看地貌"，不是"看原片亮度"。不压回来，亮场景（雪山/灯柱那种
         # 高调照片）会整片糊成白板 —— 即"起飞后地面变全白"。
-        C2 = np.stack([np.clip(base_c[0] * v * 0.62, 0, 1),
-                       np.clip(base_c[1] * v * 0.62, 0, 1),
-                       np.clip(base_c[2] * v * 0.62, 0, 1),
+        # **把坡面明暗烘进顶点色**：场景太阳很低，纯靠 uSunDir 算 ndl 时
+        # 朝上的面几乎一样亮，起伏也看不出来（实测起飞后是一张平色板）。
+        # 这里用固定的"制图光"方向算一次 lambert，乘进颜色里。
+        Ld = np.array([0.45, 0.78, -0.44], dtype=np.float32)
+        Ld /= np.linalg.norm(Ld)
+        ndl_fixed = np.clip(N2 @ Ld, 0.0, 1.0)
+        shade = 0.42 + 0.85 * ndl_fixed
+        v2 = v * shade
+        C2 = np.stack([np.clip(base_c[0] * v2 * 0.82, 0, 1),
+                       np.clip(base_c[1] * v2 * 0.82, 0, 1),
+                       np.clip(base_c[2] * v2 * 0.82, 0, 1),
                        np.ones_like(v)], axis=1).astype(np.float32)
     idx2 = []
     for j in range(nz - 1):
@@ -764,6 +808,7 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
           repr_mode: str = "auto", scatter_thr: float = 0.002,
           cliff_thr: float = 0.010, ground_radius: float = 400.0,
           seg_edge_tau: float = 0.10, quad_stretch_max: float = 0.0,
+          depth_cap: float = 1.35,
           # 默认关闭：试过"地面像素占比 < 0.4%"当"非风景照"的判据，实测**不成立** ——
           # 云海/星空/太空地球这几张图的地面占比也有 3.7~5.2%（压平判据把它们误判成地面），
           # 而"远景占比 / 纵深动态范围"在好坏图上完全不分离（远景占比全是 0，
@@ -873,6 +918,17 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
             valid = valid | fill
     # 断崖掩码要在表示选择之前算：它是"该用网格还是点云"两个判据之一
     cliff, ratio, edge_str = cliff_mask(zs, step, edge_ratio)
+
+    # ---- 深度梯度限幅：去掉剪影处的"长尾" --------------------------
+    # 必须在分层、cliff 判定**之前**做：几何本身就是按 zs 建的，
+    # 先限幅，后面的分层/剪面也都在更合理的深度上判断。
+    if depth_cap < 100.0:
+        zs = cap_depth_gradient(zs, k=depth_cap, iters=12)
+        # 用当前分辨率的 rays（build 里已经按 step 降采样过），
+        # 不能重新调 cam.rays()：那是全分辨率，形状对不上（实测 ValueError）。
+        P = rays * zs[..., None]
+        P[..., 2] *= -1.0
+        fwd = -P[..., 2]
 
     # ---- 非风景照：退回"照片墙" -----------------------------------
     # 判据用两个便宜的统计量：能识别成地面的像素几乎没有，且地平线以上占绝大多数。
