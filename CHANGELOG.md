@@ -3,6 +3,42 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [2.9.0] - 2026-11-16  · 接入 SkillOpt：把"烘焙参数选择"变成可训练技能
+
+### 为什么接它
+
+[SkillOpt](https://github.com/microsoft/SkillOpt)（Microsoft，NeurIPS 2026 Spotlight）
+把 **skill 文档当可训练参数**：评分 rollout → 优化器模型提议文本编辑 → 验证门控。
+它不改模型权重，产出是一个 `best_skill.md`。
+
+我们的问题正好对口：一堆互相牵制的旋钮（`far_split`/`ground_radius`/`seg_edge_tau`/
+`skirt_cap`…），今天的经验全散在 CHANGELOG 与注释里，**没有可复现的"该按什么规则选"**。
+
+### 做了什么
+
+1. **`tools/score_params.py`** —— 单图快速评分器：按参数烘焙 → 4 机位渲染 → 返回
+   `hard/soft` 与全部指标。阈值与 `docs/acc32b.md` 一致，分数可以直接对读。
+   默认关掉 SD 外扩（一图 40~150 秒，会把 rollout 拖到不可用）。
+2. **`tools_skillopt/skillopt/envs/photoworld/`** —— SkillOpt 的 env：
+   `adapter.py`（rollout = 读 skill 里的 yaml 参数 → 调评分器）、`dataloader.py`、
+   `seed_skill.md`（种子技能，含判据表与已知经验）。
+3. **`data/photoworld/{train,val,test}`** —— 4/1/1 划分。
+4. **`configs/photoworld/default.yaml`** —— `openai_compatible` 后端 + DeepSeek。
+5. `scripts/train.py` / `eval_only.py` 注册 `photoworld`。
+
+### 结果（诚实）
+
+训练循环**跑通了**：rollout → reflect → slow update 都执行了，但**每张图都返回
+`hard=0 soft=0.0` 且指标为空** —— 评分器在训练进程里调用 multiview 失败
+（`multiview 失败: ` 空 stderr），而**同一个命令单独跑是正常的**（alpine 实测
+`stripe 2.081`、`soft 0.98`）。所以还没有任何成功的技能优化。
+
+### 下一步（已明确）
+
+* 把评分器从"每次起一个子进程"改成**常驻进程**：既是修这个环境问题的最直接办法，
+  也能把单图 60~80 秒降到 10~20 秒（深度模型只加载一次），训练循环才谈得上实用。
+* 然后再跑 8 步以上，比较 `best_skill.md` 与种子技能在 val 上的分数。
+
 ## [2.8.4] - 2026-11-16  · 重跑 32 图 × 32 机位验收：**17/32 → 21/32**
 
 同一批 32 张图、同一套 1024 个机位、同一套判定口径（详见 `docs/acc32b.md`）。

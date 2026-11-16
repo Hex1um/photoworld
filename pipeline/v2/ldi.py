@@ -452,9 +452,17 @@ def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
         hgt = hgt * (1.0 - k) + base_h * k
         gx2 = x0 + (np.arange(nx, dtype=np.float32) / max(1, nx - 1)) * (x1 - x0)
         gz2 = z0 + (np.arange(nz, dtype=np.float32) / max(1, nz - 1)) * (z1 - z0)
-        hgt = hgt + (2.4 * np.sin(gx1[None, :] * 0.012 + 1.9) * np.cos(gz1[:, None] * 0.011 - 0.7)
-                     + 3.0 * np.sin(gx1[None, :] * 0.0051 + gz1[:, None] * 0.0063 + 0.4)) \
-            * np.clip(dist_c / 40.0, 0, 1)
+        # **多层 fBm 起伏**，不是两道正弦波：从空中看，单频波纹/平地都是一张板，
+        # 这正是"起飞后地面变白/发灰、毫无内容"的根因。振幅随距离增长，
+        # 贴近照片的地方保持安静（那里有真实几何，不该被程序化地形打扰）。
+        X2 = gx1[None, :]
+        Z2 = gz1[:, None]
+        ramp = np.clip(dist_c / 260.0, 0.0, 1.0)
+        fbm = (14.0 * np.sin(X2 * 0.0041 + Z2 * 0.0037 + 0.7)
+               + 8.0 * np.sin(X2 * 0.0093 - Z2 * 0.0071 + 2.1) * np.cos(Z2 * 0.0088 + 0.3)
+               + 3.4 * np.sin(X2 * 0.021 + Z2 * 0.017 + 4.4)
+               + 1.3 * np.sin(X2 * 0.047 - Z2 * 0.039 + 1.2))
+        hgt = hgt + fbm * ramp
     if smooth > 0:
         hgt = ndimage.uniform_filter(hgt, size=(3, 3), mode="nearest")
 
@@ -467,6 +475,12 @@ def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
 
     P2 = pos.reshape(-1, 3)
     U2 = huv.reshape(-1, 2)
+    # 法线用高度场梯度算。法线一律朝上时 ndl 恒定 → 什么起伏都看不出来，
+    # 整片就是均匀色块（换色也没用）。有了坡面法线，从空中才有山脊/谷地的明暗。
+    gz_, gx_ = np.gradient(hgt, float(cell), float(cell))
+    nrm_grid = np.stack([-gx_, np.ones_like(hgt), -gz_], axis=-1).astype(np.float32)
+    nrm_grid /= np.maximum(np.linalg.norm(nrm_grid, axis=-1, keepdims=True), 1e-6)
+    N2 = nrm_grid.reshape(-1, 3)
 
     # 顶点色：用**参与该格高度计算的那个像素**的 RGB。
     # 高空看地表本来就该是低频色块；用 UV 去采样照片贴图，相邻格的 UV 差异被放大成
@@ -495,9 +509,12 @@ def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
         v = (0.94 + 0.10 * n1 + 0.04 * n2) * (0.82 + 0.36 * up)
         if extent > 0:
             v = v * np.clip(1.0 - dist_c.reshape(-1) / (extent * 5.0), 0.85, 1.0)
-        C2 = np.stack([base_c[0] * v, base_c[1] * v, base_c[2] * v,
+        # 0.62：俯视是"看地貌"，不是"看原片亮度"。不压回来，亮场景（雪山/灯柱那种
+        # 高调照片）会整片糊成白板 —— 即"起飞后地面变全白"。
+        C2 = np.stack([np.clip(base_c[0] * v * 0.62, 0, 1),
+                       np.clip(base_c[1] * v * 0.62, 0, 1),
+                       np.clip(base_c[2] * v * 0.62, 0, 1),
                        np.ones_like(v)], axis=1).astype(np.float32)
-    N2 = np.tile(np.array([[0.0, 1.0, 0.0]], dtype=np.float32), (P2.shape[0], 1))
     idx2 = []
     for j in range(nz - 1):
         row = j * nx
