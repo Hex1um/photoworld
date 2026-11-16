@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.8.1';
+  const VERSION = '2.8.2';
 
   /* v2 服务的地址：显式 ?api= 优先，其次是自动发现（本机常见端口）。
      自动发现写在启动流程里，不需要使用者改 URL —— 这是"更快捷地启用 v2"的关键。 */
@@ -798,6 +798,9 @@
 
       // 贴地：从网格顶点里烘一张高度图（每格取最低点再平滑），行走时才不会漂在半空。
       // 取"最低"而不是"平均"，是因为分层世界里树/石/山都在地面之上，地面才是能站的那层。
+      // ?dbg=layers：每层画成纯色（红=近景 蓝=远景 绿=裙边），用来定位 artifact 归属
+      const dbgLayers = new URLSearchParams(location.search).get('dbg') === 'layers';
+
       const grid = buildHeightGrid(asset.layers, 90, 2.0);
       // 注意顺序：isWall 必须先于 groundY 求值（写成后面会导致 TDZ 报错，
       // 表现为"资产加载失败"、所有世界一片黑 —— 实测踩过）。
@@ -815,6 +818,7 @@
         heightAt: isWall ? (() => 0) : ((x, z) => grid.at(x, z)),
         eyeHeight: isWall ? 0 : 1.7,
         walkRadius: isWall ? 0 : 55,
+        dbgLayers,
         fogColor: col.bot,
         skyTop: col.top,
         skyHorizon: col.bot,

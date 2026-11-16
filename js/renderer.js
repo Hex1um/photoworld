@@ -156,6 +156,7 @@
         uFogDensity: world.lights.fogDensity,
         uFogAmount: opt.fog === undefined ? 1 : opt.fog,
         uMode: opt.mode || 0,
+        uDebugCol: opt.debugCol || [1, 0, 1],
         uMipBias: opt.mipBias || 0.0,
         uGroundTint: world.groundTint || [0.3, 0.3, 0.3],
         uAlphaTest: opt.alphaTest || 0.3,
@@ -360,9 +361,9 @@
         /* fog 给满（1.0）：400m 外那条边缘如果只吃到 55% 的雾，会和天空的
            horizon 色差出一条明显的白脊（实测背视图远处那条亮线）。
            满雾之后远端正好等于 fogColor，与 skyHorizon 同源，接缝自然消失。 */
-        drawMesh(world, world.meshes.ground, {
-          tex: null, mode: 1, fog: 1.0, mipBias: 0
-        });
+        drawMesh(world, world.meshes.ground,
+          world.dbgLayers ? { mode: 9, debugCol: [0.2, 0.9, 0.3] }
+            : { tex: null, mode: 1, fog: 1.0, mipBias: 0 });
         gl.enable(gl.CULL_FACE);
       }
 
@@ -494,10 +495,13 @@
           if (world.showPlan) {
             // 高空：跳过照片壳（顶面与 tile 已经铺满）
           } else {
-            drawMesh(world, world.meshes.relief, {
-              tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.26, mipBias: 0,
-              backdrop: [0, 0]
-            });
+            drawMesh(world, world.meshes.relief,
+              world.dbgLayers
+                ? { mode: 9, debugCol: [0.95, 0.2, 0.2] }
+                : {
+                  tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.26, mipBias: 0,
+                  backdrop: [0, 0]
+                });
           }
         }
         gl.disable(gl.BLEND);
@@ -569,10 +573,13 @@
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.disable(gl.CULL_FACE);
-        drawMesh(world, world.meshes.backdrop, {
-          tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.30, mipBias: 0,
-          backdrop: [cam.eye[0], cam.eye[2]]
-        });
+        drawMesh(world, world.meshes.backdrop,
+          world.dbgLayers
+            ? { mode: 9, debugCol: [0.15, 0.35, 0.95] }
+            : {
+              tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.30, mipBias: 0,
+              backdrop: [cam.eye[0], cam.eye[2]]
+            });
         gl.disable(gl.BLEND);
         gl.enable(gl.CULL_FACE);
       }

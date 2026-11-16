@@ -839,6 +839,21 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
 
     fwd = -P[..., 2]
     valid = np.isfinite(zs) & (zs > dist_min)
+
+    from scipy import ndimage as _ndi
+    # ---- 补掉"无效深度"造成的一像素洞 -------------------------------
+    # 剪影处单目深度偶尔给 0/NaN，这些像素被排除在 valid 之外 → 任何层都不会在那里建面
+    # → 透出天穹底色（fogColor 的灰）。地面视角里山脊上那条一格宽、颜色恒定的灰带
+    # 就是这么来的（逐项排除过顶面/裙边/分割缝/远景层多占一格）。
+    # 只补"离有效像素 2px 以内"的洞：更远的无效区是真的没数据，不该凭空造。
+    if (~valid).any():
+        dd, (ny, nx2) = _ndi.distance_transform_edt(~valid, return_indices=True,
+                                                      sampling=(1.0, 1.0))
+        fill = (~valid) & (dd <= 2.0)
+        if fill.any():
+            zs = zs.astype(np.float32)
+            zs[fill] = zs[ny[fill], nx2[fill]]
+            valid = valid | fill
     # 断崖掩码要在表示选择之前算：它是"该用网格还是点云"两个判据之一
     cliff, ratio, edge_str = cliff_mask(zs, step, edge_ratio)
 
@@ -977,8 +992,19 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
 
     names = {0: "near", 1: "mid", 2: "backdrop"}
     layers, stats = [], {}
+    # 近/远两层在交界处**互相多占一格**：只让远景层多占 1 格还不够，
+    # 实测交界处仍留一条底色缝（调试模式下红蓝之间那条深棕色细线）。
+    # 两层都膨胀 1 格后重叠，缝被两边一起填上，深度接近也不会看出接缝。
+    mask_near_d = ndimage.binary_dilation(lay == 0, np.ones((3, 3), bool)) & valid
+    mask_far_d = ndimage.binary_dilation(lay == 2, np.ones((3, 3), bool)) & valid
+
     for lid in (0, 1, 2):
-        mask = (lay == lid)
+        if lid == 0:
+            mask = mask_near_d
+        elif lid == 2:
+            mask = mask_far_d
+        else:
+            mask = (lay == lid)
         if not mask.any():
             continue
         q = (ok_quad & mask[:-1, :-1] & mask[1:, :-1] & mask[:-1, 1:] & mask[1:, 1:])

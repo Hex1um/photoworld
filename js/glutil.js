@@ -52,6 +52,9 @@ uniform float uAlphaTest;
 uniform float uExposure;
 uniform float uMipBias;
 uniform vec3 uGroundTint;
+/* 图层调试：把某一层整片画成一个纯色，用来定位"这条artifact是哪一层画的"。
+   mode 9 时直接输出 uDebugCol，绕过所有光照与贴图。 */
+uniform vec3 uDebugCol;
 out vec4 fragColor;
 
 vec3 srgb2lin(vec3 c) {
@@ -74,6 +77,10 @@ void main() {
   vec3 col;
   float alpha = vC.a;
 
+  if (mode == 9) {
+    fragColor = vec4(uDebugCol * uExposure, 1.0);
+    return;
+  }
   if (mode == 3) {
     // 天空穹顶：贴图直出，顶端用顶点 alpha 融进渐变
     col = srgb2lin(texture(uTex, vUV, uMipBias).rgb) * vC.rgb;
