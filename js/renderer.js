@@ -355,7 +355,7 @@
 
       /* 地面裙边（v2.7.1）：顶点色、不吃贴图。它铺在照片区域之外，
          给"视锥外"一块有颜色的地面；用照片贴图会整片偏色（UV 只指向一个像素）。 */
-      if (world.meshes.ground) {
+      if (world.meshes.ground && !world.showPlan) {
         gl.disable(gl.CULL_FACE);
         /* fog 给满（1.0）：400m 外那条边缘如果只吃到 55% 的雾，会和天空的
            horizon 色差出一条明显的白脊（实测背视图远处那条亮线）。
@@ -374,15 +374,19 @@
          于是这片水平顶面在地平线处露成一条亮带（实测：背后那条白带就是它，
          去掉裙边、去掉顶面后就消失 —— 靠这个对照才定位到）。 */
       const topLift = world.heightAt ? cam.eye[1] - world.heightAt(cam.eye[0], cam.eye[2]) : 1e9;
-      if (world.meshes.top && topLift > 6.0) {
+      if (world.meshes.top && (world.showPlan || topLift > 6.0)) {
         gl.disable(gl.CULL_FACE);
         /* mipBias 给到 2.6：单视图重建**没有俯视纹理**，顶面 UV 是从相邻像素借来的，
            贴着看会是一圈圈放射状拉伸。高空看地表本来也该是低频的，
            干脆重度模糊 —— 读作"远处地表"而不是"糊掉的照片"。 */
         /* 顶点色（mode 1），不再采样照片贴图：那个 UV 是从邻格借的，
            贴着看是一圈圈放射状拉伸。 */
+        /* 俯视时地面法线朝上、而这张照片太阳很低（ndl≈0）→ 不补光是一团暗褐；
+           补太狠（1.7）整屏发白。1.3 是实测两端之间的值。
+           fog 1.0 让网格边界正好等于雾色，边缘不再是一条硬边。 */
         drawMesh(world, world.meshes.top, {
-          tex: null, mode: 1, fog: 0.55, mipBias: 0
+          tex: null, mode: 1, fog: 1.0, mipBias: 0,
+          skyAmb: [1.3, 1.26, 1.2]
         });
         gl.enable(gl.CULL_FACE);
       }
@@ -487,9 +491,7 @@
              竖直拉长的崖壁穿出顶面，表现为一片黑红竖条（实测 150m 俯视）。
              超过 6m 就切成"只画顶面 + tile"的俯视模式 —— 这是显式的 LOD 切换，
              不是几何修补：单视图重建本来就没有从上看的样子。 */
-          const reliefLift = world.heightAt
-            ? camera.eye[1] - world.heightAt(camera.eye[0], camera.eye[2]) : 0;
-          if (reliefLift > 6.0) {
+          if (world.showPlan) {
             // 高空：跳过照片壳（顶面与 tile 已经铺满）
           } else {
             drawMesh(world, world.meshes.relief, {
@@ -531,7 +533,7 @@
       }
 
       // 扇环延伸 tile（js/extend.js）：真实几何，随玩家前进逐块生成
-      if (world.extraMeshes && world.extraMeshes.length) {
+      if (world.extraMeshes && world.extraMeshes.length && !world.showPlan) {
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.disable(gl.CULL_FACE);
@@ -563,7 +565,7 @@
       }
 
       // 远景层：无视差背景（跟随相机平移），避免"沙雕沙盘"感
-      if (world.meshes.backdrop) {
+      if (world.meshes.backdrop && !world.showPlan) {
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.disable(gl.CULL_FACE);

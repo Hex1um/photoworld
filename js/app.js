@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.7.2';
+  const VERSION = '2.8.0';
 
   /* v2 服务的地址：显式 ?api= 优先，其次是自动发现（本机常见端口）。
      自动发现写在启动流程里，不需要使用者改 URL —— 这是"更快捷地启用 v2"的关键。 */
@@ -1116,6 +1116,25 @@
     time += dt;
 
     player.update(dt);
+    /* 俯视模式跟着**飞行状态**走：顶面含远景后最高点几百米，按高度阈值永远切不过去。
+       飞行 = 想看全局，直接用它当开关最稳。
+       进入/退出时**显式**摘掉/挂回地面裙边与延伸 tile —— 只靠渲染器里的
+       `!world.showPlan` 判断实测没生效（那道 V 形台阶就是裙边），
+       这里直接把 mesh 从世界上取下来，不依赖渲染器内部条件。 */
+    const planNow = !!player.state.flying;
+    if (planNow !== world.showPlan) {
+      world.showPlan = planNow;
+      if (planNow) {
+        world._stash = { ground: world.meshes.ground, extra: world.extraMeshes };
+        world.meshes.ground = null;
+        world.extraMeshes = [];
+        if (world.tex) world.tex.ground = null;
+      } else if (world._stash) {
+        world.meshes.ground = world._stash.ground;
+        world.extraMeshes = world._stash.extra || [];
+        world._stash = null;
+      }
+    }
     if (world.extender) {
       world.extender.update(player.state.x, player.state.z, now,
         { yaw: player.state.yaw, fov: fovRad() });

@@ -370,7 +370,8 @@ def build_points(P: np.ndarray, rgb: np.ndarray, valid: np.ndarray,
 
 def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
                     cell: float = 1.8, max_cells: int = 190,
-                    smooth: int = 1, rgb: np.ndarray | None = None) -> dict | None:
+                    smooth: int = 1, rgb: np.ndarray | None = None,
+                    extent: float = 240.0) -> dict | None:
     """从点云生成一张"俯视高度图"顶面，供飞行时从上方看。
 
     为什么需要它：v2 是单视图重建，只有一层**朝前的壳**。平视没有问题，
@@ -398,6 +399,10 @@ def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
         return None
     x0, x1 = float(xs.min()), float(xs.max())
     z0, z1 = float(zs.min()), float(zs.max())
+    # 俯视专用：网格要扩出照片足迹，否则足迹外没有顶面（俯视时会露出照片壳的竖条）
+    if extent > 0:
+        x0, x1 = x0 - extent, x1 + extent
+        z0, z1 = z0 - extent, z1 + extent
     if x1 - x0 < 2 or z1 - z0 < 2:
         return None
     nx = int(np.clip(round((x1 - x0) / cell) + 1, 8, max_cells))
@@ -417,9 +422,34 @@ def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
     if filled.sum() < 16:
         return None
     # 空格用最近的有值格补（索引数组就是最近邻）
-    idx = ndimage.distance_transform_edt(~filled, return_distances=False, return_indices=True)
-    hgt = hgt[tuple(idx)]
-    huv = huv[tuple(idx)]
+    dist, (iy_nn, ix_nn) = ndimage.distance_transform_edt(
+        ~filled, return_indices=True, sampling=(cell, cell))
+    hgt_raw = hgt.copy()
+    hgt = hgt_raw[iy_nn, ix_nn]
+    huv = huv[iy_nn, ix_nn]
+    if extent > 0:
+        # 区外沿边界高度向"地面基准"缓慢收敛，并叠低频起伏。
+        #
+        # **距离必须用连续量**：`distance_transform_edt` 给的是逐格的离散距离，
+        # 相邻格差一格 → 高度一格格跳 → 从空中看就是一道 V 形台阶（正好是足迹形状）。
+        # 这里改成到"照片足迹矩形"的解析距离（区内为 0），完全连续。
+        hw = (xs.max() - xs.min()) * 0.5
+        hd = (zs.max() - zs.min()) * 0.5
+        cx = (xs.max() + xs.min()) * 0.5
+        cz = (zs.max() + zs.min()) * 0.5
+        gx1 = x0 + (np.arange(nx, dtype=np.float32) / max(1, nx - 1)) * (x1 - x0)
+        gz1 = z0 + (np.arange(nz, dtype=np.float32) / max(1, nz - 1)) * (z1 - z0)
+        ddx = np.maximum(np.abs(gx1[None, :] - cx) - hw, 0.0)
+        ddz = np.maximum(np.abs(gz1[:, None] - cz) - hd, 0.0)
+        dist_c = np.sqrt(ddx * ddx + ddz * ddz)          # 区内 0，区外连续递增
+        k = 1.0 - np.exp(-dist_c / 120.0)
+        base_h = float(np.median(hgt_raw[filled]))
+        hgt = hgt * (1.0 - k) + base_h * k
+        gx2 = x0 + (np.arange(nx, dtype=np.float32) / max(1, nx - 1)) * (x1 - x0)
+        gz2 = z0 + (np.arange(nz, dtype=np.float32) / max(1, nz - 1)) * (z1 - z0)
+        hgt = hgt + (2.4 * np.sin(gx1[None, :] * 0.012 + 1.9) * np.cos(gz1[:, None] * 0.011 - 0.7)
+                     + 3.0 * np.sin(gx1[None, :] * 0.0051 + gz1[:, None] * 0.0063 + 0.4)) \
+            * np.clip(dist_c / 40.0, 0, 1)
     if smooth > 0:
         hgt = ndimage.uniform_filter(hgt, size=(3, 3), mode="nearest")
 
@@ -458,6 +488,8 @@ def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
         n1 = np.sin(P2[:, 0] * 0.013 + 1.1) * np.cos(P2[:, 2] * 0.015 - 0.5)
         n2 = np.sin(P2[:, 0] * 0.06 + P2[:, 2] * 0.045 + 2.0)
         v = (0.94 + 0.10 * n1 + 0.04 * n2) * (0.82 + 0.36 * up)
+        if extent > 0:
+            v = v * np.clip(1.0 - dist_c.reshape(-1) / (extent * 5.0), 0.85, 1.0)
         C2 = np.stack([base_c[0] * v, base_c[1] * v, base_c[2] * v,
                        np.ones_like(v)], axis=1).astype(np.float32)
     N2 = np.tile(np.array([[0.0, 1.0, 0.0]], dtype=np.float32), (P2.shape[0], 1))
@@ -1005,7 +1037,8 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
         near_mask = valid & (fwd < max(60.0, far_split * 1.5))
         if sky is not None and sky.shape == near_mask.shape:
             near_mask &= ~sky
-        skin = build_top_skin(P, uv, near_mask, cell=top_skin_cell, rgb=rgb)
+        skin = build_top_skin(P, uv, near_mask, cell=top_skin_cell * 1.6, rgb=rgb,
+                              extent=float(ground_radius) * 1.15, max_cells=300)
         if skin is not None:
             layers.append(skin)
             stats["top"] = {"vertices": int(skin["pos"].shape[0]),
