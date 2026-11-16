@@ -487,12 +487,14 @@ try {
     }
 
     rec.ok = true;
-    // 聚合：均值 + 最差视角（改进前/后对比看这两个数）
+    // 聚合：判据项取最差机位（单个机位的严重缺陷不该被其他视角摊薄），
+    // 展示/诊断项取均值。score_params.render_score 也按同一口径从 views 重算。
     const mean = (k) => +(rec.views.reduce((s, v) => s + v[k], 0) / rec.views.length).toFixed(4);
+    const worst = (k) => +Math.max(...rec.views.map((v) => v[k])).toFixed(4);
     rec.agg = {
-      voidFrac: mean('voidFrac'), darkFrac: mean('darkFrac'),
-      innerVoid: mean('innerVoid'), lowVoid: mean('lowVoid'),
-      borderVoid: mean('borderVoid'), stripe: mean('stripe'), detail: mean('detail'),
+      voidFrac: worst('voidFrac'), darkFrac: mean('darkFrac'),
+      innerVoid: worst('innerVoid'), lowVoid: worst('lowVoid'),
+      borderVoid: mean('borderVoid'), stripe: worst('stripe'), detail: mean('detail'),
       ...Object.fromEntries(CLARITY_KEYS.map((k) => [k, mean(k)])),
       worstInner: +Math.max(...rec.views.map((v) => v.innerVoid)).toFixed(4),
       worstLow: +Math.max(...rec.views.map((v) => v.lowVoid)).toFixed(4),

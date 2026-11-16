@@ -11,20 +11,24 @@
 ## 结构
 
 ```
-tools_skillopt/                     # SkillOpt 本体（clone 在 photoworld 的同级目录）
-  skillopt/envs/photoworld/
-    adapter.py                      # EnvAdapter：rollout = 烘焙+渲染+评分
-    dataloader.py                   # 读 data/photoworld/{train,val,test}/items.json
-    seed_skill.md                   # 种子技能（含 params yaml 块）
-  configs/photoworld/default.yaml   # 训练配置（deepseek + openai_compatible 后端）
-photoworld/
-  tools/score_params.py             # 单图快速评分器（烘焙 → 4 机位 → 指标 → hard/soft）
-  data/photoworld/{train,val,test}/ # 4 / 1 / 1 张的划分
+photoworld/                         # 本仓库（权威副本在这里）
+  skillopt/
+    envs/photoworld/
+      adapter.py                    # EnvAdapter：rollout = LLM 出参→烘焙+渲染+评分
+      dataloader.py                 # 读 data/photoworld/{train,val,test}/items.json
+      seed_skill.md                 # 种子技能（含 params yaml 块）
+    configs/photoworld.yaml         # 训练配置（llm_target: true, views: 8）
+  tools/score_params.py             # 单图评分器（烘焙 → 8 机位 → 指标 → hard/soft）
+  tools/sync_skillopt.py            # 把上面的 skillopt/ 推到同级 clone
+  data/photoworld/{train,val,test}/ # 数据划分（本仓库未入库，见 docs/ISSUES.md）
+../tools_skillopt/                  # SkillOpt 独立 clone（训练实际从这里跑）
+  scripts/train.py                  # 由 sync_skillopt.py 同步 env/config 后运行
 ```
 
-关键设计：**target 不是 LLM**。这里的"执行者"是一条确定性流水线，
-rollout 只从 skill 文档里读 yaml 参数 → 烘焙 → 渲染 → 打分。
-优化器模型只负责改 skill 文本，所以评分的可信度完全来自我们自己的指标。
+关键设计：**target 就是 LLM**（`llm_target: true`，见 configs/photoworld.yaml）。
+每轮由 target 读技能准则、输出一组烘焙参数 → 确定性流水线烘焙 → 渲染 → 打分；
+不达标时把实测指标喂回 target 再要一组（`llm_rounds: 2`）。
+优化器模型负责改 skill 文本。评分的可信度来自我们自己的指标（见下方"判定口径"）。
 
 ## 运行：双击「PHOTOWORLD 训练」
 
@@ -52,7 +56,7 @@ cd ../tools_skillopt
 OPENAI_COMPATIBLE_BASE_URL=https://api.deepseek.com/v1 \
 OPENAI_COMPATIBLE_API_KEY=$DEEPSEEK_API_KEY OPENAI_COMPATIBLE_MODEL=deepseek-chat \
 PW_SCORE_SERVER=http://127.0.0.1:8300 \
-python scripts/train.py --config configs/photoworld/default.yaml
+python scripts/train.py --config configs/photoworld.yaml
 ```
 
 ### 训练循环现在真的转起来了
@@ -90,21 +94,30 @@ python tools/score_params.py --image worlds/desert.jpg --base http://127.0.0.1:8
 
 ## 判定口径
 
-与 `docs/acc32b.md` 完全一致（阈值改了要两边同步）：
+以 `tools/score_params.py` 的 `THRESH` / `WEIGHT` 为准（改阈值要同步 `tools/acc_report.py`）：
 
 | 指标 | 阈值 | soft 权重 |
 |---|---|---|
-| `stripe` | ≤ 2.0 | 0.40 |
-| `innerVoid` | ≤ 0.06 | 0.20 |
-| `voidFrac` | ≤ 0.10 | 0.20 |
-| `lowVoid` | ≤ 0.08 | 0.20 |
+| `stripe` | ≤ 2.0 | 0.24 |
+| `innerVoid` | ≤ 0.06 | 0.12 |
+| `voidFrac` | ≤ 0.10 | 0.12 |
+| `lowVoid` | ≤ 0.08 | 0.12 |
+| `voidBlobs` | ≤ 260 | 0.12 |
+| `streakBlobs` | ≤ 200 | 0.16 |
+| `voidRunMax` | ≤ 0.50 | 0.08 |
+| `voidBlobMax` | ≤ 0.22 | 0.04 |
 
-四项全过 → `hard=1`。`soft` 按超阈值程度扣减。
+八项全过 → `hard=1`。`soft` 按超阈值程度扣减，权重合计 1.0。
+
+**聚合口径**：8 项判据一律取所有机位里的**最差值**（`views: 8` 环拍），
+单个机位的贯穿缝/大洞不会被另外 7 个好视角摊薄；`detail`/`darkFrac` 等
+只用于展示的指标仍取均值。指标缺项一律判无效（hard=0/soft=0），不给满分。
+注意此口径自 v2.15.4 起生效，跨版 soft 分数不可直接比较。
 
 ## 成本
 
 `score_params.py` 默认**关掉 SD 外扩**（`outpaint=1.0`）：外扩一张要 40~150 秒，
 rollout 会被拖到不可用。关掉后单图约 60~80 秒（含深度模型加载）。
 
-要更快的循环，可以把评分器改成常驻进程（模型只加载一次），这样单图能降到 10~20 秒。
-这是下一步的优化点。
+评分器已把 `api.py` 做成进程内常驻单例（v2.15.2 起）：深度模型只加载一次，
+重复参数的烘焙可直接命中内容哈希缓存。此前每次评分都重建模块、重载约 1.3GB 权重。

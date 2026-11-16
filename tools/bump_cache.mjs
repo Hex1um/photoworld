@@ -1,53 +1,31 @@
 #!/usr/bin/env node
 /**
- * 静态资源缓存击穿：index.html 里所有 `?v=x.y.z` 必须同版本，否则浏览器
- * 会混用新旧 JS/CSS（改了代码但拿不到新代码，是这类无构建站点最常见的事故）。
+ * 静态资源缓存击穿（兼容入口）。
+ *
+ * 逻辑已用 Python 重写在 bump_cache.py（"尽量用 Python"），本文件保留为薄包装，
+ * 让旧的 `node tools/bump_cache.mjs ...` 调用方无需改动。参数/输出/退出码透传。
  *
  *   node tools/bump_cache.mjs 1.10.0    # 升版并写回
- *   node tools/bump_cache.mjs --check  # 只校验一致性，供 CI 使用
+ *   node tools/bump_cache.mjs --check  # 只校验一致性
  */
-import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const FILE = path.join(ROOT, 'index.html');
-const arg = process.argv[2] || '--check';
-const src = fs.readFileSync(FILE, 'utf8');
-const versions = [...src.matchAll(/\?v=(\d+\.\d+\.\d+)/g)].map((m) => m[1]);
-const tags = [...src.matchAll(/\?v=/g)].length;
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const PY = path.join(HERE, 'bump_cache.py');
+const args = process.argv.slice(2);
 
-if (!tags || versions.length !== tags) {
-  console.error(`index.html 有 ${tags} 个版本串，但只解析出 ${versions.length} 个合法版本号`);
+// Windows 上解释器名可能是 python 或 python3，逐个尝试
+const candidates = process.platform === 'win32' ? ['python', 'python3'] : ['python3', 'python'];
+let r = null;
+for (const cmd of candidates) {
+  r = spawnSync(cmd, [PY, ...args], { stdio: 'inherit' });
+  if (r.error && r.error.code === 'ENOENT') continue;
+  break;
+}
+if (!r || r.error) {
+  console.error('找不到 Python 解释器，无法运行 bump_cache.py');
   process.exit(1);
 }
-const current = [...new Set(versions)];
-if (current.length !== 1) {
-  console.error('版本串不一致：' + current.join(', '));
-  process.exit(1);
-}
-
-if (arg === '--check') {
-  console.log(`index.html ${tags} 个资源引用全部为 v${current[0]}`);
-} else {
-  if (!/^\d+\.\d+\.\d+$/.test(arg)) {
-    console.error('版本号格式应为 x.y.z，例如 1.10.0');
-    process.exit(1);
-  }
-  const out = src.replace(/\?v=\d+\.\d+\.\d+/g, `?v=${arg}`);
-  fs.writeFileSync(FILE, out);
-  // version.json：给页面里的「过期缓存自检」比对用（GitHub Pages 的 HTML 缓存
-  // 最长 10 分钟，手机浏览器还可能更久，光靠 ?v= 拿不到新的 index.html）
-  fs.writeFileSync(path.join(ROOT, 'version.json'),
-    JSON.stringify({ version: arg, builtAt: new Date().toISOString() }, null, 1) + '\n');
-  // app.js 里的 VERSION 也一起改：v1.25.0 那次 bump 就漏了它，顶栏徽标与
-  // version.json 对不上，排查了半天。第三处手改点必须自动化。
-  const APPF = path.join(ROOT, 'js', 'app.js');
-  if (fs.existsSync(APPF)) {
-    const a = fs.readFileSync(APPF, 'utf8');
-    const b = a.replace(/const VERSION = '\d+\.\d+\.\d+';/, `const VERSION = '${arg}';`);
-    if (b !== a) fs.writeFileSync(APPF, b);
-  }
-  console.log(`index.html: v${current[0]} → v${arg}（${tags} 处缓存串已同步；`
-    + 'version.json 与 js/app.js VERSION 已更新）');
-}
+process.exit(r.status === null ? 1 : r.status);

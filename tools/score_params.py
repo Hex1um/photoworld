@@ -125,14 +125,12 @@ def _gpu_lock():
 
 
 # api.py 模块单例。它顶层持有两个**进程级**状态：_model（1.3GB 深度权重）
-# 和 _cache（按图片内容哈希的 GLB 缓存，24 条上限）。旧实现每次 bake() 都
-# spec_from_file_location + exec_module 重建模块，把这两个状态清零：
-#   · 每张图重新加载 1.3GB 权重（单步 290~380 秒的主要来源）；
-#   · 内容哈希缓存永远命中不了，adapter 注释"共享已加载的模型"与事实不符。
-# 这里缓存模块实例，并用 (mtime_ns, size) 指纹在 api.py 变更时自动重载。
-# 状态放 sys.modules 而非本模块全局变量：score_server 每次都会重建
-# score_params 模块（为拿 _gpu_lock），放本模块会被反复清零，等于没修。
-_API_REGISTRY_KEY = "_photoworld_v2_api_registry"
+# api.py 进程内单例：旧实现每次 bake() 都 exec_module 重建 api.py，把它的
+# _model（1.3GB 权重）和 _cache（内容哈希 GLB 缓存）清零——每张图重载模型、
+# 缓存永远命中不了（单步 290~380 秒的主要来源）。现在模块只加载一次，
+# 并用 (mtime_ns, size) 指纹在 api.py 变更时重载。模块级变量即可：训练侧
+# adapter 缓存本模块、score_server 走自己的 api 缓存，都不会重建本模块后调 bake()。
+_API_CACHE: dict = {"fingerprint": None, "module": None, "loads": 0}
 _API_LOAD_LOCK = threading.Lock()
 
 
@@ -144,18 +142,13 @@ def _get_api():
     st = os.stat(path)
     fingerprint = (st.st_mtime_ns, st.st_size)
     with _API_LOAD_LOCK:
-        reg = sys.modules.get(_API_REGISTRY_KEY)
-        if reg is None:
-            reg = {"fingerprint": None, "module": None, "loads": 0}
-            sys.modules[_API_REGISTRY_KEY] = reg
-        if reg["module"] is not None and reg["fingerprint"] == fingerprint:
-            return reg["module"]
+        if _API_CACHE["module"] is not None and _API_CACHE["fingerprint"] == fingerprint:
+            return _API_CACHE["module"]
         spec = importlib.util.spec_from_file_location("v2api", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        reg["fingerprint"] = fingerprint
-        reg["module"] = mod
-        reg["loads"] += 1
+        _API_CACHE.update(fingerprint=fingerprint, module=mod)
+        _API_CACHE["loads"] += 1
         return mod
 
 
@@ -169,6 +162,30 @@ def bake(image: str, params: dict, out_glb: str) -> dict:
     with open(out_glb, "wb") as f:
         f.write(glb)
     return man
+
+
+def aggregate_views(views: list) -> dict:
+    """把逐视角指标聚合成 agg：判据项取「最差机位」，展示项取均值。
+
+    旧口径把 voidFrac/innerVoid/lowVoid/stripe 四个判据取均值，单个机位的严重
+    缺陷（贯穿缝、大洞、拉丝）会被另外 7 个好视角摊薄到约 1/8，训练目标里
+    根本看不到真实失败。改为：THRESH 的 8 项一律取所有视角的最大值（最差），
+    与块数类（voidBlobs/voidBlobMax/voidRunMax，multiview 侧本就取 max）统一。
+    detail/darkFrac/borderVoid/centerHF/centerLapVar 等只用于展示/诊断，继续取均值。
+
+    缺项的判据返回 None——交给 score() 判 invalid，不给"缺项=满分"留口子。
+    """
+    if not views:
+        return {}
+    out: dict = {}
+    for k in THRESH:
+        vals = [v[k] for v in views if isinstance(v, dict) and isinstance(v.get(k), (int, float))]
+        out[k] = max(vals) if len(vals) == len(views) else None
+    for k in ("detail", "darkFrac", "borderVoid", "centerHF", "centerLapVar"):
+        vals = [v[k] for v in views if isinstance(v, dict) and isinstance(v.get(k), (int, float))]
+        if vals:
+            out[k] = round(sum(vals) / len(vals), 4)
+    return out
 
 
 def render_score(glb_rel: str, base: str, views: int, out_dir: str) -> dict:
@@ -193,7 +210,13 @@ def render_score(glb_rel: str, base: str, views: int, out_dir: str) -> dict:
     res = d.get("results") or []
     if not res:
         raise RuntimeError("multiview 没有返回结果")
-    return res[0].get("agg") or {}
+    rec = res[0]
+    # 用逐视角指标重算 agg：判据项取最差机位（见 aggregate_views），
+    # 不再直接信任 multiview.mjs 里取均值的 agg——那是观察口径，不是判据口径。
+    per_view = rec.get("views") or []
+    if per_view:
+        return aggregate_views(per_view)
+    return rec.get("agg") or {}
 
 
 def score(agg: dict) -> tuple[int, float, list[str]]:

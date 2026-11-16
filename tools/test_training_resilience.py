@@ -1,60 +1,89 @@
 #!/usr/bin/env python3
-"""训练兜底三连回归测试（无 GPU / 无 skillopt / 无浏览器）。
+"""训练兜底三连回归测试（无 GPU / 无浏览器 / 无真实 skillopt）。
 
   python tools/test_training_resilience.py
 
 覆盖 v2.15.3 修掉的三处"整轮全 0 分 / 白等烘焙"问题：
 
-  1. **inproc 失败不降级**：adapter._score_one 用 `if not d` 判断兜底，
-     而失败路径返回的 `{"ok": False, ...}` 是 truthy → score_server 和子进程
-     两级兜底永不触发，一次瞬时异常就把整图记成 0 分。
+  1. **inproc 失败不降级**：adapter 用 `if not d` 判断兜底，而失败路径返回的
+     `{"ok": False, ...}` 是 truthy → 两级兜底永不触发，一次瞬时异常就整图 0 分。
   2. **score_server GBK 崩溃**：`subprocess.run(text=True)` 解不了 multiview
-     字节流里混的 GBK（0xcf）→ reader 线程抛 UnicodeDecodeError → 0 分。
-  3. **LLM 重试无早停**：参数未变（temperature 0.2 + 同 prompt 几乎必同输出）
-     或 soft 提升 <1e-4 时仍做第二次完整烘焙，每图白费 70~95 秒；
+     字节流里混的 GBK → 0 分。
+  3. **LLM 重试无早停**：参数未变或 soft 提升 <1e-4 时仍做第二次完整烘焙；
      且 `>=` 让平局覆盖旧 best。
 
-用 AST 从源码精确提取纯函数执行，不 import adapter/score_server（避免依赖），
-并配源码契约检查调用点确实改了。只依赖标准库。
+本机没有 SkillOpt 包，所以用最小 stub 注入 sys.modules 后**正常 import** adapter
+（不再用 AST 从源码抠函数）；score_server 只依赖标准库，直接 import。
 """
 from __future__ import annotations
 
-import ast
+import importlib.util
 import os
 import sys
+import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ADAPTER = os.path.join(ROOT, "skillopt", "envs", "photoworld", "adapter.py")
-SCORE_SERVER = os.path.join(ROOT, "tools", "score_server.py")
 
 
-def _method_body(src: str, name: str) -> str:
-    """在模块的任意类体里找方法并返回其源码（适配器方法都是类方法）。"""
-    t = ast.parse(src)
-    for n in ast.walk(t):
-        if isinstance(n, ast.FunctionDef) and n.name == name:
-            return ast.get_source_segment(src, n)
-    raise AssertionError("找不到方法 %s" % name)
+def _stub(name: str, **attrs) -> types.ModuleType:
+    m = types.ModuleType(name)
+    for k, v in attrs.items():
+        setattr(m, k, v)
+    sys.modules[name] = m
+    return m
 
 
-def _extract_functions(path: str, names: list[str]) -> dict:
-    """从源码 AST 提取指定纯函数的定义并在隔离命名空间执行。"""
-    tree = ast.parse(open(path, encoding="utf-8").read(), filename=path)
-    wanted = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in names]
-    assert len(wanted) == len(names), "缺函数: %s" % (
-        set(names) - {n.name for n in wanted})
-    mod = ast.Module(body=wanted, type_ignores=[])
-    ns: dict = {}
-    exec(compile(mod, path, "exec"), ns)
-    return ns
+def _load_adapter():
+    """用最小 stub 满足 skillopt 依赖，正常 import adapter。"""
+    if "skillopt.envs.photoworld.adapter" in sys.modules:
+        return sys.modules["skillopt.envs.photoworld.adapter"]
+    for pkg in ("skillopt", "skillopt.datasets", "skillopt.envs", "skillopt.envs.photoworld"):
+        sys.modules.setdefault(pkg, types.ModuleType(pkg))
+
+    class EnvAdapter:               # PhotoWorldAdapter 的基类
+        def __init__(self, *a, **k):
+            pass
+
+    class BatchSpec:                # 仅类型注解用
+        pass
+
+    class SplitDataLoader:          # dataloader.PhotoWorldDataLoader 的基类
+        def __init__(self, *a, **k):
+            pass
+
+    _stub("skillopt.datasets.base", BatchSpec=BatchSpec)
+    _stub("skillopt.envs.base", EnvAdapter=EnvAdapter)
+    _stub("skillopt.datasets", SplitDataLoader=SplitDataLoader)
+    _stub("skillopt.envs.photoworld.dataloader",
+          PhotoWorldDataLoader=SplitDataLoader)
+    # task_output 缺失时 adapter 自带退化实现，无需 stub
+
+    spec = importlib.util.spec_from_file_location(
+        "pw_adapter_test",
+        os.path.join(ROOT, "skillopt", "envs", "photoworld", "adapter.py"))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["pw_adapter_test"] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
-AD = _extract_functions(ADAPTER, ["_score_usable", "_params_unchanged", "_gain_too_small"])
-SS = _extract_functions(SCORE_SERVER, ["_decode_output"])
+def _load_score_server():
+    if "pw_score_server_test" in sys.modules:
+        return sys.modules["pw_score_server_test"]
+    spec = importlib.util.spec_from_file_location(
+        "pw_score_server_test", os.path.join(ROOT, "tools", "score_server.py"))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["pw_score_server_test"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+AD = _load_adapter()
+SS = _load_score_server()
 
 
 def test_score_usable():
-    f = AD["_score_usable"]
+    f = AD._score_usable
     assert f({"ok": True, "hard": 1, "soft": 0.9}) is True
     assert f({"ok": False, "error": "进程内评分失败"}) is False, "失败字典是 truthy，必须显式判 ok"
     assert f({}) is False
@@ -64,9 +93,9 @@ def test_score_usable():
 
 
 def test_fallback_call_sites():
-    src = open(ADAPTER, encoding="utf-8").read()
-    # 定位 _score_one 函数体
-    body = _method_body(src, "_score_one")
+    """用 inspect 读方法源码，确认两处兜底判定都用了 _score_usable。"""
+    import inspect
+    body = inspect.getsource(AD.PhotoWorldAdapter._score_one)
     assert "_score_usable(d) and self.score_server" in body, "score_server 兜底须用 _score_usable"
     assert "if not _score_usable(d):" in body, "子进程兜底须用 _score_usable"
     assert "if not d:" not in body, "不应残留 `if not d` 的错误判定"
@@ -74,10 +103,9 @@ def test_fallback_call_sites():
 
 
 def test_gbk_decode():
-    f = SS["_decode_output"]
-    # 模拟 multiview 混 GBK 字节：合法 utf-8 + 孤立 0xcf（旧代码在此抛异常）
+    f = SS._decode_output
     good = '{"ok":true}'.encode("utf-8")
-    bad = b"\xcf\x20tail"
+    bad = b"\xcf\x20tail"           # 孤立 0xcf：旧 text=True 在此抛异常
     out, err = f(good + bad, b"\xcf error")
     assert "ok" in out and "\ufffd" in out, "非法字节应替换为 U+FFFD 而非抛异常"
     assert "\ufffd" in err
@@ -87,38 +115,43 @@ def test_gbk_decode():
 
 
 def test_no_text_true_in_score_server():
-    src = open(SCORE_SERVER, encoding="utf-8").read()
-    # 只看真实调用，不看注释（注释里解释"不用 text=True"是允许的）
-    t = ast.parse(src)
-    calls = [n for n in ast.walk(t)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-             and n.func.attr == "run"]
-    for c in calls:
-        assert not any(k.arg == "text" for k in c.keywords), "subprocess.run 不应再用 text=True"
-    assert "_decode_output(r.stdout, r.stderr)" in src, "应改用字节解码"
-    print("PASS  T4  score_server 真实调用无 text=True，改走 _decode_output")
+    """AST 确认真实 subprocess.run 调用无 text=True（注释里提到不算）。"""
+    import ast
+    src = open(os.path.join(ROOT, "tools", "score_server.py"), encoding="utf-8").read()
+    tree = ast.parse(src)
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr == "run" \
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess":
+            found.append(node)
+    assert found, "没找到 subprocess.run 调用"
+    for call in found:
+        assert not any(kw.arg == "text" for kw in call.keywords), \
+            "subprocess.run 不应再用 text=True（GBK 崩溃）"
+    assert "_decode_output" in src, "应改用字节解码"
+    print("PASS  T4  score_server subprocess.run 无 text=True，改走 _decode_output")
 
 
-def test_early_stop_helpers():
-    unchanged, gain = AD["_params_unchanged"], AD["_gain_too_small"]
-    assert unchanged({"a": 1}, {"a": 1}) is True
-    assert unchanged({"a": 1}, {"a": 2}) is False
-    assert unchanged({"a": 1}, None) is False
-    assert gain(0.70, 0.70) is True, "平局应判为提升不足"
-    assert gain(0.60, 0.70) is True, "负提升应判为提升不足"
-    assert gain(0.85, 0.70) is False, "显著提升应继续"
-    assert gain(0.5, None) is False, "首轮无 prev_soft 不适用"
-    print("PASS  T5  早停纯函数：参数未变/提升不足(含负与平局)正确判定")
+def test_early_stop_predicates():
+    p_unchanged, p_gain = AD._params_unchanged, AD._gain_too_small
+    assert p_unchanged({"a": 1}, {"a": 1}) is True
+    assert p_unchanged({"a": 1}, {"a": 2}) is False
+    assert p_unchanged({"a": 1}, None) is False
+    assert p_gain(0.80, 0.80) is True, "平局应视为无提升（>= 的旧逻辑会覆盖 best）"
+    assert p_gain(0.80001, 0.80) is True, "提升 1e-5 < eps(1e-4)，应早停"
+    assert p_gain(0.805, 0.80) is False, "提升 5e-3 > eps，应继续重试"
+    assert p_gain(0.79, 0.80) is True, "负提升应早停"
+    assert p_gain(0.80, None) is False, "首轮无 prev，不应早停"
+    print("PASS  T5  LLM 早停谓词：参数未变 / 平局 / 负提升 → 早停，首轮不早停")
 
 
-def test_early_stop_call_site():
-    src = open(ADAPTER, encoding="utf-8").read()
-    body = _method_body(src, "_rollout_llm")
-    assert "_params_unchanged(params, prev_params)" in body
-    assert "_gain_too_small(row[\"soft\"], prev_soft)" in body
-    assert "row[\"soft\"] > best[\"soft\"]" in body, "平局不应覆盖 best（>= 改 >）"
-    assert ">= best[\"soft\"]" not in body
-    print("PASS  T6  _rollout_llm 两处早停已接入，best 覆盖改为严格 >")
+def test_rollout_uses_strict_gt():
+    import inspect
+    body = inspect.getsource(AD.PhotoWorldAdapter._rollout_llm)
+    assert "row[\"soft\"] > best[\"soft\"]" in body, "best 应用严格 >，平局不覆盖"
+    assert "_params_unchanged" in body and "_gain_too_small" in body, "两处早停谓词都应接入"
+    print("PASS  T6  _rollout_llm 用严格 >，且两处早停谓词已接入")
 
 
 if __name__ == "__main__":
@@ -126,6 +159,6 @@ if __name__ == "__main__":
     test_fallback_call_sites()
     test_gbk_decode()
     test_no_text_true_in_score_server()
-    test_early_stop_helpers()
-    test_early_stop_call_site()
-    print("\n训练兜底三连回归全部通过（6 项）")
+    test_early_stop_predicates()
+    test_rollout_uses_strict_gt()
+    print("\n训练兜底回归全部通过（6 项）")

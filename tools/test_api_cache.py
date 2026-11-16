@@ -6,7 +6,8 @@
 覆盖 v2.15.2（P0 性能修复，因远端在 v2.13.2 后推进到 v2.15.1 而重做）：旧 `score_params.bake()` 每次调用都
 `spec_from_file_location + exec_module` 重建 api.py，把它的进程级
 `_model`（1.3GB 权重）和 `_cache`（内容哈希 GLB 缓存）清零。
-现在 `_get_api()` 缓存模块实例并用 (mtime_ns, size) 指纹自动失效。
+现在 `_get_api()` 用模块级 `_API_CACHE` 缓存模块实例（简化自旧的 sys.modules 注册表），
+并用 (mtime_ns, size) 指纹自动失效。
 
 用临时假 api.py 替身，避免真的加载深度模型；只依赖标准库。
 """
@@ -34,7 +35,7 @@ SP = _load_sp()
 
 
 def _clear_registry():
-    SP.sys.modules.pop(SP._API_REGISTRY_KEY, None)
+    SP._API_CACHE.update(fingerprint=None, module=None, loads=0)
 
 
 def _make_fake_root(value: int = 42):
@@ -58,7 +59,7 @@ def test_cache_hit_same_module():
         b = SP._get_api()
         assert a is b, "同指纹下必须返回同一模块实例（模型/缓存才能保住）"
         assert a.VALUE == 42, "假 api.py 应正常执行"
-        reg = SP.sys.modules[SP._API_REGISTRY_KEY]
+        reg = SP._API_CACHE
         assert reg["loads"] == 1, "只应加载一次，实际 %d 次" % reg["loads"]
         assert reg["fingerprint"] == (os.stat(fake).st_mtime_ns, os.stat(fake).st_size)
         print("PASS  C1  同指纹复用同一 api 模块实例，仅加载一次")
@@ -81,7 +82,7 @@ def test_fingerprint_change_reloads():
         st = os.stat(fake)
         os.utime(fake, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
         b = SP._get_api()
-        reg = SP.sys.modules[SP._API_REGISTRY_KEY]
+        reg = SP._API_CACHE
         assert b is not a, "文件变更后必须重建模块"
         assert b.VALUE == 99, "新模块应加载新代码，实际 VALUE=%r" % getattr(b, "VALUE", None)
         assert reg["loads"] == 2, "应恰好重载一次，实际 %d 次" % reg["loads"]
@@ -100,8 +101,9 @@ def test_bake_uses_get_api():
     body = src[i:j if j != -1 else len(src)]
     assert "api = _get_api()" in body, "bake() 必须走 _get_api()"
     assert "spec_from_file_location" not in body, "bake() 不应再直接重建模块"
-    assert "_API_REGISTRY_KEY" in src, "应有进程级 api 注册表"
-    print("PASS  C3  bake() 走 _get_api()，不再每次 exec_module 重建")
+    assert "_API_CACHE" in src and "_API_REGISTRY_KEY" not in src, \
+        "应用模块级 _API_CACHE 单例，不再用 sys.modules 注册表"
+    print("PASS  C3  bake() 走 _get_api()（模块级单例），不再每次 exec_module 重建")
 
 
 if __name__ == "__main__":

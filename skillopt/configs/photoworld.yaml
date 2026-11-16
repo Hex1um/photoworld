@@ -1,8 +1,8 @@
 # PHOTOWORLD：把"烘焙参数"当作可训练技能。
 #
-# 与其它基准最大的不同：target **不是 LLM**，而是一条确定性流水线。
-# rollout 只读 skill 里的 yaml 参数、跑烘焙+渲染+评分，所以 target 的模型名并不重要；
-# 真正花钱的是 **optimizer**（它负责改 skill 文本）。
+# target **就是 LLM**（llm_target: true）：先由 target 读技能准则、输出一组烘焙参数，
+# 再走确定性流水线烘焙+渲染+评分；不达标时把指标喂回 target 再要一组（llm_rounds: 2）。
+# optimizer 负责改 skill 文本，两边都是 LLM 调用；确定性流水线只在评分环节。
 #
 # 后端用 openai_compatible（DeepSeek 兼容 OpenAI 协议）。凭据走环境变量：
 #   OPENAI_COMPATIBLE_BASE_URL / OPENAI_COMPATIBLE_API_KEY / OPENAI_COMPATIBLE_MODEL

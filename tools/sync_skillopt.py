@@ -24,7 +24,7 @@ SRC_ENV = os.path.join(ROOT, "skillopt", "envs", "photoworld")
 SRC_CFG = os.path.join(ROOT, "skillopt", "configs", "photoworld.yaml")
 
 REGISTER = '''    try:
-        # PHOTOWORLD：把烘焙参数当技能训练（target 是确定性流水线，不是 LLM）
+        # PHOTOWORLD：把烘焙参数当技能训练（target 是 LLM，出参后走确定性评分流水线）
         from skillopt.envs.photoworld.adapter import PhotoWorldAdapter
         _ENV_REGISTRY["photoworld"] = PhotoWorldAdapter
     except ImportError:

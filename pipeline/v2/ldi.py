@@ -375,7 +375,7 @@ def build_points(P: np.ndarray, rgb: np.ndarray, valid: np.ndarray,
 
 
 
-def cap_depth_gradient(z: np.ndarray, k: float = 1.35, iters: int = 10) -> np.ndarray:
+def cap_depth_gradient(z: np.ndarray, k: float = 1.35, iters: int = 12) -> np.ndarray:
     """限制相邻像素之间的**深度跳变**，把"拉向远方的长尾"截断。
 
     问题：剪影处一个像素内深度从前景（2m）跳到远景（300m），建面时那个四边形

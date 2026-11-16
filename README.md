@@ -228,7 +228,7 @@ node tools/test_regression.mjs
 node tools/test_inference_cache.mjs     # 三路 ONNX 结果的持久化缓存与刷新命中
 python tools/test_regression.py            # 末尾会自动跑 P2 回归
 python tools/test_regression_p2.py         # 也可单独跑世界模型部分
-node tools/bump_cache.mjs --check
+python tools/bump_cache.py --check           # 缓存串一致性（mjs 入口兼容保留）
 ```
 
 离线重建的自检分三层：贴图与 UV 错位看 PSNR，**尺度错误**看地面平面尺度门（相机眼高是绝对量），

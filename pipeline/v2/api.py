@@ -60,6 +60,9 @@ DEFAULTS = {
     "outpaint_model": True,
     "ground_radius": 400.0, "semantics": True,
     "long_side": 1540, "device": "cuda", "median_size": 3,
+    # 深度梯度限幅（剪影长尾保险）：默认 1.35 开启；设 >=100 关闭，便于 A/B 对比。
+    # 此前只在 ldi.build 的函数默认值里存在，配置链传不到 → 使用者无法开关。
+    "depth_cap": 1.35,
 }
 
 _lock = threading.Lock()
@@ -342,6 +345,7 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
                     # 之前"有外扩就关裙边"是怕同心环带 —— 那个环带来自每格取不同色板，
                     # 现在改成单一色 + 低频起伏，不会再有环。
                     ground_radius=float(opts["ground_radius"]),
+                    depth_cap=float(opts["depth_cap"]),
                     photo_wall=wall)
 
     tex = img_src

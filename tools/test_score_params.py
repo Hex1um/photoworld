@@ -129,6 +129,54 @@ def test_callsite_contract():
     print("PASS  S10 调用点把空/缺项判定统一交给 score()，无旁路")
 
 
+def test_aggregate_views_worst_camera():
+    """判据 8 项必须取最差机位，不能被其他视角的均值摊薄。"""
+    base = dict(stripe=0.5, innerVoid=0.01, voidFrac=0.02, lowVoid=0.01,
+                voidBlobs=10, streakBlobs=20, voidRunMax=0.1, voidBlobMax=0.05,
+                detail=0.4, darkFrac=0.01, borderVoid=0.02, centerHF=0.3, centerLapVar=0.2)
+    bad = dict(base)
+    bad.update(stripe=3.5, innerVoid=0.20, voidFrac=0.30, lowVoid=0.25,
+               voidBlobs=400, streakBlobs=350, voidRunMax=0.8, voidBlobMax=0.5)
+    good = [dict(base, detail=0.6), dict(base, detail=0.2)]
+    agg = SP.aggregate_views(good + [bad])
+    for k in SP.THRESH:
+        assert agg[k] == bad[k], "判据 %s 应取最差机位 %s，实际 %s" % (k, bad[k], agg[k])
+    # 展示项取均值（detail: (0.6+0.2+0.4)/3 = 0.4）
+    assert math.isclose(agg["detail"], 0.4, abs_tol=1e-4), agg["detail"]
+    # 最差机位进入 score 后确实判失败（旧均值口径下 stripe=(0.5*2+3.5)/3≈1.5<2.0 会漏判）
+    hard, soft, fail = SP.score(agg)
+    assert hard == 0 and "stripe" in fail, (hard, soft, fail)
+    print("PASS  S11 aggregate_views 判据取最差机位（单视角缺陷不被摊薄），展示项取均值")
+
+
+def test_aggregate_views_missing_is_none():
+    """某视角缺判据项时该判据返回 None，交 score() 判 invalid。"""
+    views = [dict(stripe=1.0, innerVoid=0.01)]  # 只有两项，其余全缺
+    agg = SP.aggregate_views(views)
+    assert agg["voidFrac"] is None, "缺项应为 None，不能补 0 或跳过"
+    assert SP.score(agg)[0] == 0, "缺项 agg 必须判 invalid（hard=0）"
+    assert SP.aggregate_views([]) == {}
+    print("PASS  S12 aggregate_views 缺项返回 None → score 判 invalid，空 views 返回 {}")
+
+
+def test_mv_agg_worst_contract():
+    """multiview.mjs 展示用 agg 的 4 个判据项也须取 worst，与判据口径一致。"""
+    src = open(os.path.join(ROOT, "tools", "multiview.mjs"), encoding="utf-8").read()
+    for k in ("voidFrac", "innerVoid", "lowVoid", "stripe"):
+        assert "%s: worst('%s')" % (k, k) in src, "%s 展示口径未同步为 worst" % k
+    for k in ("darkFrac", "borderVoid", "detail"):
+        assert "%s: mean('%s')" % (k, k) in src, "%s 应保留 mean（展示项）" % k
+    print("PASS  S13 multiview.mjs 展示 agg：4 判据取 worst，展示项保留 mean")
+
+
+def test_render_score_uses_aggregate_views():
+    """render_score 必须走 aggregate_views 重算，而非直接返回 multiview 的均值 agg。"""
+    src = open(os.path.join(ROOT, "tools", "score_params.py"), encoding="utf-8").read()
+    assert "return aggregate_views(per_view)" in src, "render_score 应用 views 重算"
+    assert 'per_view = rec.get("views")' in src, "应读逐视角 views"
+    print("PASS  S14 render_score 用 aggregate_views 从 views 重算，不用均值 agg")
+
+
 if __name__ == "__main__":
     test_score_full()
     test_score_empty_is_invalid()
@@ -140,4 +188,8 @@ if __name__ == "__main__":
     test_void_tolerance_unified()
     test_top_view_uses_refbg()
     test_callsite_contract()
-    print("\n评分器回归全部通过（10 项）")
+    test_aggregate_views_worst_camera()
+    test_aggregate_views_missing_is_none()
+    test_mv_agg_worst_contract()
+    test_render_score_uses_aggregate_views()
+    print("\n评分器回归全部通过（14 项）")

@@ -1,48 +1,30 @@
 #!/usr/bin/env node
 /**
- * 多视角质检结果的汇总器：按圈（A/B/C）拆指标，列出最差的图与最差视角。
+ * 多视角质检汇总器（兼容入口）。
  *
- *   node tools/mv_report.mjs reports/all32.json
- *   node tools/mv_report.mjs reports/all32.json --top 8 --ring C
+ * 逻辑已用 Python 重写在 mv_report.py（CLARITY_KEYS 内联其中，改那边要同步
+ * tools/clarity.mjs）；本文件保留为薄包装，让旧的 `node tools/mv_report.mjs ...`
+ * 调用方无需改动。参数/输出/退出码透传。
+ *
+ *   node tools/mv_report.mjs reports/all32.json [--top 8] [--ring C]
  */
-import fs from 'node:fs';
-import { CLARITY_KEYS } from './clarity.mjs';
+import { spawnSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const argv = process.argv.slice(2);
-const file = argv[0] || 'reports/all32.json';
-const arg = (n, d) => { const i = argv.indexOf('--' + n); return i >= 0 ? argv[i + 1] : d; };
-const TOP = parseInt(arg('top', '8'), 10);
-const RING = arg('ring', '');
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const PY = path.join(HERE, 'mv_report.py');
+const args = process.argv.slice(2);
 
-const d = JSON.parse(fs.readFileSync(file, 'utf8'));
-const ok = (d.results || []).filter((r) => r.ok);
-const mean = (a) => a.length ? a.reduce((s, v) => s + v, 0) / a.length : 0;
-
-const keys = ['voidFrac', 'innerVoid', 'lowVoid', 'borderVoid', 'darkFrac', 'stripe', 'detail', ...CLARITY_KEYS];
-const rings = [...new Set(ok.flatMap((r) => r.views.map((v) => v.ring || 'A')))].sort();
-
-console.log(`样本 ${ok.length} 张 · 每张 ${ok[0] ? ok[0].views.length : 0} 视角 · 圈 ${rings.join('/')}`);
-console.log('圈   ' + keys.map((k) => k.padEnd(16)).join(''));
-for (const ring of rings) {
-  const vs = ok.flatMap((r) => r.views.filter((v) => (v.ring || 'A') === ring));
-  console.log(ring.padEnd(4) + keys.map((k) => mean(vs.map((v) => v[k])).toFixed(4).padEnd(16)).join(''));
+const candidates = process.platform === 'win32' ? ['python', 'python3'] : ['python3', 'python'];
+let r = null;
+for (const cmd of candidates) {
+  r = spawnSync(cmd, [PY, ...args], { stdio: 'inherit' });
+  if (r.error && r.error.code === 'ENOENT') continue;
+  break;
 }
-
-/* 单视角最差：按指标排序 */
-const flat = [];
-for (const r of ok) {
-  for (const v of r.views) {
-    if (RING && (v.ring || 'A') !== RING) continue;
-    flat.push({ image: r.image, ring: v.ring, a: v.a, ...v });
-  }
+if (!r || r.error) {
+  console.error('找不到 Python 解释器，无法运行 mv_report.py');
+  process.exit(1);
 }
-const bad = (k) => flat.slice().sort((x, y) => y[k] - x[k]).slice(0, TOP);
-for (const k of ['voidFrac', 'lowVoid', 'innerVoid', 'stripe', 'darkFrac']) {
-  console.log(`\n最差 ${k}：`);
-  for (const v of bad(k)) {
-    console.log(`  ${v[k].toFixed(4)}  ${String(v.image).split('/').pop()}  ${v.ring}${v.a}°  ${v.file.split('/').pop()}`);
-  }
-}
-const worstStripe = bad('stripe');
-console.log('\n竖幕/拉丝最重的文件：');
-for (const v of worstStripe.slice(0, 5)) console.log('  ' + v.file);
+process.exit(r.status === null ? 1 : r.status);
