@@ -444,7 +444,12 @@ def build_solid(P: np.ndarray, uv: np.ndarray, mask: np.ndarray, z: np.ndarray,
     for i, (y, x) in enumerate(order):
         p0 = P[y, x]
         z0 = float(z[y, x])
-        zb = zmed + (zmed - z0) * float(depth_factor)
+        # **镜像深度必须限幅**：树冠/枝叶的深度有噪声，`2*z_med - z` 会把背面
+        # 甩到极远（甚至负深度），从空中看就是一堆从中心射出的黑色尖刺（实测截图）。
+        # 物体厚度取中位深度的 ±55%，够了。
+        dz = (zmed - z0) * float(depth_factor)
+        dz = float(np.clip(dz, -0.55 * zmed, 0.55 * zmed))
+        zb = zmed + dz
         pb = p0 * (zb / max(1e-6, z0))
         back[(y, x)] = nf + i
         pos.append(pb.astype(np.float32))
@@ -580,6 +585,17 @@ def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
         hgt = hgt + fbm * ramp
     if smooth > 0:
         hgt = ndimage.uniform_filter(hgt, size=(3, 3), mode="nearest")
+
+    # ---- 高度限幅 + 更强的平滑 -----------------------------------------
+    # 森林/枝叶这类场景，深度在像素间噪声很大；"每格取最高点"会把树冠的离群值
+    # 当成地面 → 从空中看是一片从中心射出的尖刺（实测 winter 那张）。
+    # 做法：按分位截断，再加大平滑；俯视图本来就不需要像素级锐利。
+    _h = hgt[np.isfinite(hgt)]
+    if _h.size > 32:
+        _lo, _hi = np.percentile(_h, 2), np.percentile(_h, 98)
+        _span = max(1.0, float(_hi - _lo))
+        hgt = np.clip(hgt, _lo - 0.25 * _span, _hi + 0.25 * _span)
+        hgt = ndimage.uniform_filter(hgt, size=(5, 5), mode="nearest")
 
     pos = np.zeros((nz, nx, 3), dtype=np.float32)
     gx = x0 + (np.arange(nx, dtype=np.float32) / max(1, nx - 1)) * (x1 - x0)
@@ -1446,9 +1462,21 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
         _z_near = float(np.percentile(_fv, 2)) if _fv.size else 2.0
         _z_far = float(np.percentile(_fv, 92)) if _fv.size else 60.0
         _tan_h = float(np.max(np.abs(rays[..., 0]) / np.maximum(np.abs(rays[..., 2]), 1e-6)))
+        # **两份地面**：
+        #   top（完整）—— 飞行/俯视时用，照片足迹也要铺，否则空中看到一个空洞；
+        #   topHole（挖洞）—— 地面视角用，足迹处留给近景壳（保证"站在原地像原片"）。
+        # 只有一份的话，两个需求必然互相打架（实测：空中一个巨大三角空洞）。
         skin = build_top_skin(P, uv, gm, cell=top_skin_cell * 1.6, rgb=rgb,
-                              extent=float(ground_radius) * 1.15, max_cells=300,
-                              hole_poly=(_z_near, _z_far, _tan_h))
+                              extent=float(ground_radius) * 1.15, max_cells=300)
+        skin_h = build_top_skin(P, uv, gm, cell=top_skin_cell * 1.6, rgb=rgb,
+                                extent=float(ground_radius) * 1.15, max_cells=300,
+                                hole_poly=(_z_near, _z_far, _tan_h))
+        if skin_h is not None:
+            skin_h["name"] = "topHole"
+        if skin_h is not None:
+            layers.append(skin_h)
+            stats["topHole"] = {"vertices": int(skin_h["pos"].shape[0]),
+                                "triangles": int(skin_h["index"].size // 3)}
         if skin is not None:
             layers.append(skin)
             stats["top"] = {"vertices": int(skin["pos"].shape[0]),

@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.15.0';
+  const VERSION = '2.15.1';
 
   /* v2 服务的地址：显式 ?api= 优先，其次是自动发现（本机常见端口）。
      自动发现写在启动流程里，不需要使用者改 URL —— 这是"更快捷地启用 v2"的关键。 */
@@ -779,6 +779,8 @@
          它不能并进近景层 —— 近景是"朝前的壳"，顶面是一张水平的高度图，
          混在一起会让平视时的轮廓变糊。 */
       const topLayers = triLayers.filter((l) => l.name === 'top');
+      /* 挖洞版地面（v2.15.1）：地面视角用它，照片足迹留给近景壳。 */
+      const topHoleLayers = triLayers.filter((l) => l.name === 'topHole');
       /* 地面裙边单独一层（v2.7.1）：它带顶点色、没有照片纹理，
          并进近景层会被套上照片贴图，整片偏色（实测偏暗红）。 */
       const groundLayers = triLayers.filter((l) => l.name === 'ground');
@@ -789,6 +791,7 @@
       const nearLayers = triLayers.filter((l) => l.name !== 'backdrop'
         && l.name !== 'top' && l.name !== 'ground' && l.name !== 'solid');
       const groundMesh = groundLayers.length ? toMesh(mergeLayers(groundLayers)) : null;
+      const topHoleMesh = topHoleLayers.length ? toMesh(mergeLayers(topHoleLayers)) : null;
       const farMesh = farLayers.length ? toMesh(mergeLayers(farLayers)) : null;
       const nearMesh = nearLayers.length ? toMesh(mergeLayers(nearLayers)) : null;
       const topMesh = topLayers.length ? toMesh(mergeLayers(topLayers)) : null;
@@ -839,7 +842,7 @@
         sunDir: [0.3, 0.5, -0.8],
         lights: { fogDensity: 0.0016 },
         tex: { photo: tex, ground: null, sky: null, grass: null },
-        meshes: { relief: nearMesh, backdrop: farMesh, farRidge: null, nearRidge: null, sky: null, ground: groundMesh, solid: solidMesh, rocks: null, grass: null, shrub: null, top: topMesh },
+        meshes: { relief: nearMesh, backdrop: farMesh, farRidge: null, nearRidge: null, sky: null, ground: groundMesh, solid: solidMesh, rocks: null, grass: null, shrub: null, top: topMesh, topHole: topHoleMesh },
         // 视点高于"地形最高点 + 1m"才显示俯视顶面
         topShowAbove: topMaxY + 1.0,
         particles: null,

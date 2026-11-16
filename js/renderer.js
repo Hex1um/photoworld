@@ -358,7 +358,7 @@
          给"视锥外"一块有颜色的地面；用照片贴图会整片偏色（UV 只指向一个像素）。 */
       /* 有地面层时裙边让位：两者都是"照片区域之外的地"，同时画会在交界处
          出现一圈横条纹（实测底部那些蓝色条带）。 */
-      if (world.meshes.ground && !world.showPlan && !world.meshes.top) {
+      if (world.meshes.ground && !world.showPlan && !world.meshes.topHole && !world.meshes.top) {
         gl.disable(gl.CULL_FACE);
         /* fog 给满（1.0）：400m 外那条边缘如果只吃到 55% 的雾，会和天空的
            horizon 色差出一条明显的白脊（实测背视图远处那条亮线）。
@@ -372,7 +372,9 @@
       /* 近景封闭体（v2.12）：每个物体的正面+镜像背面+封边。
          必须关掉背面剔除 —— 绕到物体后面时，看到的是它自己的背面，
          而不是一个洞（这正是"物体不该只朝相机一张薄膜"的最小实现）。 */
-      if (world.meshes.solid) {
+      /* 飞行/俯视时不画实体层：树冠这类物体的"封边"四边形从上方看就是
+         一片从中心射出的黑色尖刺（实测 winter 那张）。空中只该看地面层。 */
+      if (world.meshes.solid && !world.showPlan) {
         gl.disable(gl.CULL_FACE);
         /* 恒用 mode 4（贴图 × 顶点色）：实体层没有自己的顶点色，
            merge 时会填 1.0，所以效果就是"贴该物体自己的照片像素"。
@@ -395,7 +397,10 @@
          结果低视角和旋转视角下，照片那块薄板下面是空的（实测截图：悬空的板 +
          底部横条纹）。现在这一层由**语义地面像素**构成，不会变成盖住崖壁的屋顶，
          所以可以一直画，把"四周和远处"补上。 */
-      if (world.meshes.top) {
+      /* 两份地面：飞行用完整版（top），地面用挖洞版（topHole）。
+         只有一份时两个需求必然打架 —— 完整版会盖住照片，挖洞版在空中是个空洞。 */
+      const groundMeshNow = world.showPlan ? world.meshes.top : (world.meshes.topHole || world.meshes.top);
+      if (groundMeshNow) {
         gl.disable(gl.CULL_FACE);
         /* mipBias 给到 2.6：单视图重建**没有俯视纹理**，顶面 UV 是从相邻像素借来的，
            贴着看会是一圈圈放射状拉伸。高空看地表本来也该是低频的，
@@ -420,7 +425,7 @@
         /* mode 1（顶点色）。mode 10 曾试过"片元级程序化噪声"，
            但那段 GLSL 编译失败（undeclared identifier），先退回可用的方案；
            地面细节目前由 ldi 里的多尺度顶点噪声提供。 */
-        drawMesh(world, world.meshes.top, {
+        drawMesh(world, groundMeshNow, {
           tex: null, mode: 1, fog: 0.55, mipBias: 0,
           skyAmb: [1.05, 1.02, 0.98]
         });
