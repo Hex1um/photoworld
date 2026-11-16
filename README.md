@@ -253,17 +253,23 @@ node tools/multiview.mjs --base http://127.0.0.1:8099 \
 - 几何指标：`voidFrac` 空底色占比（洞/露底）、`innerVoid` 中央 ROI、`lowVoid` 下 40% 地面、
   `borderVoid` 外圈、`darkFrac` 塌黑、`stripe` 竖直/水平能量比（竖幕/拉花）、
   `detail` 平均梯度（保留兼容，但它分不出「糊片」和「雾」，别只看它）
-- 清晰度六项（`tools/clarity.mjs`，越大越清晰）：`hfEnergy` 3×3 模糊残差、`farHF` 远景带、
+- 清晰度六项（`tools/clarity.py`；`tools/clarity.mjs` 是 multiview 用的同步镜像，
+  两者由 `python tools/test_clarity_parity.py` 锁一致，越大越清晰）：`hfEnergy` 3×3 模糊残差、`farHF` 远景带、
   `centerHF` 中央 ROI、`lapVar` / `centerLapVar` 拉普拉斯方差（×1000）、`localContrast`
   5×5 局部标准差。**A/B 优先看 `centerHF` 与 `centerLapVar`**：天空和程序化地面是低频区，
-  全图均值会被稀释。`node tools/test_clarity.mjs` 用合成图锁住「清晰 / 糊片 / 雾」的区分度
+  全图均值会被稀释。`python tools/test_clarity.py` 用合成图锁住「清晰 / 糊片 / 雾」的区分度
 - `--baseline <file>` 第一次跑写入基线，之后**完全同参数**再跑即输出逐指标 A/B 表
   （基线均值 / 当前均值 / 变化 / 改善与退化的图数）。报告里带 `capture` 采集条件
   （分辨率、dpr、光栅后端、视角数、稳定时长、指标版本），任一不一致直接拒绝对比，
   避免把「换了后端」误读成清晰度变化
 - 照片贴图 A/B：URL 加 `?tex=0` 回到旧的 420px 分析画布，`?tex=4096` 抬高上限；
   默认 `displayMaxEdge=2048`。`body.dataset.texW/texH` 会写入实际贴图尺寸，
-  用 `tools/probe.mjs` 可直接断言
+  用 `python tools/probe.py` 可直接断言
+
+**无头浏览器工具已 Python 化**：`cdp_eval` / `probe` / `shot` / `smoke` /
+`orbit_shot` / `probe_depth` / `probe_layer` / `probe_walk` 共用零依赖的
+`tools/cdp.py`（标准库手写 WebSocket，无需 pip 装包）。旧 `node tools/xxx.mjs`
+入口保留为薄包装，参数与输出不变；新脚本直接跑 `python tools/xxx.py`。
 - 空底色用「画面主色」判定（16 级直方图最大桶），不依赖雾色 —— 夜景里雾色接近黑，
   用雾色比色会把整屏误判成雾
 

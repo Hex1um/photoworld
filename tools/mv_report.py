@@ -12,7 +12,8 @@ import json
 import os
 import sys
 
-# 与 tools/clarity.mjs 的 CLARITY_KEYS 保持一致（改那边要同步这里）
+# 与 tools/clarity.py 的 CLARITY_KEYS 保持一致；test_clarity_parity.py
+# 会同时校验 Python / JS 两侧常量，改任一处都要跑该测试。
 CLARITY_KEYS = ['hfEnergy', 'farHF', 'centerHF', 'lapVar', 'centerLapVar', 'localContrast']
 
 # 与原 mjs 输出字节一致：Windows 下强制 LF，避免 CRLF 造成 diff

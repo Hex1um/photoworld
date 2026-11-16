@@ -3,6 +3,27 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [2.15.5] - 2026-11-17  · 无头浏览器工具链整体 Python 化
+
+本版只动工具链，不改画面与评分口径。此前 `tools/` 下 8 个无头浏览器脚本
+（`cdp_eval` / `probe` / `shot` / `smoke` / `orbit_shot` / `probe_depth` /
+`probe_layer` / `probe_walk`）各自复制了一份「启动 Edge → 轮询 CDP 端口 →
+WebSocket 握手 → Runtime.evaluate → taskkill」，合计约 39 KB 纯 Node 样板；
+想用 Python 跑质检必须同时装 Node，改一个公共行为要改 8 处。
+
+- **公共链路收成 `tools/cdp.py`**：仅用标准库手写 WebSocket 帧（支持分片、
+  ping/pong、64 位长度，截图几百 KB 不截断），统一浏览器启动 / 连接 /
+  就绪轮询 / 截图 / 进程回收，并显式绕过会话里的 HTTP 代理（CDP 端口只在
+  本机，走代理会连不上）。8 个脚本改为 1.6~4.1 KB 的纯业务 Python，旧的
+  `node tools/xxx.mjs ...` 保留为薄包装，参数、输出与退出码不变。
+- **清晰度测试 Python 化**：`tools/clarity.py` 成为测试 / 报告侧单一来源，
+  `test_clarity.mjs` 改为薄包装；`test_clarity_parity.py` 用 4 组输入逐项
+  比对 Python 与 JS 的六项指标、指标键、方向和 `captureDiff`，防止
+  `multiview.mjs` 同步 import 的 JS 镜像悄悄漂移。
+- **验证**：新增 `test_cdp.py`（假 WebSocket 服务验证握手 / 调用 / 事件 /
+  截图，无需 Edge）与上面的 parity 测试；连同原有 7 套回归全部通过，
+  `py_compile` 与 `node --check` 全绿，19 处缓存串已随版本同步。
+
 ## [2.15.4] - 2026-11-17  · 判据改看最差机位；depth_cap 可调；工具脚本改用 Python
 
 **注意：判据口径变更，跨版 soft 分数不可直接比较，旧门控基线应重置。** 本版四项改动：
