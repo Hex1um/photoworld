@@ -186,7 +186,7 @@ function decodePNG(buf) {
 /* ---------------- 指标 ---------------- */
 const luma = (r, g, b) => (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
 
-function metrics(png) {
+function metrics(png, refBg = null) {
   const { w, h, bpp, data } = png;
   const L = new Float32Array(w * h);
   const total = w * h;
@@ -215,7 +215,12 @@ function metrics(png) {
       const l = luma(r, g, b);
       L[y * w + x] = l;
       if (l < 0.05) darkN++;
-      const isVoid = Math.abs(r - mr) <= 4 && Math.abs(g - mg) <= 4 && Math.abs(b - mb) <= 4;
+      // **空洞 = 看到背景**。参照色优先用渲染的 clearColor（= world.fogColor），
+      // 而不是"画面主色"。否则水面/雪原这种大面积单色的场景会被整片误判成洞
+      // （实测 lake 从侧后方看就是一片平坦湖面，被算成 voidFrac 0.43）。
+      const isVoid = refBg
+        ? (Math.abs(r - refBg[0]) <= 6 && Math.abs(g - refBg[1]) <= 6 && Math.abs(b - refBg[2]) <= 6)
+        : (Math.abs(r - mr) <= 4 && Math.abs(g - mg) <= 4 && Math.abs(b - mb) <= 4);
       if (isVoid) voidN++;
       const inMid = x >= x0 && x < x1 && y >= y0 && y < y1;
       if (inMid) { innerN++; if (isVoid) innerVoid++; }
@@ -246,7 +251,9 @@ function metrics(png) {
       const sy = Math.min(h - 1, Math.floor((y + 0.5) * scale));
       const o = (sy * w + sx) * bpp;
       const r = data[o], g = data[o + 1], b = data[o + 2];
-      vmask[y * sw + x] = (Math.abs(r - mr) <= 6 && Math.abs(g - mg) <= 6 && Math.abs(b - mb) <= 6) ? 1 : 0;
+      vmask[y * sw + x] = (refBg
+        ? (Math.abs(r - refBg[0]) <= 8 && Math.abs(g - refBg[1]) <= 8 && Math.abs(b - refBg[2]) <= 8)
+        : (Math.abs(r - mr) <= 6 && Math.abs(g - mg) <= 6 && Math.abs(b - mb) <= 6)) ? 1 : 0;
       // 拉丝像素：竖直差分明显大于水平差分（竖条/拉花），且不是噪点
       if (sy > 0 && sx > 0) {
         const k = sy * w + sx;
@@ -264,8 +271,11 @@ function metrics(png) {
     let run = 0;
     for (let x = 0; x < w; x++) {
       const o = (y * w + x) * bpp;
-      const isVoid = Math.abs(data[o] - mr) <= 4 && Math.abs(data[o + 1] - mg) <= 4
-        && Math.abs(data[o + 2] - mb) <= 4;
+      const isVoid = refBg
+        ? (Math.abs(data[o] - refBg[0]) <= 6 && Math.abs(data[o + 1] - refBg[1]) <= 6
+           && Math.abs(data[o + 2] - refBg[2]) <= 6)
+        : (Math.abs(data[o] - mr) <= 4 && Math.abs(data[o + 1] - mg) <= 4
+           && Math.abs(data[o + 2] - mb) <= 4);
       if (isVoid) { run++; if (run > runMax) runMax = run; } else run = 0;
     }
   }
@@ -394,6 +404,7 @@ try {
         + encodeURIComponent(path.basename(rel).replace(/\.[a-z0-9]+$/i, ''))
         + (EXTRA ? '&' + EXTRA : '');
     const rec = { image: rel, views: [], ok: false };
+    let refBg = null;      // 背景色（0~255），空洞判据用它作参照
     await send('Page.navigate', { url });
 
     const ts = Date.now();
@@ -404,6 +415,18 @@ try {
       if (state.ready === '1') break;
       if (state.err) break;
       await sleep(400);
+    }
+    if (state.ready === '1') {
+      // clearColor 就是 world.fogColor（renderer 里直接 gl.clearColor(fogColor)），
+      // 取出来当"空洞"的参照色。取不到就退回旧的主色判定。
+      try {
+        const c = JSON.parse(await evalIn(send,
+          `JSON.stringify((window.__pw && window.__pw.world && window.__pw.world.fogColor) || null)`));
+        if (Array.isArray(c) && c.length === 3) {
+          refBg = c.map((v) => Math.max(0, Math.min(255, Math.round(Number(v) * 255))));
+          rec.refBg = refBg;
+        }
+      } catch (e) { /* 忽略，退回主色 */ }
     }
     if (state.ready !== '1') {
       rec.error = state.err || 'ready 超时';
@@ -442,7 +465,7 @@ try {
         : path.basename(rel).replace(/\.[a-z0-9]+$/i, '');
       const file = path.join(OUTDIR, `${tag}_${v.ring}${String(i).padStart(2, '0')}.png`);
       fs.writeFileSync(file, buf);
-      const m = metrics(decodePNG(buf));
+      const m = metrics(decodePNG(buf), refBg);
       rec.views.push({ i, ring: v.ring, r: v.r, a: +(a * 180 / Math.PI).toFixed(0), ...m, file: file.replace(/\\/g, '/') });
     }
     // 俯视：检查地面有没有洞、单体是否浮空（32 视角套餐的 C 圈已含俯视，跳过）
