@@ -1142,7 +1142,34 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
             rgb_f = rgb_f[::pt_step, ::pt_step]
             valid_f = valid_f[::pt_step, ::pt_step]
         pts = build_points(Pf, rgb_f, valid_f, step_used=pt_step)
-        return {"layers": [pts], "stats": {
+
+        # **点云路径也要有地面层**：否则飞到空中只有点云，
+        # 俯视时会看到"点从中心炸开"的尖刺（实测截图），四周一片空白。
+        # 点云没有"壳"的概念，地面层就成了空中唯一能看的东西。
+        p_layers = [pts]
+        try:
+            _gm = valid
+            if sem_ground is not None:
+                _g2 = sem_ground
+                if _g2.shape != seg.shape:
+                    _iy2 = (np.arange(seg.shape[0]) * _g2.shape[0] // seg.shape[0]).astype(np.int32)
+                    _ix2 = (np.arange(seg.shape[1]) * _g2.shape[1] // seg.shape[1]).astype(np.int32)
+                    _g2 = _g2[_iy2][:, _ix2]
+                if _g2.any() and int((_g2 & valid).sum()) > 500:
+                    _gm = valid & _g2
+            _fv = fwd[valid]
+            _zn = float(np.percentile(_fv, 2)) if _fv.size else 2.0
+            _zf = float(np.percentile(_fv, 92)) if _fv.size else 60.0
+            _th = float(np.max(np.abs(rays[..., 0]) / np.maximum(np.abs(rays[..., 2]), 1e-6)))
+            _skin = build_top_skin(P, uv, _gm, cell=top_skin_cell * 1.6, rgb=rgb,
+                                   extent=float(ground_radius) * 1.15, max_cells=300,
+                                   hole_poly=(_zn, _zf, _th))
+            if _skin is not None:
+                p_layers.append(_skin)
+        except Exception as e:                      # noqa: BLE001
+            print(f"[ldi] 点云路径的地面层构建失败（不影响点云）：{e}", flush=True)
+
+        return {"layers": p_layers, "stats": {
             "splat": {"vertices": int(pts["pos"].shape[0]), "triangles": 0,
                       "skirt_quads": 0, "pixels": int(valid.sum()),
                       "point_px": pts["point_px"],

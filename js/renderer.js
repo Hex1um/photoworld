@@ -677,7 +677,10 @@
       }
 
       // 粒子
-      if (world.pointsMesh) {
+      /* **俯视/飞行时隐藏整幅点云**：点云是一层层"面片上的点"，
+         从空中看就是一堆从中心炸开的尖刺（实测截图），而且它没有地面概念。
+         空中该看的是地面层（top）。 */
+      if (world.pointsMesh && !world.showPlan) {
         const p = progs.points;
         gl.useProgram(p.prog);
         gl.enable(gl.BLEND);
