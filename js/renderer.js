@@ -357,8 +357,11 @@
          给"视锥外"一块有颜色的地面；用照片贴图会整片偏色（UV 只指向一个像素）。 */
       if (world.meshes.ground) {
         gl.disable(gl.CULL_FACE);
+        /* fog 给满（1.0）：400m 外那条边缘如果只吃到 55% 的雾，会和天空的
+           horizon 色差出一条明显的白脊（实测背视图远处那条亮线）。
+           满雾之后远端正好等于 fogColor，与 skyHorizon 同源，接缝自然消失。 */
         drawMesh(world, world.meshes.ground, {
-          tex: null, mode: 1, fog: 0.55, mipBias: 0
+          tex: null, mode: 1, fog: 1.0, mipBias: 0
         });
         gl.enable(gl.CULL_FACE);
       }
@@ -376,8 +379,10 @@
         /* mipBias 给到 2.6：单视图重建**没有俯视纹理**，顶面 UV 是从相邻像素借来的，
            贴着看会是一圈圈放射状拉伸。高空看地表本来也该是低频的，
            干脆重度模糊 —— 读作"远处地表"而不是"糊掉的照片"。 */
+        /* 顶点色（mode 1），不再采样照片贴图：那个 UV 是从邻格借的，
+           贴着看是一圈圈放射状拉伸。 */
         drawMesh(world, world.meshes.top, {
-          tex: world.tex.photo, mode: 4, fog: 0.55, mipBias: 2.6
+          tex: null, mode: 1, fog: 0.55, mipBias: 0
         });
         gl.enable(gl.CULL_FACE);
       }
@@ -478,10 +483,20 @@
           const cullRelief = world.reliefCull !== false;
           if (cullRelief) { gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); }
           else gl.disable(gl.CULL_FACE);
-          drawMesh(world, world.meshes.relief, {
-            tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.26, mipBias: 0,
-            backdrop: [0, 0]
-          });
+          /* 高空时不画照片壳（v2.7.2）：它是一层"朝前的薄膜"，从上方看到的是
+             竖直拉长的崖壁穿出顶面，表现为一片黑红竖条（实测 150m 俯视）。
+             超过 6m 就切成"只画顶面 + tile"的俯视模式 —— 这是显式的 LOD 切换，
+             不是几何修补：单视图重建本来就没有从上看的样子。 */
+          const reliefLift = world.heightAt
+            ? camera.eye[1] - world.heightAt(camera.eye[0], camera.eye[2]) : 0;
+          if (reliefLift > 6.0) {
+            // 高空：跳过照片壳（顶面与 tile 已经铺满）
+          } else {
+            drawMesh(world, world.meshes.relief, {
+              tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.26, mipBias: 0,
+              backdrop: [0, 0]
+            });
+          }
         }
         gl.disable(gl.BLEND);
         gl.enable(gl.CULL_FACE);

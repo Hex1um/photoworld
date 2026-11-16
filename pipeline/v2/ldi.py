@@ -370,7 +370,7 @@ def build_points(P: np.ndarray, rgb: np.ndarray, valid: np.ndarray,
 
 def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
                     cell: float = 1.8, max_cells: int = 190,
-                    smooth: int = 1) -> dict | None:
+                    smooth: int = 1, rgb: np.ndarray | None = None) -> dict | None:
     """从点云生成一张"俯视高度图"顶面，供飞行时从上方看。
 
     为什么需要它：v2 是单视图重建，只有一层**朝前的壳**。平视没有问题，
@@ -432,6 +432,34 @@ def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
 
     P2 = pos.reshape(-1, 3)
     U2 = huv.reshape(-1, 2)
+
+    # 顶点色：用**参与该格高度计算的那个像素**的 RGB。
+    # 高空看地表本来就该是低频色块；用 UV 去采样照片贴图，相邻格的 UV 差异被放大成
+    # 一圈圈放射状拉伸（实测）。顶点色没有这个问题，也不依赖贴图 mip 链。
+    C2 = None
+    if rgb is not None and rgb.size:
+        # 颜色**不逐格借像素**，而是"地面平均色 × 位置噪声 × 高程明暗"。
+        # 逐格借像素看似忠实，实际取到的多半是崖壁阴影色 —— 高空看下去是
+        # 一片黑色条纹（实测）。俯视本来就该是低频的地貌色块。
+        # 注意形状：这里拿到的 valid/uv 是**降采样后**的网格，
+        # 不能直接用 rgb[valid]（全分辨率的面具对不上，实测 IndexError）。
+        # 用 uv 反查像素取平均色，尺寸就自然对上了。
+        H2, W2 = rgb.shape[:2]
+        u_v = uv[valid]
+        if u_v.size:
+            iy2 = np.clip((u_v[:, 1] * (H2 - 1)).astype(np.int32), 0, H2 - 1)
+            ix2 = np.clip((u_v[:, 0] * (W2 - 1)).astype(np.int32), 0, W2 - 1)
+            base_c = np.clip(rgb[iy2, ix2].mean(axis=0), 0, 1).astype(np.float32)
+        else:
+            base_c = np.array([0.5, 0.42, 0.34], dtype=np.float32)
+        hmin, hmax = float(hgt.min()), float(hgt.max())
+        hr = max(1e-3, hmax - hmin)
+        up = np.clip((P2[:, 1] - hmin) / hr, 0, 1)
+        n1 = np.sin(P2[:, 0] * 0.013 + 1.1) * np.cos(P2[:, 2] * 0.015 - 0.5)
+        n2 = np.sin(P2[:, 0] * 0.06 + P2[:, 2] * 0.045 + 2.0)
+        v = (0.94 + 0.10 * n1 + 0.04 * n2) * (0.82 + 0.36 * up)
+        C2 = np.stack([base_c[0] * v, base_c[1] * v, base_c[2] * v,
+                       np.ones_like(v)], axis=1).astype(np.float32)
     N2 = np.tile(np.array([[0.0, 1.0, 0.0]], dtype=np.float32), (P2.shape[0], 1))
     idx2 = []
     for j in range(nz - 1):
@@ -445,7 +473,7 @@ def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
     if not idx2:
         return None
     return {"name": "top", "pos": P2, "nrm": N2, "uv": U2,
-            "index": np.asarray(idx2, dtype=np.uint32)}
+            "color": C2, "index": np.asarray(idx2, dtype=np.uint32)}
 
 
 def build_photo_wall(cam, dist: float = 8.0, expand: float = 1.0) -> dict:
@@ -586,8 +614,15 @@ def build_ground_skirt(P: np.ndarray, ground: np.ndarray, uv: np.ndarray,
         iy = int(np.clip(v0 * (rgb.shape[0] - 1), 0, rgb.shape[0] - 1))
         ix0 = int(np.clip(u0 * (rgb.shape[1] - 1), 0, rgb.shape[1] - 1))
         c = np.clip(np.asarray(rgb[iy, ix0], dtype=np.float32), 0, 1) * 0.88
-        colv = np.tile(np.array([c[0], c[1], c[2], 1.0], dtype=np.float32),
-                       (len(pos) // 3, 1))
+        # **逐顶点加变化**：整片单色在近处读作"一块色板"（实测）。
+        # 低频（~90m）给大片地面分层次，中频（~18m）压掉塑料感，另加轻微冷暖漂移。
+        Pv = np.asarray(pos, dtype=np.float32).reshape(-1, 3)
+        n1 = np.sin(Pv[:, 0] * 0.011 + 1.3) * np.cos(Pv[:, 2] * 0.013 - 0.6)
+        n2 = np.sin(Pv[:, 0] * 0.055 + Pv[:, 2] * 0.041 + 2.2)
+        v = 1.0 + 0.13 * n1 + 0.05 * n2
+        warm = 1.0 + 0.05 * np.sin(Pv[:, 0] * 0.006 + Pv[:, 2] * 0.004 + 0.8)
+        colv = np.stack([c[0] * v * warm, c[1] * v, c[2] * v / warm,
+                         np.ones_like(v)], axis=1).astype(np.float32)
     else:
         n = len(pos) // 3
         colv = np.tile(np.array([0.55, 0.45, 0.36, 1.0], dtype=np.float32), (n, 1))
@@ -970,7 +1005,7 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
         near_mask = valid & (fwd < max(60.0, far_split * 1.5))
         if sky is not None and sky.shape == near_mask.shape:
             near_mask &= ~sky
-        skin = build_top_skin(P, uv, near_mask, cell=top_skin_cell)
+        skin = build_top_skin(P, uv, near_mask, cell=top_skin_cell, rgb=rgb)
         if skin is not None:
             layers.append(skin)
             stats["top"] = {"vertices": int(skin["pos"].shape[0]),
