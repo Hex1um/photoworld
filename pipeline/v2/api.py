@@ -100,6 +100,30 @@ def _hash(data: bytes, opts: dict) -> str:
     return h.hexdigest()
 
 
+
+def _sem_obj_aligned(sem, seg, work_size=None):
+    """语义物体掩码，必要时缩放到工作图（可能被外扩过）的分辨率。
+
+    语义是在**原图**上算的，而 ldi 拿到的世界是基于工作图（外扩后更宽）。
+    尺寸不一致时如果不缩放，掩码会整体错位（左侧物体被当成右侧）。
+    """
+    if seg is None:
+        return None
+    try:
+        m = sem.object_mask(seg)
+    except Exception:
+        return None
+    if m is None or not m.any():
+        return m
+    if work_size is None:
+        return m
+    from PIL import Image as _Im
+    if (m.shape[1], m.shape[0]) == tuple(work_size):
+        return m
+    up = _Im.fromarray((m.astype(np.uint8) * 255), mode="L").resize(
+        tuple(work_size), _Im.NEAREST)
+    return np.asarray(up) > 127
+
 def bake(data: bytes, **over) -> tuple[bytes, dict]:
     """照片字节 → (GLB 字节, manifest)。异常向上抛，由调用方决定怎么回。"""
     opts = dict(DEFAULTS)
@@ -125,9 +149,21 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
     if opts["semantics"]:
         try:
             import importlib
+            import sys as _sys
+            # 语义模块在 pipeline/v2/ 下；api 被以文件路径加载时，那个目录不在 sys.path，
+            # import_module("semantics") 会抛 ImportError，而这段在 try 里 →
+            # **静默降级成 None**，于是"非风景照判定""物体封闭化"全都拿不到语义结果
+            # （实测：灯柱/lake 的语义一直是 None）。这里显式补路径。
+            _p2 = os.path.dirname(os.path.abspath(__file__))
+            if _p2 not in _sys.path:
+                _sys.path.insert(0, _p2)
             sem = importlib.import_module("semantics")
             if sem.available(ROOT):
-                seg = sem.segment(rgb, ROOT)
+                # 这里**不能**用 rgb：它在后面（外扩之后）才定义，
+                # 之前直接引用会 NameError，而这段在 try 里 → 语义静默降级成 None，
+                # 导致"非风景判定""urban 门控""物体封闭化"全部失效（长期潜伏的 bug）。
+                _rgb_sem = np.asarray(img_src, dtype=np.float32) / 255.0
+                seg = sem.segment(_rgb_sem, ROOT)
                 ok, wall_why = sem.looks_like_scenery(seg)
                 wall = not ok
             else:
@@ -265,6 +301,10 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
 
     res = ldi.build(z, cam, step=step, eye=opts["eye"], far_split=opts["far_split"],
                     near_split=0.0, sky=sky, edge_ratio=opts["edge_ratio"],
+                    # 语义"物体"掩码：用它给近景物体建封闭体（比深度屏障可靠得多 ——
+                    # 实测 lake/alpine 用深度分割一个候选都分不出来）
+                    # rgb 就是工作图（可能已外扩），掩码按它的分辨率对齐
+                    sem_obj=_sem_obj_aligned(sem, seg, (rgb.shape[1], rgb.shape[0])),
                     flatten=opts["flatten"], skirt_min=opts["skirt_min"],
                     skirt_max=opts["skirt_max"], median_size=opts["median_size"],
                     stretch_clamp=opts["stretch_clamp"],

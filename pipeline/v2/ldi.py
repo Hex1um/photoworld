@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 
+import os
 import numpy as np
 
 
@@ -400,6 +401,85 @@ def cap_depth_gradient(z: np.ndarray, k: float = 1.35, iters: int = 10) -> np.nd
             break
         z[over] = limit[over]
     return z
+
+
+
+def build_solid(P: np.ndarray, uv: np.ndarray, mask: np.ndarray, z: np.ndarray,
+                depth_factor: float = 1.0) -> dict | None:
+    """把一个近景物体做成**封闭体**：正面 + 镜像背面 + 封边。
+
+    为什么：现在剪影处是"剪掉四边形"，物体只剩一张朝向相机的薄膜；
+    为了不露出洞，又用裙边往远处挤一段 —— 短了遮不住，长了就是"长尾"。
+
+    真实物体是**前后对称**的：看不见的背面，最多和正面差不多厚。
+    所以这里直接把正面沿"物体中位深度平面"镜像出一层背面（z_back = 2*z_med - z_front），
+    再把四周的边缘环连起来封口。这样从侧面看是一个实体，不再需要往远处拉。
+
+    depth_factor < 1 时背面会浅一些（像压扁的实体），用于很薄的物体（栏杆、树枝）。
+    """
+    ys, xs = np.nonzero(mask)
+    if ys.size < 24:
+        return None
+    sub = np.zeros_like(mask, dtype=bool)
+    sub[ys.min():ys.max() + 1, xs.min():xs.max() + 1] = True
+    sub &= mask
+
+    zf = z[sub]
+    zmed = float(np.median(zf))
+    pos, uvx, nrm, idx = [], [], [], []
+    vid = {}
+    h, w = mask.shape
+
+    # 正面：用物体自己的深度
+    order = [(int(y), int(x)) for y, x in zip(*np.nonzero(sub))]
+    for i, (y, x) in enumerate(order):
+        vid[(y, x)] = i
+        pos.append(P[y, x].copy())
+        uvx.append(uv[y, x].copy())
+        nrm.append(np.array([0.0, 0.0, 1.0], dtype=np.float32))
+    nf = len(order)
+
+    # 背面：沿视图方向镜像到中位深度平面另一侧
+    back = {}
+    for i, (y, x) in enumerate(order):
+        p0 = P[y, x]
+        z0 = float(z[y, x])
+        zb = zmed + (zmed - z0) * float(depth_factor)
+        pb = p0 * (zb / max(1e-6, z0))
+        back[(y, x)] = nf + i
+        pos.append(pb.astype(np.float32))
+        uvx.append(uv[y, x].copy())
+        nrm.append(np.array([0.0, 0.0, -1.0], dtype=np.float32))
+
+    # 正面/背面的四边形
+    for (y, x) in order:
+        if (y + 1, x) in vid and (y, x + 1) in vid and (y + 1, x + 1) in vid:
+            a, b, c, d = vid[(y, x)], vid[(y + 1, x)], vid[(y, x + 1)], vid[(y + 1, x + 1)]
+            idx += [a, b, c, c, b, d]
+            a, b, c, d = back[(y, x)], back[(y + 1, x)], back[(y, x + 1)], back[(y + 1, x + 1)]
+            idx += [a, c, b, c, d, b]          # 背面反向绕，保证外法线朝外
+
+    # 封边：把"正面的边界像素"与它对应的背面连成一条环带
+    for (y, x) in order:
+        for dy, dx in ((1, 0), (0, 1)):
+            ny2, nx2 = y + dy, x + dx
+            if (ny2, nx2) in vid:
+                continue                        # 内部边，不需要封
+            f1, f2 = vid[(y, x)], back[(y, x)]
+            f3, f4 = vid[(ny2, nx2)] if (ny2, nx2) in vid else None, back[(ny2, nx2)] if (ny2, nx2) in vid else None
+            if f3 is None:
+                continue
+            idx += [f1, f2, f3, f3, f2, f4]
+
+    if not idx:
+        return None
+    return {
+        "name": "solid",
+        "pos": np.asarray(pos, dtype=np.float32).reshape(-1, 3),
+        "nrm": np.asarray(nrm, dtype=np.float32).reshape(-1, 3),
+        "uv": np.asarray(uvx, dtype=np.float32).reshape(-1, 2),
+        "index": np.asarray(idx, dtype=np.uint32),
+    }
 
 
 def build_top_skin(P: np.ndarray, uv: np.ndarray, valid: np.ndarray,
@@ -809,6 +889,7 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
           cliff_thr: float = 0.010, ground_radius: float = 400.0,
           seg_edge_tau: float = 0.10, quad_stretch_max: float = 0.0,
           depth_cap: float = 1.35,
+          solid_objs: bool = True, sem_obj: np.ndarray | None = None,
           # 默认关闭：试过"地面像素占比 < 0.4%"当"非风景照"的判据，实测**不成立** ——
           # 云海/星空/太空地球这几张图的地面占比也有 3.7~5.2%（压平判据把它们误判成地面），
           # 而"远景占比 / 纵深动态范围"在好坏图上完全不分离（远景占比全是 0，
@@ -1063,12 +1144,93 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
     lay = np.where(far_m, 2, 0).astype(np.int8)
     lay[~valid] = -1
 
+    # ---- 近景物体封闭化（solid）------------------------------------
+    # 判据保守：面积适中 + 中位深度近 + 明显比周围近。
+    # 满足的物体单独做成封闭体（正面+镜像背面+封边），并从近景层里剔除，
+    # 这样它不再是一张需要裙边去遮的薄膜，也就没有"往远处拉"的长尾。
+    solids: list[dict] = []
+    dbg: list[dict] = []
+    solid_mask = np.zeros_like(seg, dtype=bool)
+    # **优先用语义物体掩码**：深度屏障分割在 lake/alpine 上分不出任何物体（实测），
+    # 语义给的是"它是个东西"，与大小无关。按连通域切成一个个物体。
+    sem_parts = []
+    # 语义掩码是**原图分辨率**，而这里的 zs 是 step 降采样后的网格 —— 形状不一致，
+    # 之前直接因 shape 不等而被跳过（实测一个实体都没生成）。按 step 抽稀即可。
+    if sem_obj is not None and sem_obj.shape != seg.shape:
+        # 最近邻重采样到网格分辨率。不能用 `[::step]` 切片：
+        # 尺寸常有 1 像素的舍入差（实测 565 vs 283*2=566），切片会整体错位。
+        _iy = (np.arange(seg.shape[0]) * sem_obj.shape[0] // seg.shape[0]).astype(np.int32)
+        _ix = (np.arange(seg.shape[1]) * sem_obj.shape[1] // seg.shape[1]).astype(np.int32)
+        sem_obj = sem_obj[_iy][:, _ix]
+    if os.environ.get("PW_DEBUG_SOLID"):
+        print(f"[solid] sem_obj={'None' if sem_obj is None else sem_obj.shape}"
+              f" seg={seg.shape} step={step} solid_objs={solid_objs}", flush=True)
+    if solid_objs and sem_obj is not None and sem_obj.shape == seg.shape and sem_obj.any():
+        lab_s, n_s = ndimage.label(sem_obj, structure=np.ones((3, 3), bool))
+        for k in range(1, n_s + 1):
+            m = (lab_s == k) & valid
+            a = int(m.sum())
+            if a < 200 or a > 0.30 * max(1, int(valid.sum())):
+                continue
+            if float(np.median(zs[m])) > 60.0:      # 太远的当远景，不做实体
+                continue
+            sem_parts.append(m)
+    if solid_objs:
+        area_total = max(1, int(valid.sum()))
+        med_big = ndimage.median_filter(zs, size=31, mode="nearest")
+        for lab in range(1, int(n_seg) + 1):
+            m = (seg == lab) & valid
+            a = int(m.sum())
+            if a < 120 or a > 0.10 * area_total:
+                continue
+            zmed = float(np.median(zs[m]))
+            if zmed > 45.0:
+                continue
+            nearfrac = float(((zs < 0.72 * med_big) & m).sum()) / max(1, a)
+            dbg.append({"area": a, "zmed": round(zmed, 1), "near": round(nearfrac, 2)})
+            if nearfrac < 0.28:
+                continue
+            S = build_solid(P, uv, m, zs)
+            if S is not None:
+                solids.append(S)
+                solid_mask |= m
+
+        for m in sem_parts:            # 语义物体
+            S = build_solid(P, uv, m, zs)
+            if S is not None:
+                solids.append(S)
+                solid_mask |= m
+
+    if solids:
+        # 合并成一个 solid 层（索引要整体偏移）
+        pos = np.concatenate([x["pos"] for x in solids])
+        nrm = np.concatenate([x["nrm"] for x in solids])
+        uvc = np.concatenate([x["uv"] for x in solids])
+        off = 0
+        idxs = []
+        for x in solids:
+            idxs.append(x["index"] + off)
+            off += x["pos"].shape[0]
+        solid_layer = {"name": "solid", "pos": pos, "nrm": nrm, "uv": uvc,
+                       "index": np.concatenate(idxs).astype(np.uint32)}
+    else:
+        solid_layer = None
+
     names = {0: "near", 1: "mid", 2: "backdrop"}
+    # layers/stats 必须先初始化，再追加 solid 层（顺序反了会 UnboundLocalError）
     layers, stats = [], {}
+    if solid_layer is not None:
+        layers.append(solid_layer)
+        stats["_solid_dbg"] = sorted(dbg, key=lambda d: -d["area"])[:12]
+        stats["solid"] = {"vertices": int(solid_layer["pos"].shape[0]),
+                          "triangles": int(solid_layer["index"].size // 3),
+                          "pixels": int(solid_mask.sum())}
     # 近/远两层在交界处**互相多占一格**：只让远景层多占 1 格还不够，
     # 实测交界处仍留一条底色缝（调试模式下红蓝之间那条深棕色细线）。
     # 两层都膨胀 1 格后重叠，缝被两边一起填上，深度接近也不会看出接缝。
     mask_near_d = ndimage.binary_dilation(lay == 0, np.ones((3, 3), bool)) & valid
+    if solids:
+        mask_near_d &= ~solid_mask          # 别和封闭体重叠（会 z-fighting）
     mask_far_d = ndimage.binary_dilation(lay == 2, np.ones((3, 3), bool)) & valid
 
     for lid in (0, 1, 2):
