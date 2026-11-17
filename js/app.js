@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '3.0.3';
+  const VERSION = '3.0.4';
   /* F6（v2.15.12）：`__PW_BUILD__` 与 VERSION 必须一致，否则 index.html 的
      "过期缓存自检"会每次打开都强制整页重载一次并打 data-stale 标记。
      bump_cache.py 现在两者一起改，这条断言用来在控制台第一时间暴露漂移。 */
@@ -1049,13 +1049,14 @@
         }
         // 天空壳/穹顶不加雾：它们本身就是远景，加雾会整屏发灰
         w.backdropFog = 0.02;
-        /* v3 的近景层是"每像素反投影"的网格，三角形绕序与 v2 的 LDI 相反，
-           背面剔除会把整层剔掉 —— 症状是"照片层完全不显示，只看到天空壳"，
-           整屏发灰像蒙了一层雾（实测）。v3 一律双面绘制。 */
-        w.reliefCull = false;
+        /* 近景层绕序已在 v3 管线里改成"从相机看逆时针"，所以**开**背面剔除：
+           站在照片背后/上方时看到的是地形，而不是照片壳的背面（那才是"漂浮板子"的来源）。 */
+        w.reliefCull = true;
         /* 飞行时不摘场景：v3 的几何是真三维表面，仰视时视锥内那块地面只存在于
            near 层里，按 v2 的做法跳过就会"一起飞全白"。 */
         w.planKeepsScene = true;
+        /* 飞行上限：单视图重建的头顶没有几何，飞太高只会看到壳的破口 */
+        w.flyMaxRel = 12;
         setHudPipe('v3', 'v3 · 扩散地形');
       }
 
@@ -1336,8 +1337,9 @@
     if (world.meshes.terrain) {
       // 用**绝对高度**而不是"离地高度"：heightAt 会把外层地形的起伏算进去，
       // 在上坡时"离地 12m"其实已经飞了 20m，阈值形同虚设（实测没淡掉）。
-      const t = Math.min(1, Math.max(0, (player.state.y - 6.0) / 8.0));
-      world.shellHide = t * t * (3 - 2 * t);
+      /* 不再按高度淡出照片壳：用户要的是"起飞和地面看到同一个世界"。
+         飞行上限已在 player 里压到离地 12m，壳不会再变成悬空的投影卡片。 */
+      world.shellHide = 0;
     }
     /* v3 资产**不切俯视 LOD**：v2 那套"飞行就只画顶面 + tile"是因为它的世界是
        一层朝前的薄壳，从上面看必然是一堆竖条。v3 有真三维地形，切过去反而把
@@ -1702,22 +1704,35 @@
       const service = found.found || { url: explicit || '', ok: false, reason: '未发现本机服务' };
       const webgpu = await webgpuP;
       const v2ok = service.ok && service.reconstruct && service.reconstruct.ok;
+      /* v3 是离线烘焙链路：它不需要本机 GPU 服务，只要有预烘资产就"就绪"。
+         ?pipe=v3（启动器默认带上）时优先报 v3，别再把徽标写成 v2 —— 用户看到
+         "v2 就绪"会以为脚本启动的是旧链路（实测就是这么反馈的）。 */
+      const wantV3 = q.get('pipe') === 'v3';
       if (v2ok) apiBase = service.url;
       const v = capsApi.verdict({ webgpu, service });
-      if (v2ok && !explicit) { v.label = 'v2 就绪 · 自动'; }
+      if (wantV3) {
+        v.level = 'v3';
+        v.label = 'v3 就绪 · 离线资产';
+        v.detail = 'v3 管线：离线烘焙的 world.glb（不需要本机 GPU 服务）'
+          + (v2ok ? '\n本机 v2 服务也在（' + service.url + '），仅作对比用' : '');
+      } else if (v2ok && !explicit) { v.label = 'v2 就绪 · 自动'; }
       window.__pwCaps = { webgpu, service, verdict: v };
       // 页脚也要写清楚链路与模型：只写"无服务器"在启用 v2 时是错的（本机服务≠云端）
       const foot = el('footPipe');
       const stat = el('footStat');
       if (foot) {
-        foot.textContent = v.level === 'v2'
-          ? 'v2 管线 · 本机 GPU 服务（照片不出本机）'
-          : '在线链路 · 浏览器内推理（照片不上传）';
+        foot.textContent = v.level === 'v3'
+          ? 'v3 管线 · 离线烘焙资产（照片不出本机）'
+          : (v.level === 'v2'
+            ? 'v2 管线 · 本机 GPU 服务（照片不出本机）'
+            : '在线链路 · 浏览器内推理（照片不上传）');
       }
       if (stat) {
-        stat.textContent = v.level === 'v2'
-          ? 'Depth-Anything-V2-Large · 长边 1540 · LDI 分层'
-          : 'Depth-Anything-V2-Small · 518×518';
+        stat.textContent = v.level === 'v3'
+          ? '逐像素反投影 · 双四边形连续曲面 · 扩散外推视锥外'
+          : (v.level === 'v2'
+            ? 'Depth-Anything-V2-Large · 长边 1540 · LDI 分层'
+            : 'Depth-Anything-V2-Small · 518×518');
       }
       badge.dataset.level = v.level;
       badge.textContent = v.label;
@@ -1890,10 +1905,26 @@
     }
     // 一条 URL 只启动一个 enter 流程：旧代码 ?glb=&w= / ?img=&w= 会各自
     // setTimeout 并交叠创建 world/player 与 rAF 链，先建的 GL 资源直接泄漏。
+    const pollV3 = q.get('pipe') === 'v3';
     const wid = q.get('w');
     if (wid && !glbUrl && !imgStarted) {
       const def = WORLDS.find((w) => w.id === wid);
-      if (def) setTimeout(() => enterWorld(def), 120);
+      if (def) {
+        /* ?pipe=v3：内置世界优先走**预烘的 v3 资产**（assets/world-v3-<id>.glb），
+           没有就退回 v2 在线链路。这样"用启动器打开 → 点世界"进去的就是 v3。 */
+        if (pollV3 && def.id) {
+          const v3glb = 'assets/world-v3-' + def.id + '.glb';
+          fetch(v3glb, { method: 'HEAD' }).then((r) => {
+            if (r.ok) enterAsset(v3glb);
+            else {
+              console.warn('?pipe=v3 没有 ' + v3glb + '，回退 v2 在线路径');
+              enterWorld(def);
+            }
+          }).catch(() => enterWorld(def));
+        } else {
+          setTimeout(() => enterWorld(def), 120);
+        }
+      }
     }
     window.__pw = {
       enterWorld, WORLDS, version: VERSION,

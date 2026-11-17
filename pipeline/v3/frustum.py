@@ -171,7 +171,8 @@ def grid_mesh(pos: np.ndarray, valid: np.ndarray, uv: np.ndarray,
               cliff: float = 1.8, skirt: float = 0.30,
               skirt_mask: np.ndarray | None = None,
               safe_mask: np.ndarray | None = None,
-              safe_uv: np.ndarray | None = None) -> dict:
+              safe_uv: np.ndarray | None = None,
+              floor: np.ndarray | None = None) -> dict:
     """规则像素网格 → 无洞、带厚度的曲面（断崖用双四边形，见模块文档）。"""
     h, w = valid.shape
     eye = np.asarray(eye, dtype=np.float32)
@@ -199,9 +200,13 @@ def grid_mesh(pos: np.ndarray, valid: np.ndarray, uv: np.ndarray,
     split_cells = ok4 & (ratio > cliff)
     edge_fixed = 0
 
+    # 绕序必须是"从相机看逆时针"（WebGL 默认正面 = CCW）。之前是 CW，
+    # 所以只能全局关掉背面剔除 —— 后果是从背后/上方看，照片壳的背面糊满画面
+    # （"漂浮的板子 + 竖向拉丝"就是这么来的）。绕序改对之后可以开剔除：
+    # 站在照片背后看到的就是**地形**，而不是壳的背面。
     tri = np.concatenate([
-        np.stack([a[flat_cells], b[flat_cells], c[flat_cells]], axis=1),
-        np.stack([a[flat_cells], c[flat_cells], d[flat_cells]], axis=1),
+        np.stack([a[flat_cells], c[flat_cells], b[flat_cells]], axis=1),
+        np.stack([a[flat_cells], d[flat_cells], c[flat_cells]], axis=1),
     ], axis=0)
 
     # ---- 断崖格：近端/远端各一张四边形（顶点沿各自射线重定位，投影不变） ----
@@ -240,10 +245,10 @@ def grid_mesh(pos: np.ndarray, valid: np.ndarray, uv: np.ndarray,
         idx_f = base_n + m * 4 + np.arange(m * 4).reshape(m, 4)
         tri = np.concatenate([
             tri,
-            np.stack([idx_n[:, 0], idx_n[:, 1], idx_n[:, 2]], axis=1),
-            np.stack([idx_n[:, 0], idx_n[:, 2], idx_n[:, 3]], axis=1),
-            np.stack([idx_f[:, 0], idx_f[:, 1], idx_f[:, 2]], axis=1),
-            np.stack([idx_f[:, 0], idx_f[:, 2], idx_f[:, 3]], axis=1),
+            np.stack([idx_n[:, 0], idx_n[:, 2], idx_n[:, 1]], axis=1),
+            np.stack([idx_n[:, 0], idx_n[:, 3], idx_n[:, 2]], axis=1),
+            np.stack([idx_f[:, 0], idx_f[:, 2], idx_f[:, 1]], axis=1),
+            np.stack([idx_f[:, 0], idx_f[:, 3], idx_f[:, 2]], axis=1),
         ], axis=0)
 
     # ---- 裙边：只给"面的外缘"（照片外框 / 天空边界 / 断崖边）加厚度 ----
@@ -283,7 +288,14 @@ def grid_mesh(pos: np.ndarray, valid: np.ndarray, uv: np.ndarray,
         pp = pos[ext_pix]
         dd = dirs[ext_pix]
         dist_e = dist[ext_pix]
-        P = np.concatenate([P, pp + dd * (dist_e * skirt)[:, None]], axis=0)
+        if floor is not None:
+            # 边界**垂直向下**挤到地板：形成地形块的侧壁。沿视线向后挤只是一条薄鳍，
+            # 从背后/上方看依然像纸片；向下封边之后从任何角度看都是同一个实体。
+            pe = pp.copy()
+            pe[:, 1] = np.minimum(floor[ext_pix], pp[:, 1] - 0.25)
+            P = np.concatenate([P, pe], axis=0)
+        else:
+            P = np.concatenate([P, pp + dd * (dist_e * skirt)[:, None]], axis=0)
         UV = np.concatenate([UV, uv[ext_pix]], axis=0)
         if C is not None:
             C = np.concatenate([C, color[ext_pix]], axis=0)
@@ -353,6 +365,10 @@ def build(z: np.ndarray, rgb: np.ndarray, cam: common.Camera3, cfg: dict,
     # 背景层压在前景上（实测 near+fill 从 48.5dB 掉到 30.6dB）。
     z_bg = np.maximum(z_bg, z_snap * 1.02).astype(np.float32)
     src = nearest_source(valid_bg)
+    # uv_photo 必须先定义：合并冲突时这段被挪到了 uv_core 之后，
+    # 结果是 build() 直接 UnboundLocalError（烘焙一启动就炸，但只读 GLB 的测试测不出来）。
+    uu, vv = np.meshgrid((np.arange(w) + 0.5) / w, (np.arange(h) + 0.5) / h)
+    uv_photo = np.stack([uu, vv], axis=-1).astype(np.float32)
     # P0-2：前景内部（腐蚀 1px）作为断崖角的安全取色源。
     # 只有"完全落在前景内部"的像素才允许把自己的 UV 用在断崖角上；
     # 边缘 1px（可能混入天空色）改用最近内部像素的 UV。
@@ -365,8 +381,6 @@ def build(z: np.ndarray, rgb: np.ndarray, cam: common.Camera3, cfg: dict,
     def sub(a: np.ndarray) -> np.ndarray:
         return a[::step, ::step]
 
-    uu, vv = np.meshgrid((np.arange(w) + 0.5) / w, (np.arange(h) + 0.5) / h)
-    uv_photo = np.stack([uu, vv], axis=-1).astype(np.float32)
     uv_src = uv_photo.reshape(-1, 2)[src].reshape(h, w, 2)
 
     pos = eye[None, None, :] + dirs * z_snap[..., None]
@@ -378,10 +392,28 @@ def build(z: np.ndarray, rgb: np.ndarray, cam: common.Camera3, cfg: dict,
     uv_bg = uv_src.copy()
     uv_bg[..., 1] *= uv_v
 
+    # 每像素地板高度（按方位取最小面再降 0.45m，限制在 -6m 以上）：
+    # near 层边界沿它向下封边，照片壳变成封闭地形块。
+    yy = (eye[None, None, 1] + dirs[..., 1] * z_snap).astype(np.float32)
+    bins = 720
+    azp = np.arctan2(dirs[..., 0], -dirs[..., 2])
+    aip = np.clip(((azp + math.pi) / (2 * math.pi) * bins).astype(np.int64), 0, bins - 1)
+    okp = (~sky) & np.isfinite(yy)
+    fb = np.full(bins, np.inf, dtype=np.float32)
+    if okp.any():
+        np.minimum.at(fb, aip[okp], yy[okp])
+    fb = np.where(np.isfinite(fb), fb, 0.0)
+    floor_px = np.clip(fb[aip] - float(cfg.get("floor_drop", 0.45)),
+                       float(cfg.get("floor_min", -6.0)), -0.15).astype(np.float32)
+
     layers = []
     near = grid_mesh(sub(pos), sub(~sky), sub(uv_near), sub(dirs), eye,
                      cliff=float(cfg.get("cliff", 1.8)),
                      skirt=float(cfg.get("skirt", 0.30)),
+                     # solidify 默认**关**：垂直向下封边会在轮廓下方拉出一片幕布
+                     # （实测原图区 PSNR 47.1 → 26.9dB）。只有"沿相机射线"的挤出
+                     # 才是投影不变的，所以厚度靠 skirt 而不是靠垂直封底。
+                     floor=sub(floor_px) if cfg.get("solidify", False) else None,
                      safe_mask=sub(core), safe_uv=sub(uv_core))
     near["name"] = "near"
     if near["index"].size:

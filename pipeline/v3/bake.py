@@ -89,7 +89,9 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
     fr = frustum.build(z, rgb, cam, {
         "step": int(cfg.get("step", 3)),
         "cliff": float(cfg.get("cliff", 1.8)),
-        "skirt": float(cfg.get("skirt", 0.30)),
+        # 裙边加厚到 0.9：沿射线的挤出是投影不变的，加厚只影响侧/背视的"实体感"，
+        # 不影响原点视角（实测 0.30 → 0.9 时 psnr_core 不变）。
+        "skirt": float(cfg.get("skirt", 0.90)),
         # 下面三个默认值就是 v3 的推荐值；参数搜索（tools/v3_sweep.py）会覆盖它们
         "ground_tol": float(cfg.get("ground_tol", 0.40)),
         "sky_grad": float(cfg.get("sky_grad", 0.045)),
@@ -134,7 +136,12 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
         field = terrain.polar_heightfield(cloud, pn["pano"], cam.eye, near_edge=edge)
         fov_half = cam.hfov * 0.5
         far = terrain.heightfield_mesh(field, cam.eye, edge, (0.5, 0.5),
-                                       fov_half=fov_half, floor_y=floor_y,
+                                       fov_half=fov_half,
+                                       # floor_y=None：足迹内不再铺"平板地板"，改用**实测高度场 + 起伏**。
+                                       # 原点视角由 conform_to_photo 把关（把落在照片表面之前的顶点
+                                       # 沿射线推到表面之后），所以不需要一块死的平板来兜底；
+                                       # 而侧视/背视能看到真正有起伏的地面，而不是一张水平的板。
+                                       floor_y=None if cfg.get("no_floor", True) else floor_y,
                                        seed=int(cfg.get("seed", 0)),
                                        amp_far=float(cfg.get("relief_amp", 7.0)))
         prop = terrain.props(pn["pano"], field, edge, cam.eye, (0.5, 0.5),

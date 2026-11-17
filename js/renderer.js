@@ -636,11 +636,15 @@
 
       /* v3 视锥外地形/地物：独立一层，不受照片壳淡出影响 */
       if (world.meshes.terrain) {
+        /* 双面绘制：地形是极坐标网格，绕序只有一个方向；从上方/背后看，
+           背面被剔除就会碎成一块一块的"浮岛"（实测飞起来就是这个症状）。 */
+        gl.disable(gl.CULL_FACE);
         drawMesh(world, world.meshes.terrain,
           world.dbgLayers
             ? { mode: 9, debugCol: [0.2, 0.9, 0.3] }
             : { tex: world.tex.photo, mode: world.vertexColor ? 1 : 4,
                 fog: 0.16, mipBias: 0, backdrop: [0, 0] });
+        gl.enable(gl.CULL_FACE);
       }
 
       /* v3 的照片天空壳：世界固定（不做无视差平移），按"离出生点距离 + 是否飞行"淡出。

@@ -224,7 +224,11 @@
         state.vy = lerp(state.vy, vTarget, 1 - Math.exp(-10 * dt));
         state.flyY += state.vy * dt;
         // 下限：不能钻到地面以下；上限：别飞出世界盒
-        state.flyY = clamp(state.flyY, floorY, groundY + 260);
+        /* v3 世界把飞行上限压到离地 12m：再高就会从照片壳的破口往下看，
+           看到的不是地面而是虚空/天空卡（v3 是单视图重建，头顶本来没有几何）。
+           12m 既够俯瞰，又保证起飞后看到的与站在地上是**同一个世界**。 */
+        const maxRel = (world && typeof world.flyMaxRel === 'number') ? world.flyMaxRel : 260;
+        state.flyY = clamp(state.flyY, floorY, groundY + maxRel);
         state.y = state.flyY;
         state.bob = 0;
       } else if (state.y > floorY + 0.06) {

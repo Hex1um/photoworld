@@ -192,7 +192,8 @@ if ($needStart) {
 $target = ''
 if (-not $Photo -and -not $World) {
   # 默认打开**主页**（画廊/展厅），不硬跳进某个世界
-  $url = "$StaticUrl/"
+  # 带 ?pipe=v3：主页徽标与画廊都按 v3（离线资产）走，不再报 v2
+  $url = "$StaticUrl/?pipe=v3"
   if ($NoBrowser) { Say "（-NoBrowser）请手动打开：$url" 'gray' }
   else { Say "打开主页：$url" 'ok'; Start-Process $url }
   if (-not $Quiet) {
@@ -234,7 +235,7 @@ if ($Photo) {
 }
 Say "资产：$target" 'gray'
 
-$url = "$StaticUrl/?glb=" + [Uri]::EscapeDataString($target) + '&instant=1'
+$url = "$StaticUrl/?pipe=v3&glb=" + [Uri]::EscapeDataString($target) + '&instant=1'
 if ($NoBrowser) {
   Say "（-NoBrowser）请手动打开：$url" 'gray'
 } else {
