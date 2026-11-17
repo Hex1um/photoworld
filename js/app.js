@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.15.17';
+  const VERSION = '2.15.24';
   /* F6（v2.15.12）：`__PW_BUILD__` 与 VERSION 必须一致，否则 index.html 的
      "过期缓存自检"会每次打开都强制整页重载一次并打 data-stale 标记。
      bump_cache.py 现在两者一起改，这条断言用来在控制台第一时间暴露漂移。 */
@@ -496,6 +496,17 @@
         groundGrid: params.get('gfan') !== '1',
         // 地面渐隐区间可调（A/B 用）：?gfade=起始m,结束m,强度
         gfade: params.get('gfade') || undefined,
+        /* 壳层地面像素按距离交棒给平铺网格（v2.15.18）：
+           地面顶点的 UV 是照片 UV，沿径向被拉成放射状拉丝（18 张语料每张都有）。
+           11m 内保留照片细节，30m 外完全交给世界坐标平铺网格。
+           `?galpha=0` 关掉做 A/B。 */
+        gndAlpha: (params.get('galpha') === '0' ? false : (params.get('galpha') || undefined)),
+        /* 地面点云改用世界坐标平铺 UV（v2.15.18，消放射状拉丝）：默认开，
+           `?gpts=0` 回到照片 UV 做 A/B。 */
+        groundPtsTile: params.get('gpts') === '1',
+        /* 断口补片（v2.15.20）：被剔除的四边形压扁后填回洞里，默认开。
+           `?fill=0` 回到"直接丢掉"的旧行为做 A/B。 */
+        gapFill: params.get('fill') === '1',
         // 真实分阶段回调：中值 / 反投影 / 法线 / 索引 / 高度场各推进一格
         onProgress: (p) => setProgress(75 + p * 12,
           p < 0.35 ? '深度去噪：5×5 中值…'
@@ -939,7 +950,25 @@
         sunDir: [0.3, 0.5, -0.8],
         lights: { fogDensity: 0.0016 },
         tex: { photo: tex, ground: null, sky: null, grass: null },
-        meshes: { relief: nearMesh, backdrop: farMesh, farRidge: null, nearRidge: null, sky: null, ground: groundMesh, solid: solidMesh, rocks: null, grass: null, shrub: null, top: topMesh, topHole: topHoleMesh },
+        /* ?hide=top,solid,... ：把 GLB 的某一层整层摘掉，用来定位"这条artifact/
+           断口是哪一层画的"。v2 链路（服务端 LDI → 6 层 GLB）里层名是
+           near / backdrop / solid / ground / top / topHole，
+           逐层摘是唯一能给出确定结论的取证方式（指标对这些不敏感）。 */
+        meshes: (() => {
+          const m = { relief: nearMesh, backdrop: farMesh, farRidge: null, nearRidge: null,
+            sky: null, ground: groundMesh, solid: solidMesh, rocks: null, grass: null,
+            shrub: null, top: topMesh, topHole: topHoleMesh };
+          const hide = (new URLSearchParams(location.search).get('hide') || '')
+            .split(',').map((t) => t.trim()).filter(Boolean);
+          const map = { near: 'relief', backdrop: 'backdrop', solid: 'solid',
+            ground: 'ground', top: 'top', topHole: 'topHole' };
+          for (const h of hide) {
+            const k = map[h] || h;
+            if (k in m) m[k] = null;
+          }
+          if (hide.length) console.info('[app] 已隐藏层：' + hide.join(','));
+          return m;
+        })(),
         /* F18（v2.15.12）：这里原来还有 `topShowAbove: topMaxY + 1.0`，标注"视点
            高于地形最高点才显示顶面"—— 但渲染端从 v2.13 起是**常驻绘制**，这个字段
            从来没人读。留着会误导排查（按字段语义推断会得出错误结论），已删除。

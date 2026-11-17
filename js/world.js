@@ -1732,8 +1732,25 @@
            平铺网格（groundGrid，世界坐标 UV + 双尺度采样）没有方向性，不会拉丝。
            所以：近处保留照片细节（<10m，掠射最轻），18~30m 之间淡出，
            远处完全交给平铺网格 + 顶点色低频色差。
-           `?gfade=0` 回到旧行为做 A/B。 */
+           v2.15.18：这段的**实现**曾随 v2.15.7 的回退一起被删（只剩 `let aGnd = 1`），
+           所以"地面按距离交棒"从 v2.15.6 起就没生效过 —— 这正是 18 张语料里
+           **每一张**地面都有放射拉丝的原因：地面像素仍带着照片 UV，沿径向被拉长。
+           现在按原设计补回，并用新开关独立控制，便于干净的 A/B：
+             `?galpha=0`        关掉（回到"壳层地面全程不透明"的旧行为）
+             `?galpha=11,30,1`  自定义 起始距离/结束距离/强度
+           判据用**顶点实际水平距离**（pos 已写好），不用循环里那个还没钳位的 horizD。 */
+        /* 默认关（v2.15.23）：这轮 A/B 发现语料图走的是 v2 服务端 LDI 路径，
+           浏览器世界构建器（本函数）只服务 ?w= 内置世界，改动没有在真实链路上
+           验证过。保留开关，等 v2 路径的问题收干净再来定性。 */
         let aGnd = 1;
+        if (!indoor && gGround[k] === 1 && opt.gndAlpha) {
+          const ga = String(opt.gndAlpha || '11,30,1').split(',').map(Number);
+          const f0 = isFinite(ga[0]) ? ga[0] : 11;
+          const f1 = isFinite(ga[1]) ? ga[1] : 30;
+          const amt = isFinite(ga[2]) ? ga[2] : 1;
+          const hd = Math.hypot(pos[k * 3], pos[k * 3 + 2]);
+          aGnd = 1 - clamp(amt, 0, 1) * smoothstep(f0, f1, hd);
+        }
         col[k * 4 + 3] = aSky * aU * aV * aG * aGnd;
         col[k * 4] = 1; col[k * 4 + 1] = 1; col[k * 4 + 2] = 1;
         // 有限区域的边界就是照片投影的梯形，alpha 硬边比"融色灰带"干净；
@@ -2172,6 +2189,11 @@
        区域裁剪是「有限直角坐标世界」的边界：照片投影成梯形后自然收边，
        不再需要视锥掩码或镜像平铺。 */
     const idx = [];
+    /* 断口填补（v2.15.20）：被剔除的四边形不再"直接消失"，而是记进 fillQ。
+       下面会用它们建一张**变形的补片网格**填回洞里 —— 剔除的本意是"别让贴图
+       拉成几十米的竖幕/纸片"，代价是画面里出现洞与悬空条带；补片的做法是
+       "把同样的四边形压扁到还能读成坡面的程度再保留"，于是既不断、也不幕。 */
+    const fillQ = [];
     let skipped = 0, skippedCard = 0, skippedObjEdge = 0, skippedSteep = 0, skippedWall = 0,
       skippedGround = 0, skippedTorn = 0,
       culledAlpha = 0, culledArea = 0;
@@ -2216,7 +2238,9 @@
           // 运算符优先级修正：原写法 `!noCull && dyV > 5 || dyH > 5` 等价于
           // `(!noCull && dyV>5) || dyH>5`，导致 `?nocull=steep` 对 dyH 完全失效
           // （山脊两侧水平相邻顶点高差普遍 >5m，A/B 时无法关掉这条剔除）。
-          if (!noCull('steep') && !terrainKeep && (dyV > 5 || dyH > 5)) { skippedSteep++; continue; }
+          if (!noCull('steep') && !terrainKeep && (dyV > 5 || dyH > 5)) {
+            skippedSteep++; fillQ.push(a0, a1, b0, b1); continue;
+          }
         }
         // 近处物体与背景的交界交给下面的深度比值判据（tMax/tMin）。
         // 曾按「模型 mask 的 fg 顶点数」跳面，但 96×96 的 mask 边界是块状的，
@@ -2232,13 +2256,15 @@
           for (const k of [a0, a1, b0, b1]) {
             if (Math.abs(pos[k * 3]) > A || pos[k * 3 + 2] < -B - 0.5 || pos[k * 3 + 2] > 1.5) { inside = false; break; }
           }
-          if (!inside) { culledArea++; continue; }
+          if (!inside) { culledArea++; fillQ.push(a0, a1, b0, b1); continue; }
         }
         const tMax = Math.max(gT[a0], gT[a1], gT[b0], gT[b1]);
         const tMin = Math.min(gT[a0], gT[a1], gT[b0], gT[b1]);
         // 室内跳面阈值放宽：楼梯/窗/天花板的深度跳变本来就大，2.6 会把
         // 画面咬出一排锯齿缺口；室内范围只有 18m，不需要断崖处理。
-        if (!noCull('jump') && tMax / Math.max(tMin, 0.6) > (indoor ? 6 : edgeRatio)) { skipped++; continue; }
+        if (!noCull('jump') && tMax / Math.max(tMin, 0.6) > (indoor ? 6 : edgeRatio)) {
+          skipped++; fillQ.push(a0, a1, b0, b1); continue;
+        }
         /* 近垂直面片剔除（v1.16.1）：竖直墙在照片里没有对应的水平位移，
            贴图必然被拉成一根根竖条。远山脚下 → 水面这一段最典型：深度都顶在
            220m 上限，水平位移每格只有几十厘米，y 却从 20m 平滑降到 0，
@@ -2271,7 +2297,9 @@
              而中近处的真实崖面（晨雾湖岸那块岩壁，40~120m）竖向跨度本来就大，
              旧规则连它一起剪，在岩壁上咬出一格格白色方块。
              距离条件把两者分开：远处该剪的照剪，近处崖面保留。 */
-          if (!noCull('wall') && !terrainKeep && vSpan > 3.0 && vSpan > hMin * 2.5 && tMin > 60) { skippedWall++; continue; }
+          if (!noCull('wall') && !terrainKeep && vSpan > 3.0 && vSpan > hMin * 2.5 && tMin > 60) {
+            skippedWall++; fillQ.push(a0, a1, b0, b1); continue;
+          }
           /* v1.19.1：法线朝下的四边形一律丢掉。
              单层薄壳在照片「天际线附近」会连出一批**底面朝上的长条**：
              四角深度差异大、竖直跨度却不到 3m，躲过了竖墙筛，转身看过去就是
@@ -2312,10 +2340,84 @@
           const gsum = gGround[a0] + gGround[a1] + gGround[b0] + gGround[b1];
           if (gsum > 0 && gsum < 4) {
             const tHi = Math.max(gT[a0], gT[a1], gT[b0], gT[b1]);
-            if (!noCull('torn') && !terrainKeep && tHi > 22) { skippedTorn++; continue; }
+            if (!noCull('torn') && !terrainKeep && tHi > 22) {
+              skippedTorn++; fillQ.push(a0, a1, b0, b1); continue;
+            }
           }
         }
         idx.push(a0, b0, a1, a1, b0, b1);
+      }
+    }
+
+    /* 4a-ter) 断口填补网格（v2.15.20）
+       为什么要它：上面那些剔除（跳面 / 竖直跨度 / 竖幕 / 撕裂）每一条都会
+       在画面里留下**洞**——正面看是天空透出来的一条白带，侧后方看是悬空的
+       长条与楔形。用户的原话是"很多地方不是连续的"，洞就是最主要的那一类。
+       剔除的动机是"别把贴图沿视线拉成几十米的竖幕"，这没有错；错在把四边形
+       整个丢掉。这里改成**压扁后保留**：
+         · 深度比 > FILL_RATIO 的角拉近到 tmin·FILL_RATIO（竖幕最多这么长）
+         · 竖直跨度压到 ≤ 2×水平间距（坡面而不是墙）
+         · 顶点色淡化成环境色（edge.x），让它读作"后面的一层雾坡"而不是"纸片"
+       于是同一块区域既有几何、又不会幕化。`?fill=0` 回到旧的"直接丢"。 */
+    let gapFill = null;
+    if (opt.gapFill === true && fillQ.length) {
+      const FILL_RATIO = 1.9;
+      const nQ = fillQ.length / 4;
+      const fpos = new Float32Array(nQ * 12);
+      const fuv = new Float32Array(nQ * 8);
+      const fcol = new Float32Array(nQ * 16);
+      const fedge = new Float32Array(nQ * 8);
+      const fidx = [];
+      let fv = 0;
+      for (let q = 0; q + 3 < fillQ.length; q += 4) {
+        const k0 = fillQ[q], k1 = fillQ[q + 1], k2 = fillQ[q + 2], k3 = fillQ[q + 3];
+        const ks = [k0, k1, k2, k3];
+        const ts = ks.map((k) => gT[k]);
+        const tmin = Math.min(ts[0], ts[1], ts[2], ts[3]) || 1;
+        const tcap = tmin * FILL_RATIO;
+        const ys = ks.map((k) => pos[k * 3 + 1]);
+        const yLo = Math.min(ys[0], ys[1], ys[2], ys[3]);
+        const yHi = Math.max(ys[0], ys[1], ys[2], ys[3]);
+        /* 水平最小间距：决定这块地方面本来有多"宽"，据此定竖直跨度上限 */
+        let hMin = 1e9;
+        for (const pr of [[0, 1], [2, 3], [0, 2], [1, 3]]) {
+          const ka = ks[pr[0]], kb = ks[pr[1]];
+          const dh = Math.hypot(pos[ka * 3] - pos[kb * 3], pos[ka * 3 + 2] - pos[kb * 3 + 2]);
+          if (dh < hMin) hMin = dh;
+        }
+        if (!isFinite(hMin) || hMin <= 0) hMin = 1;
+        const ycap = Math.max(0.8, Math.min(hMin, 8) * 2.0);
+        const yspan = yHi - yLo;
+        const yScale = (yspan > ycap && yspan > 1e-4) ? ycap / yspan : 1;
+        const ymid = (yHi + yLo) * 0.5;
+        const base = fv;
+        for (let c = 0; c < 4; c++) {
+          const k = ks[c];
+          const sc = (ts[c] > tcap && ts[c] > 1e-4) ? tcap / ts[c] : 1;
+          const x = pos[k * 3] * sc;
+          const z = pos[k * 3 + 2] * sc;
+          const yRaw = eye + (pos[k * 3 + 1] - eye) * sc;
+          const y = ymid + (yRaw - ymid) * yScale;
+          fpos[fv * 3] = x; fpos[fv * 3 + 1] = y; fpos[fv * 3 + 2] = z;
+          fuv[fv * 2] = uv[k * 2]; fuv[fv * 2 + 1] = uv[k * 2 + 1];
+          fcol[fv * 4] = col[k * 4]; fcol[fv * 4 + 1] = col[k * 4 + 1];
+          fcol[fv * 4 + 2] = col[k * 4 + 2];
+          /* alpha 压到 0.85：补片刻意"略透"，与周围的壳叠在一起时不会有硬边 */
+          fcol[fv * 4 + 3] = Math.min(1, col[k * 4 + 3]) * 0.85;
+          /* edge.x 把颜色往环境色拉（mode 4 的 `mix(col, envCol, vEdge.x)`），
+             这样补片读起来是"远处的雾坡"，而不是一块贴图被拉长的纸 */
+          fedge[fv * 2] = 0.55;
+          fedge[fv * 2 + 1] = 0;
+          fv++;
+        }
+        fidx.push(base, base + 2, base + 1, base + 1, base + 2, base + 3);
+      }
+      if (fv >= 8 && fidx.length >= 12) {
+        gapFill = {
+          pos: fpos.subarray(0, fv * 3), uv: fuv.subarray(0, fv * 2),
+          color: fcol.subarray(0, fv * 4), edge: fedge.subarray(0, fv * 2),
+          index: fidx
+        };
       }
     }
 
@@ -2518,6 +2620,19 @@
       semGroups: sem ? sem.groups : null,
       /* 逐顶点语义组（v1.26.7 层化用：地面层与主体层分开绘制，贴图 mip 不同） */
       grp: gGrp,
+      /* 地面点云是否改用**世界坐标平铺 UV**（v2.15.18）。
+         理由：地面点是"每个照片像素一个点"，UV 取的是像素在照片里的位置。
+         相机到地面的射线在世界里沿径向铺开，而照片里对应的只有底部几行 ——
+         同一圈径向线上的点采样到几乎相同的几行像素，颜色沿射线方向被固化，
+         读起来就是一圈**放射状拉丝**（18 张语料每一张的地面都有）。
+         平铺 UV 没有方向性：点仍是相同位置、相同密度，只是颜色改为
+         「世界坐标处的程序化地面色」，径向一致性消失。
+         `?gpts=0` 回到照片 UV 做 A/B。 */
+      /* 注意：这一版**默认关**。A/B 实测（04_coast_cliff A00）平铺 UV + 程序化
+         地面贴图把地面变成一块灰绿板，与照片带之间出现一条硬边 —— 拉丝确实没了，
+         但"颜色不再来自照片"这一点读起来更像断口。所以保留开关供后续
+         "平铺 UV × 照片地面均值色"的方案使用，不要直接默认开。 */
+      groundPtsTile: opt.groundPtsTile === true,
       semSize: sem ? [sem.width, sem.height] : null,
       /* 信息保留率诊断：哪一步丢了多少面，直接决定「图片丢信息」的排查方向 */
       stats: {
@@ -2525,6 +2640,7 @@
         keepRate: (idx.length / 6) / quadTotal,
         culledAlpha, culledArea, skipped, skippedCard, skippedObjEdge, skippedSteep, skippedWall,
         skippedGround, skippedTorn, skyFillHits, skyFillOn: opt.skyFill === true,
+        gapQuads: fillQ.length / 4, gapFillOn: opt.gapFill === true,
         objectCards: instInfo.instances.length
       },
       /* 质检用：把顶点位置暴露出来（?dbgpos=1），tools/probe.mjs 可以据此
@@ -2723,8 +2839,15 @@
           jump = Math.max(jump, Math.max(dK, d2) / Math.max(0.25, Math.min(dK, d2)));
         }
         const aEdge = jump > 1.8 ? 0.35 : 1;
+        /* 地面/水面/地形层：UV 换成世界坐标平铺（4.5m 一格，与 groundGrid 同口径），
+           消掉"整圈径向线颜色一致"造成的放射拉丝。主体层仍用照片 UV。 */
+        const tileUv = relief.groundPtsTile && which === 'ground'
+          && relief.grp && (relief.grp[k] === GND || relief.grp[k] === WATER
+            || relief.grp[k] === TERRAIN);
+        const u0 = tileUv ? x0 / 4.5 : relief.uv[k * 2];
+        const v0 = tileUv ? z0 / 4.5 : relief.uv[k * 2 + 1];
         pos.push(x0, y0, z0);
-        uv.push(relief.uv[k * 2], relief.uv[k * 2 + 1]);
+        uv.push(u0, v0);
         col.push(relief.color[k * 4], relief.color[k * 4 + 1], relief.color[k * 4 + 2],
           relief.color[k * 4 + 3] * aEdge);
         /* 第二层点（v2.15.6）：同一 (u,v)、远侧深度。原地视角被近点遮住，
@@ -2737,7 +2860,7 @@
           const pxx = dx2 * zf2, pyy = 1.7 + dy2 * zf2, pzz = dz2 * zf2;
           if (pyy > -0.3 && Math.abs(pxx) < 400 && Math.abs(pzz) < 400) {
             pos.push(pxx, pyy, pzz);
-            uv.push(relief.uv[k * 2], relief.uv[k * 2 + 1]);
+            uv.push(u0, v0);
             col.push(relief.color[k * 4], relief.color[k * 4 + 1], relief.color[k * 4 + 2],
               relief.color[k * 4 + 3] * 0.9);
           }
@@ -2750,7 +2873,7 @@
         if (jump > 2.5) {
           for (let sk = 1; sk <= 2; sk++) {
             pos.push(x0, y0 - sk * 0.16, z0);
-            uv.push(relief.uv[k * 2], relief.uv[k * 2 + 1]);
+            uv.push(u0, v0);
             const dim = 1 - sk * 0.14;
             col.push(relief.color[k * 4] * dim, relief.color[k * 4 + 1] * dim,
               relief.color[k * 4 + 2] * dim, relief.color[k * 4 + 3] * aEdge * 0.7);
@@ -2758,7 +2881,7 @@
         }
         if (jump > 1.3) {
           pos.push(x0 + ((i % 3) - 1) * 0.012, y0 + 0.025, z0 + ((j % 3) - 1) * 0.012);
-          uv.push(relief.uv[k * 2], relief.uv[k * 2 + 1]);
+          uv.push(u0, v0);
           col.push(relief.color[k * 4], relief.color[k * 4 + 1], relief.color[k * 4 + 2],
             relief.color[k * 4 + 3] * aEdge * 0.7);
         }
@@ -3103,6 +3226,8 @@
       })(),
       // 照片底行向下的连续裙边（消掉照片底边的几何断口）
       skinSkirt: (relief && relief.skirt) ? PWGL.createMesh(gl, relief.skirt) : null,
+      /* 断口补片（v2.15.20）：填住被剔除四边形留下的洞 */
+      gapFill: (relief && relief.gapFill) ? PWGL.createMesh(gl, relief.gapFill) : null,
       // 单体十字账单牌（v1.16）：替代被拉成鳍的对象四边形
       objectCards: (relief && relief.cards) ? PWGL.createMesh(gl, relief.cards) : null,
       // v1.15：默认只生成正面一个扇环，其他地方留空（用户明确要求）。
@@ -3245,7 +3370,8 @@
         calP: relief.calibration ? relief.calibration.p : null,
         calZNear: relief.calibration ? relief.calibration.zNear : null,
         calRNear: relief.calibration ? relief.calibration.rNear : null,
-        calRFar: relief.calibration ? relief.calibration.rFar : null
+        calRFar: relief.calibration ? relief.calibration.rFar : null,
+        gapQuads: (relief.stats ? relief.stats.gapQuads : null)
       }, relief.meta || {}) : null,
       // 单体实例（bbox / 中位深度 / 世界中心），供 js/object3d.js 升级为真网格
       objectInstances: (relief && relief.instances) ? relief.instances : [],

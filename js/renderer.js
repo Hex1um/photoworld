@@ -450,10 +450,18 @@
         /* mode 1（顶点色）。mode 10 曾试过"片元级程序化噪声"，
            但那段 GLSL 编译失败（undeclared identifier），先退回可用的方案；
            地面细节目前由 ldi 里的多尺度顶点噪声提供。 */
-        drawMesh(world, groundMeshNow, {
-          tex: null, mode: GROUND_MODE, fog: 0.55, mipBias: 0,
-          skyAmb: [1.05, 1.02, 0.98]
-        });
+        /* v2.15.23 A/B：地面层一直是 `tex:null + mode 1`（纯顶点色），所以
+           ldi 里辛苦烘焙的"照片地面 bbox 内平铺 UV"**从来没被用过** ——
+           画面里那层地面就是一块没有细节的塑料板（沙滩/草地/水都一样）。
+           `?gtex=1` 时改用照片贴图 + mode 6（双尺度采样 + 低频色斑），
+           UV 已由 ldi 限制在照片的地面 bbox 内，不会采到天空。 */
+        const groundTexOn = (typeof location !== 'undefined'
+          && new URLSearchParams(location.search).get('gtex') === '1');
+        drawMesh(world, groundMeshNow, groundTexOn
+          ? { tex: world.tex.photo, mode: 6, fog: 0.55, mipBias: 0.6,
+              skyAmb: [1.05, 1.02, 0.98] }
+          : { tex: null, mode: GROUND_MODE, fog: 0.55, mipBias: 0,
+              skyAmb: [1.05, 1.02, 0.98] });
         gl.enable(gl.CULL_FACE);
       }
 
@@ -486,6 +494,22 @@
         gl.disable(gl.CULL_FACE);
         drawMesh(world, world.meshes.groundGridPhoto, {
           tex: world.tex.photo, mode: 4, fog: 0.26, mipBias: 2.2, backdrop: [0, 0]
+        });
+        gl.disable(gl.BLEND);
+        gl.enable(gl.CULL_FACE);
+      }
+
+      /* 断口补片（v2.15.20）：被剔除的四边形（跳面/竖直跨度/竖幕/撕裂）留下的洞，
+         由这张"压扁后的同一批四边形"填住。画在照片壳之前，深度测试保证只在洞里
+         露出来；颜色已按 edge.x=0.55 拉向环境色，读起来是后面一层雾坡。 */
+      if (world.meshes.gapFill && !skip('fill') && !skip('shell')) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.depthMask(true);
+        gl.enable(gl.CULL_FACE);
+        drawMesh(world, world.meshes.gapFill, {
+          tex: world.tex.photo, mode: 4, fog: 0.42, mipBias: 1.0,
+          alphaMul: shellA(world)
         });
         gl.disable(gl.BLEND);
         gl.enable(gl.CULL_FACE);
@@ -551,8 +575,14 @@
              点云没有「连接」，天然不会出现这两类病。 */
           if (world.meshes.splatGround && world.meshes.splatBody) {
             /* 层化：地面用 mip 2.2 的低频照片色（掠射不拉丝），主体保持原图清晰。 */
+            /* v2.15.18：地面层的 UV 已改成世界坐标平铺（见 world.js 的
+               groundPtsTile），所以这里必须换成**程序化地面贴图**（mirror wrap），
+               不能再拿照片贴图去采样 —— 平铺 UV × 照片 = 随机取到天空/岩石的颜色。
+               `?gpts=0` 时 world.groundPtsTile 为 false，UV 仍走照片口径。 */
             drawSplat(world, world.meshes.splatGround, {
-              tex: world.tex.photo, fog: 0.5, scale: world.splatScale || 30, mip: 2.2,
+              tex: world.groundPtsTile ? world.tex.ground : world.tex.photo,
+              fog: 0.5, scale: world.splatScale || 30,
+              mip: world.groundPtsTile ? 1.2 : 2.2,
               alphaMul: shellA(world)
             });
             drawSplat(world, world.meshes.splatBody, {

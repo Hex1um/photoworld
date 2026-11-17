@@ -26,21 +26,31 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--w", type=int, default=460)
     ap.add_argument("--h", type=int, default=288)
+    ap.add_argument("--pick", default="",
+                    help="逗号分隔的机位后缀（如 A00,A03,A06,A09,A11,B18,C28）；"
+                         "留空用默认 6 机位")
+    ap.add_argument("--cols", type=int, default=0, help="列数；留空按 pick 数量自动")
+    ap.add_argument("--only", default="", help="只拼这些图（逗号分隔的子串）")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
-    names = sorted({os.path.basename(p).rsplit("_", 1)[0]
-                    for p in glob.glob(os.path.join(args.shots, "*_A00.png"))})
+    pick = [t.strip() for t in args.pick.split(",") if t.strip()] or PICK
+    pat = os.path.join(args.shots, "*_%s.png" % pick[0])
+    names = sorted({os.path.basename(p).rsplit("_", 1)[0] for p in glob.glob(pat)})
     if not names:
-        print("没有找到截图：%s/*_A00.png" % args.shots)
+        print("没有找到截图：%s" % pat)
         return 1
+    if args.only:
+        keep = [s.strip() for s in args.only.split(",") if s.strip()]
+        names = [n for n in names if any(k in n for k in keep)]
 
-    cols, rows = 3, 2
+    cols = args.cols or (3 if len(pick) <= 6 else 4)
+    rows = (len(pick) + cols - 1) // cols
     for name in names:
         sheet = Image.new("RGB", (args.w * cols, args.h * rows), (18, 18, 20))
         dr = ImageDraw.Draw(sheet)
         got = 0
-        for i, tag in enumerate(PICK):
+        for i, tag in enumerate(pick):
             p = os.path.join(args.shots, "%s_%s.png" % (name, tag))
             if not os.path.exists(p):
                 continue
