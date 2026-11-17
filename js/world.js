@@ -3053,7 +3053,11 @@
 
     const m = {
       relief: relief ? PWGL.createMesh(gl, relief) : null,
-      splat: (relief && relief.grid) ? PWGL.createMesh(gl, buildSplat(relief, gl, 2)) : null,
+      /* F17（v2.15.12）：全量点云**不再构建**。
+         以前这里同时建了三份（全量 + ground + body），而渲染端只要分层存在就只画
+         分层（renderer 的 splat 分支），全量那份恒不绘制 —— 白占约 1/3 点云显存
+         （每图 ~8MB 起）。渲染端保留了"分层缺失时回退全量"的分支，这里传 null。 */
+      splat: null,
       /* 层化（v1.26.7）：地面层用低频贴图、主体层保持清晰 */
       splatGround: (relief && relief.grid) ? PWGL.createMesh(gl, buildSplat(relief, gl, 2, 'ground')) : null,
       splatBody: (relief && relief.grid) ? PWGL.createMesh(gl, buildSplat(relief, gl, 2, 'body')) : null,
@@ -3213,7 +3217,18 @@
       /* 用真网格替换部分账单牌：把已升级实例的顶点从卡片网格里剔除并重建。
          ids = 已升级为 3D mesh 的实例 id 列表（由 js/object3d.js 调用）。 */
       hideObjectCards: function (ids) {
+        /* F16（v2.15.12）：这个函数以前是**死代码 + 定时炸弹**。
+         `labelObjectCards` 产出的实例只有 {id, area, uv, t, cx, cz, ymin, group, cells}，
+         没有 vStart/vCount/iStart/iCount；而 relief.cards 从 1.20 起就恒为 null
+         （不再生成独立矩形卡片），所以一直靠这个早退不炸。
+         一旦恢复卡片路径，下面会产出全 NaN 网格。
+         现在显式标注"卡片路径已废弃"：有卡片数据时也直接返回，等真要做的时候
+         让 labelObjectCards 把每实例的顶点/索引区间一起记下来再启用。 */
+        if (relief && relief.cards) {
+          console.warn('[world] hideObjectCards 已废弃：卡片路径不再产出顶点区间，跳过');
+        }
         if (!relief || !relief.cards || !m.objectCards) return;
+        return;
         const ex = new Set(ids || []);
         const keep = (relief.instances || []).filter(function (it) { return !ex.has(it.id); });
         if (!keep.length) { m.objectCards = null; return; }

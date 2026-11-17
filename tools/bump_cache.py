@@ -46,6 +46,12 @@ def main(argv: list[str]) -> int:
         return 1
 
     out = ANY_V_RE.sub("?v=" + arg, src)
+    # F6（v2.15.12）：`window.__PW_BUILD__` 是「过期缓存自检」的比对基准，必须与
+    # version.json 同源。它以前是手改点，从 1.26.8 一直没跟上（升到 2.15.x 后
+    # 每次打开都会 `location.replace` **强制整页重载一次**，并给 <html> 打上
+    # data-stale）。这里跟 VERSION 一起自动同步，从根上消掉这个漂移。
+    out, n_build = re.subn(r"(window\.__PW_BUILD__\s*=\s*')[0-9.]+(';)",
+                           r"\g<1>" + arg + r"\g<2>", out)
     with open(INDEX, "w", encoding="utf-8", newline="") as f:
         f.write(out)
 
@@ -66,8 +72,9 @@ def main(argv: list[str]) -> int:
             with open(appf, "w", encoding="utf-8", newline="") as f:
                 f.write(b)
 
-    print("index.html: v%s → v%s（%d 处缓存串已同步；version.json 与 js/app.js VERSION 已更新）"
-          % (current[0], arg, tags))
+    print("index.html: v%s → v%s（%d 处缓存串已同步；version.json、js/app.js VERSION"
+          " 与 __PW_BUILD__（%d 处）已更新）"
+          % (current[0], arg, tags, n_build))
     return 0
 
 

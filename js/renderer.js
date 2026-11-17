@@ -34,6 +34,8 @@
       fbo: null, colorTex: null, depthBuf: null,
       probe: null, probeTex: null, probeW: 64, probeH: 36,
       width: 1, height: 1,
+      /* F14（v2.15.12）：DPR 只在创建时取一次是不行的 —— 浏览器缩放、跨 DPI
+         显示器拖动之后会一直用旧值（画面模糊或过采样）。resize() 里重新取。 */
       dpr: Math.min(window.devicePixelRatio || 1, 1.75)
     };
 
@@ -86,6 +88,9 @@
     let probeBuf = null;
 
     function resize() {
+      /* F14（v2.15.12）：每次 resize 重新读 DPR —— 浏览器缩放 / 跨 DPI 屏拖动后
+         旧值会让画面模糊（DPR 变大）或过采样（DPR 变小）。 */
+      state.dpr = Math.min(window.devicePixelRatio || 1, 1.75);
       const dpr = state.dpr;
       const w = Math.max(2, Math.floor(canvas.clientWidth * dpr));
       const h = Math.max(2, Math.floor(canvas.clientHeight * dpr));
@@ -405,7 +410,8 @@
          平地的顶面高度接近 0，早先的判据（顶面最高点+1m）在站姿下也成立，
          于是这片水平顶面在地平线处露成一条亮带（实测：背后那条白带就是它，
          去掉裙边、去掉顶面后就消失 —— 靠这个对照才定位到）。 */
-      const topLift = world.heightAt ? cam.eye[1] - world.heightAt(cam.eye[0], cam.eye[2]) : 1e9;
+      /* F18（v2.15.12）：这里原来算 `topLift`（眼高 - 地面高度）但从不使用，
+         与实际"常驻绘制"的行为不一致。删掉以免下次排查被字段语义误导。 */
       /* **常驻绘制**（v2.13）：以前只在"俯视模式 / 高于地面 6m"时画，
          结果低视角和旋转视角下，照片那块薄板下面是空的（实测截图：悬空的板 +
          底部横条纹）。现在这一层由**语义地面像素**构成，不会变成盖住崖壁的屋顶，
@@ -672,11 +678,20 @@
       gl.enable(gl.CULL_FACE);
 
       // 地面
-      if (world.meshes.ground && !skip('ground')) {
+      /* F5（v2.15.12）：这一块的让位条件必须和上面 361 行那段**一致**，
+         否则同一张 meshes.ground 会被画两遍，且资产世界 cat tex.ground=null
+         → mode 6 双尺度采样 × null 纹理 = 黑带（GLB 世界的"照片外地面发黑"）。
+         有 top/topHole 时交给俯视层；资产世界没有程序化地面贴图，走顶点色。 */
+      if (world.meshes.ground && !skip('ground')
+        && !world.meshes.topHole && !world.meshes.top) {
         // 有限扇环的边界：顶点 alpha 在区域边缘渐隐，融进雾里
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-        drawMesh(world, world.meshes.ground, { tex: world.tex.ground, mode: world.mode === 'depth' ? 4 : 6, fog: 0.35, mipBias: -0.1 });
+        drawMesh(world, world.meshes.ground, {
+          tex: world.mode === 'asset' ? null : world.tex.ground,
+          mode: world.mode === 'asset' ? 1 : (world.mode === 'depth' ? 4 : 6),
+          fog: 0.35, mipBias: -0.1
+        });
         gl.disable(gl.BLEND);
       }
 

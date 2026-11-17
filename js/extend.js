@@ -485,7 +485,15 @@
       if (SERVER) heights = await fetchServerHeights(tx, tz);
       const parts = buildTileMesh(tx, tz, heights, epochSnapshot ? epochSnapshot.f : null);
       const rec = tiles.get(key);
-      if (!rec) { pending--; return; }        // 生成期间被重掷删掉了
+      if (!rec) {
+        /* F11（v2.15.12）：生成期间被 setLive/重掷删掉时，parts 已经 createMesh
+           上传 GPU，但 Map 里没有记录、没有任何人持有 —— 纯粹泄漏。
+           这里先释放再返回。 */
+        disposeMesh(parts.flat);
+        disposeMesh(parts.steep);
+        pending--;
+        return;
+      }
       rec.pending = false;
       rec.mesh = parts.flat;
       rec.steep = parts.steep;

@@ -35,19 +35,24 @@
     const typeSize = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 }[acc.type];
     const start = (view.byteOffset || 0) + (acc.byteOffset || 0);
     const count = acc.count * typeSize;
+    /* F15（v2.15.12）：TypedArray 视图要求 `byteOffset` 是元素大小的整数倍。
+       GLB 规范只保证 accessor 对齐到它自己的分量大小（4/2/1 字节），而
+       bufferView.byteOffset + accessor.byteOffset 在**非本管线产出**的 GLB
+       （或带 padding 的 view）里经常不是 4 的倍数 → 直接 RangeError，
+       一个坏 accessor 就让整个资产加载失败。先拷到独立 buffer 再构造，
+       顺带把"共享 ArrayBuffer 会被后续修改"的隐患一起消掉。 */
+    const bytes = new Uint8Array(bin.buffer, bin.byteOffset + start, count * compSize).slice();
     let arr;
     if (acc.componentType === 5126) {
-      arr = new Float32Array(bin.buffer, bin.byteOffset + start, count);
+      arr = new Float32Array(bytes.buffer, 0, count);
     } else if (acc.componentType === 5125) {
-      arr = new Uint32Array(bin.buffer, bin.byteOffset + start, count);
+      arr = new Uint32Array(bytes.buffer, 0, count);
     } else if (acc.componentType === 5123) {
-      arr = new Uint16Array(bin.buffer, bin.byteOffset + start, count);
+      arr = new Uint16Array(bytes.buffer, 0, count);
     } else {
       throw new Error('不支持的 accessor 类型 ' + acc.componentType);
     }
-    // 必须拷贝：ArrayBuffer 可能是共享/对齐限制
-    const out = arr.slice(0, count);
-    return { data: out, size: typeSize, count: acc.count };
+    return { data: arr, size: typeSize, count: acc.count };
   }
 
   function toImage(bytes) {

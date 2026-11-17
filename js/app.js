@@ -6,7 +6,14 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.15.11';
+  const VERSION = '2.15.12';
+  /* F6（v2.15.12）：`__PW_BUILD__` 与 VERSION 必须一致，否则 index.html 的
+     "过期缓存自检"会每次打开都强制整页重载一次并打 data-stale 标记。
+     bump_cache.py 现在两者一起改，这条断言用来在控制台第一时间暴露漂移。 */
+  if (typeof console !== 'undefined' && console.assert) {
+    console.assert(window.__PW_BUILD__ === VERSION,
+      '[app] 版本漂移：__PW_BUILD__=' + window.__PW_BUILD__ + ' VERSION=' + VERSION);
+  }
 
   /* v2 服务的地址：显式 ?api= 优先，其次是自动发现（本机常见端口）。
      自动发现写在启动流程里，不需要使用者改 URL —— 这是"更快捷地启用 v2"的关键。 */
@@ -35,6 +42,11 @@
   let player = null;
   let current = null;
   let objectUrls = [];
+  /* F12（v2.15.12）：进入世界的**加载令牌**。快速连点两张卡片（或画廊 + 上传）会
+     交叠跑两个 enterWorld/enterAsset，它们在多个 await 处交错，后者会 dispose 掉
+     前者刚建好的 player、world 字段互相覆盖、进度条互踩。
+     每个 await 之后比对令牌，过期就静默退出。 */
+  let loadToken = 0;
   let running = false;
   let lastT = 0;
   let time = 0;
@@ -42,6 +54,7 @@
   let fadeStart = 0;
   let fadeFrames = 0;
   let expoCount = 0;
+  let fpsAcc = 0, fpsN = 0;            // F21：HUD 帧率统计
   let frameIdx = 0;
   let instant = false;
   let intro = null;
@@ -120,6 +133,54 @@
   }
 
   /* 点卡片：先播开屏动画（字标按该照片的地形立起来），中途开始重建 */
+  /* F7（v2.15.12）：world 级 GL 资源回收。
+     以前每次换图/换世界都只是把 `world = w` 覆盖掉，旧 world 的几十~几百个 buffer
+     与 5~7 张纹理（2048² 照片纹理 + 三份点云）永远留在 GPU 上 —— 全仓库没有任何
+     gl.deleteBuffer / deleteTexture（只有 extend.js 管自己的 tile）。
+     连续切换两三次就能把移动端 512MB 配额打穿，表现是 webglcontextlost、整屏黑。
+     这里在替换旧 world 之前调用；任何一层出问题都不阻断新世界进入。 */
+  /* F20（v2.15.12）：上传照片的 blob URL 只增不减 —— 每上传一张就永久占住整份
+     原始文件。切走/换图时把**不再被 current 引用**的都 revoke 掉（当前世界的
+     src/thumb 还要用来重进、显示缩略图，不能回收）。 */
+  function pruneObjectUrls() {
+    if (!objectUrls.length) return;
+    const keep = new Set();
+    if (current) { if (current.src) keep.add(current.src); if (current.thumb) keep.add(current.thumb); }
+    const left = [];
+    for (const u of objectUrls) {
+      if (keep.has(u)) { left.push(u); continue; }
+      try { URL.revokeObjectURL(u); } catch (e) { /* ignore */ }
+    }
+    objectUrls = left;
+  }
+
+  function disposeWorld(w) {
+    if (!w || !renderer || !renderer.gl) return;
+    const gl = renderer.gl;
+    const killMesh = (mesh) => {
+      if (!mesh) return;
+      try {
+        for (const k of ['aPos', 'aNormal', 'aUV', 'aColor', 'aEdge', 'aSize', 'aCount']) {
+          if (mesh[k] && mesh[k].buf) gl.deleteBuffer(mesh[k].buf);
+        }
+        if (mesh.index && mesh.index.buf) gl.deleteBuffer(mesh.index.buf);
+      } catch (e) { /* 单个 mesh 出问题不影响其他 */ }
+    };
+    try {
+      for (const key in (w.meshes || {})) killMesh(w.meshes[key]);
+      for (const it of (w.extraMeshes || [])) killMesh(it && it.mesh);
+      killMesh(w.pointsMesh);
+      killMesh(w.points2Mesh);
+      if (w.skyBg && w.skyBg.shell) killMesh(w.skyBg.shell);
+      if (w.extender && typeof w.extender.dispose === 'function') w.extender.dispose();
+      for (const k in (w.tex || {})) {
+        if (w.tex[k]) gl.deleteTexture(w.tex[k]);
+      }
+    } catch (e) {
+      console.warn('[app] 旧世界资源释放失败（不影响新世界）：', e && e.message);
+    }
+  }
+
   function startWorld(def, card) {
     if (intro && !instant) {
       const img = card && card.querySelector('img');
@@ -195,7 +256,13 @@
       const secs = ((performance.now() - t0) / 1000).toFixed(1);
       setProgress(88, '重建完成（' + secs + 's），装载世界…');
       const url = URL.createObjectURL(glb);
-      await enterAsset(url);
+      try {
+        await enterAsset(url);
+      } finally {
+        /* F20（v2.15.12）：GLB 的 blob URL 用完必须 revoke —— enterAsset 已经把
+           字节读进 GL 与内存，URL 再留着只是占着整份 GLB（几 MB~几十 MB）。 */
+        URL.revokeObjectURL(url);
+      }
       setHudPipe('v2', 'V2');
       return true;
     } catch (e) {
@@ -205,7 +272,9 @@
   }
 
   async function enterWorld(def) {
+    const token = ++loadToken;
     if (await tryReconstructV2(def)) return;
+    if (token !== loadToken) return;             // 期间又点了别的卡片
     if (running) stopLoop();
     loader.classList.remove('hidden', 'done', 'burst');
     pause.classList.add('hidden');
@@ -218,6 +287,7 @@
 
     try {
       const img = await loadImage(def.src);
+      if (token !== loadToken) return;
       setProgress(8, '照片解码完成');
       await sleep(80);
       setProgress(12, '分析天空 / 地平线…');
@@ -447,9 +517,12 @@
       setProgress(94, '校准空气与雾…');
       await sleep(60);
 
+      if (token !== loadToken) return;           // 期间又点了别的卡片：丢弃这次构建
       if (player) player.dispose();
+      disposeWorld(world);                       // F7：先回收旧 world 的 GL 资源
       world = w;
       current = def;
+      pruneObjectUrls();
       player = window.PW.createPlayer(canvas, world);
       if (window.__spawn) player.reset(window.__spawn.x, window.__spawn.z, window.__spawn.yaw);
       else if (def.start) player.reset(def.start.x || 0, def.start.z || 0, def.start.yaw || 0);
@@ -625,8 +698,14 @@
     const anyN = list.some((l) => l.nrm && l.nrm.length);
     const anyU = list.some((l) => l.uv && l.uv.length);
     const anyC = list.some((l) => l.color && l.color.length);
+    /* F13（v2.15.12）：GLB 里可能有没有 indices 的 primitive（index:null）。
+       旧写法 `ni += l.index.length` 直接 TypeError → "资产加载失败"。
+       这里给无索引层补线性索引（0..n-1），保持"一律索引绘制"的单一路径。 */
     let nv = 0, ni = 0;
-    for (const l of list) { nv += l.pos.length / 3; ni += l.index.length; }
+    for (const l of list) {
+      nv += l.pos.length / 3;
+      ni += l.index && l.index.length ? l.index.length : (l.pos.length / 3);
+    }
     const pos = new Float32Array(nv * 3);
     const nrm = anyN ? new Float32Array(nv * 3) : null;
     const uv = anyU ? new Float32Array(nv * 2) : null;
@@ -645,8 +724,13 @@
         if (l.color && l.color.length) color.set(l.color, vo * 4);
         else for (let i = 0; i < n; i++) color.fill(1, (vo + i) * 4, (vo + i) * 4 + 4);
       }
-      for (let i = 0; i < l.index.length; i++) index[io + i] = l.index[i] + vo;
-      io += l.index.length;
+      if (l.index && l.index.length) {
+        for (let i = 0; i < l.index.length; i++) index[io + i] = l.index[i] + vo;
+        io += l.index.length;
+      } else {
+        for (let i = 0; i < n; i++) index[io + i] = vo + i;
+        io += n;
+      }
       vo += n;
     }
     return { pos, nrm, uv, color, index, vertices: nv };
@@ -730,6 +814,7 @@
   }
 
   async function enterAsset(url) {
+    const token = ++loadToken;
     loader.classList.remove('hidden', 'done', 'burst');
     el('loaderImg').style.opacity = '0';
     el('loaderTitle').textContent = '加载三维世界';
@@ -798,17 +883,19 @@
          必须**双面绘制**（背面在，绕到后面才不会看到洞）。 */
       const solidLayers = triLayers.filter((l) => l.name === 'solid');
       const solidMesh = solidLayers.length ? toMesh(mergeLayers(solidLayers)) : null;
+      /* F3（v2.15.12）：名单里必须排除 topHole。
+         漏了它 → 同一份几何既进 nearMesh（mode 4 照片贴图）又进 topHoleMesh
+         （mode 1 无贴图 + 白顶点色）→ 共面 z-fighting，mode 1 那份赢下深度测试时
+         就是"侧视一块无纹理浅灰面"（ISSUES #4 的真正根因，不是 solid）。 */
       const nearLayers = triLayers.filter((l) => l.name !== 'backdrop'
-        && l.name !== 'top' && l.name !== 'ground' && l.name !== 'solid');
+        && l.name !== 'top' && l.name !== 'topHole'
+        && l.name !== 'ground' && l.name !== 'solid');
       const groundMesh = groundLayers.length ? toMesh(mergeLayers(groundLayers)) : null;
       const topHoleMesh = topHoleLayers.length ? toMesh(mergeLayers(topHoleLayers)) : null;
       const farMesh = farLayers.length ? toMesh(mergeLayers(farLayers)) : null;
       const nearMesh = nearLayers.length ? toMesh(mergeLayers(nearLayers)) : null;
       const topMesh = topLayers.length ? toMesh(mergeLayers(topLayers)) : null;
-      let topMaxY = 0;
-      for (const l of topLayers) {
-        for (let i = 1; i < l.pos.length; i += 3) if (l.pos[i] > topMaxY) topMaxY = l.pos[i];
-      }
+      /* topMaxY 的统计已随 F18 一起删除（顶面是常驻绘制，高度阈值不存在了）。 */
       const tex = asset.img
         ? PW.GL.createTexture(gl, asset.img, { wrap: 'clamp', clampV: true, aniso: 8, flipY: false })
         : whiteTex(gl);
@@ -853,8 +940,10 @@
         lights: { fogDensity: 0.0016 },
         tex: { photo: tex, ground: null, sky: null, grass: null },
         meshes: { relief: nearMesh, backdrop: farMesh, farRidge: null, nearRidge: null, sky: null, ground: groundMesh, solid: solidMesh, rocks: null, grass: null, shrub: null, top: topMesh, topHole: topHoleMesh },
-        // 视点高于"地形最高点 + 1m"才显示俯视顶面
-        topShowAbove: topMaxY + 1.0,
+        /* F18（v2.15.12）：这里原来还有 `topShowAbove: topMaxY + 1.0`，标注"视点
+           高于地形最高点才显示顶面"—— 但渲染端从 v2.13 起是**常驻绘制**，这个字段
+           从来没人读。留着会误导排查（按字段语义推断会得出错误结论），已删除。
+           `topMaxY` 仍保留给下面的调试信息用。 */
         particles: null,
         pointsMesh: null,
         points2Mesh: pointsMesh,
@@ -877,9 +966,12 @@
         w.photoMeta = asset.camera;
       }
 
+      if (token !== loadToken) return;            // 期间又点了别的卡片
       if (player) player.dispose();
+      disposeWorld(world);                        // F7：回收旧 world 的 GL 资源
       world = w;
       current = { name: '离线重建', sub: 'asset · world.glb' };
+      pruneObjectUrls();
       player = PW.createPlayer(canvas, world);
       /* 资产模式的视场必须**正好等于**资产的视场：在线链路用 fovMul=1.06 多看一点
          周边没关系（视锥外还有程序化几何），但 GLB 的几何正好止于照片视锥边界，
@@ -1204,6 +1296,14 @@
         { yaw: player.state.yaw, fov: fovRad() });
     }
     updateParticles(dt);
+    /* F21（v2.15.12）：`#hudFps` 一直是死 UI（没有任何代码写过它）。
+       这里接上真实帧率：每 0.5s 更新一次，避免每帧写 DOM。 */
+    fpsAcc += dt; fpsN++;
+    if (fpsAcc >= 0.5) {
+      const fEl = el('hudFps');
+      if (fEl) fEl.textContent = Math.round(fpsN / fpsAcc) + ' fps';
+      fpsAcc = 0; fpsN = 0;
+    }
     fadeFrames++;
     if (instant) {
       fade = 1;

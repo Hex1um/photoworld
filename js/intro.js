@@ -74,8 +74,13 @@
       let ok = false;
       if (photo) {
         try {
-          const s = Math.max(W / photo.width, H / photo.height);
-          const dw = photo.width * s, dh = photo.height * s;
+          /* F19（v2.15.12）：必须用 naturalWidth/Height。
+             画廊卡片传进来的是 `<img>`（有 CSS 布局宽），`photo.width` 返回的是
+             **布局宽**而不是像素宽 → 缩放比算错，字标里的照片比例失真/发糊。 */
+          const pw = photo.naturalWidth || photo.width || W;
+          const ph = photo.naturalHeight || photo.height || H;
+          const s = Math.max(W / pw, H / ph);
+          const dw = pw * s, dh = ph * s;
           const pat = fg.createPattern(photo, 'no-repeat');
           if (pat && pat.setTransform && global.DOMMatrix) {
             const mat = new global.DOMMatrix();
@@ -152,8 +157,11 @@
       sharpCv.width = sw; sharpCv.height = sh;
       const hc = sharpCv.getContext('2d');
       try {
-        const s = Math.max(sw / photo.width, sh / photo.height);
-        const dw = photo.width * s, dh = photo.height * s;
+        /* F19 同款：卡片背景也走 naturalWidth，避免"布局宽"参与缩放比 */
+        const pw2 = photo.naturalWidth || photo.width || sw;
+        const ph2 = photo.naturalHeight || photo.height || sh;
+        const s = Math.max(sw / pw2, sh / ph2);
+        const dw = pw2 * s, dh = ph2 * s;
         if ('filter' in sc) sc.filter = 'blur(8px) brightness(0.56) saturate(0.9)';
         sc.drawImage(photo, (sw - dw) / 2, (sh - dh) / 2, dw, dh);
         if ('filter' in sc) sc.filter = 'none';

@@ -3,6 +3,47 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [2.15.12] - 2026-11-17  · 前端审查 21 条：8 个 P1 与 13 个 P2/P3 全修
+
+外部报告 `findings_frontend.md` 覆盖 `js/` 全部 18 个文件 + `index.html` + `css/`。
+报告基线是 v2.15.1：**F1/F2/F4/F9/F8 的前半**已在 2.15.6 修掉，本轮补齐其余，
+并把 F8 漏掉的两类（`column` / `light`）补正。
+
+### P1（8 条）
+
+| # | 位置 | 症状 → 修法 |
+|---|---|---|
+| F3 | `app.js` nearLayers 过滤 | 名单漏了 `topHole` → 同一几何既进 nearMesh（照片贴图）又进 topHoleMesh（mode 1 白顶点色），共面 z-fighting = **侧视那块"无纹理浅灰面"**（ISSUES #4 的真正根因，不是 solid） → 排除名单加上 `topHole` |
+| F5 | `renderer.js` 底部地面块 | 与 361 行的让位条件不一致 → GLB 资产世界（`tex.ground=null`）被 `mode 6 × null 纹理` 画成黑带 → 补让位条件，资产世界走顶点色 |
+| F6 | `index.html:217` | `__PW_BUILD__` 停在 `1.26.8`，与 `version.json` 不符 → 每次打开**强制整页重载一次**并打 `data-stale` → `bump_cache.py` 现在两者一起改（结构性修复，不再是手改点），另加 `console.assert` 暴露漂移 |
+| F7 | `app.js` enterWorld/enterAsset | world 级 GL 资源全仓库没有一处 `deleteBuffer/deleteTexture` → 换两三次图就把移动端 512MB 打穿（`webglcontextlost` 整屏黑） → 新增 `disposeWorld()`，替换前回收 mesh buffer / 纹理 / extend tile，任何一层失败都不阻断进入新世界 |
+| F8 | `semantics.js` | 除 2.15.6 已修的 desk/box/chest/refrigerator/barrel，本轮补 `42=column`（移出 TERRAIN，否则拿到剔除豁免 + 被编进地面层糊掉）与 `82=light`（移出 VEHICLE，路灯曾被当单体卡片拉变形） |
+| F1/F2/F4 | — | 2.15.6 已修（裙边 TDZ、`tex.ground` 恢复、splat/points2 的 showPlan 守卫），本轮复核仍然成立 |
+
+### P2/P3（13 条）
+
+- **F10** `player.dispose()` 只解绑 6 个 window 监听，canvas 三组触摸 + `pointerlockchange` 一直挂着（每次进世界多一组，旧 player/world 被闭包钉住）→ handler 提成具名函数并对称移除。
+- **F11** `extend.js` tile 在 `await` 期间被删掉时，已上传的 flat/steep buffer 就地泄漏 → 先 `disposeMesh` 再返回。
+- **F12** 快速连点两张卡片会交叠跑两个 `enterWorld`（互相 dispose、字段互踩）→ 模块级 `loadToken`，每个 `await` 后比对，过期静默退出。
+- **F13** `mergeLayers` 假定每层都有 `index`，GLB 的非索引 primitive 直接 TypeError → 给无索引层补线性索引。
+- **F14** DPR 只在创建 renderer 时取一次 → 浏览器缩放/跨屏拖动后画面糊或过采样 → `resize()` 里重取。
+- **F15** `readAccessor` 用 `new Float32Array(buffer, offset, n)`，offset 非 4 对齐直接 RangeError 毁掉整个资产 → 先 `slice()` 到独立 buffer 再构造。
+- **F16** `hideObjectCards` 引用实例上不存在的 `vStart/vCount/iStart/iCount`（卡片路径已废弃、靠早退不炸，恢复即产出 NaN 网格）→ 显式标注废弃并返回。
+- **F17** `m.splat` 与分层点云同时构建，渲染端只用分层 → 白占约 1/3 点云显存 → 不再构建（渲染端保留回退分支）。
+- **F18** `topShowAbove` / `topLift` 算完即弃，字段语义与"常驻绘制"的实际行为不符（排查 #0 会被误导）→ 删除死变量与死统计。
+- **F19** `intro.js` 用 `photo.width`（CSS 布局宽）算缩放比，字标里的照片比例失真 → 改用 `naturalWidth || width`（两处）。
+- **F20** blob URL 只增不减 → GLB 的 URL 用完 `revokeObjectURL`；上传图的 URL 在换世界时按"是否仍被 current 引用"回收。
+- **F21** `#hudFps` 是死 UI → 接上真实帧率（每 0.5s 更新一次）。
+
+### 验证
+
+- 19 个 `js/*.js` 全部 `node --check` 通过；`bump_cache --check` 20 处缓存串 + `__PW_BUILD__` 一致。
+- 回归：`test_fixes.mjs` 14 项、`test_regression.mjs`、`test_inference_cache.mjs`、
+  `test_backend_fixes.py` 13 项、`test_doc_consistency.py` 全绿。
+- 单图 32 机位冒烟（coast）：`void 0.0205 / inner 0.0538 / low 0.0118 / stripe 3.086`，
+  与改动前同口径（0.0251 / 0.0710 / 0.0119 / 3.085）相比 innerVoid 改善、其余持平。
+- 16 图 × 32 机位复测数字见 `docs/acc32_v21512.md`。
+
 ## [2.15.11] - 2026-11-17  · 走出照片范围后撤掉薄壳；voidFrac 不再把深色照片当空底
 
 承接 2.15.8 的验收：16 图 × 32 机位里 **stripe 全线超阈值**，其中最刺眼的是

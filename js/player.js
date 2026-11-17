@@ -98,17 +98,18 @@
     function requestLock() {
       if (canvas.requestPointerLock) canvas.requestPointerLock();
     }
-    document.addEventListener('pointerlockchange', () => {
+    function onLockChange() {
       state.locked = document.pointerLockElement === canvas;
       if (global.PW.onLockChange) global.PW.onLockChange(state.locked);
-    });
+    }
+    document.addEventListener('pointerlockchange', onLockChange);
 
     /* 触屏 */
     const joyEl = document.getElementById('joystick');
     const joyKnob = document.getElementById('joystickKnob');
     let joyId = null, lookId = null;
 
-    canvas.addEventListener('touchstart', (e) => {
+    const onTouchStart = (e) => {
       for (const t of e.changedTouches) {
         const half = window.innerWidth * 0.45;
         if (t.clientX < half && joyId === null) {
@@ -125,9 +126,9 @@
         }
       }
       e.preventDefault();
-    }, { passive: false });
+    };
 
-    canvas.addEventListener('touchmove', (e) => {
+    const onTouchMove = (e) => {
       for (const t of e.changedTouches) {
         if (t.identifier === joyId && touch.joy) {
           const dx = t.clientX - touch.joy.ox;
@@ -146,7 +147,7 @@
         }
       }
       e.preventDefault();
-    }, { passive: false });
+    };
 
     const endTouch = (e) => {
       for (const t of e.changedTouches) {
@@ -158,6 +159,8 @@
         if (t.identifier === lookId) { lookId = null; touch.look = null; }
       }
     };
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+    canvas.addEventListener('touchmove', onTouchMove, { passive: false });
     canvas.addEventListener('touchend', endTouch);
     canvas.addEventListener('touchcancel', endTouch);
 
@@ -250,12 +253,20 @@
     }
 
     function dispose() {
+      /* F10（v2.15.12）：这里原来只解绑 6 个 window 监听 —— canvas 上的三组触摸
+         监听与 document 的 pointerlockchange 一直挂着。每次进世界都会再挂一组，
+         旧 player + 旧 world 被闭包钉住不释放（配合 world 不回收，显存/内存双泄漏）。 */
       window.removeEventListener('keydown', kd);
       window.removeEventListener('keyup', ku);
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mousedown', onMouseDown);
       window.removeEventListener('mouseup', onMouseUp);
       window.removeEventListener('wheel', onWheel);
+      canvas.removeEventListener('touchstart', onTouchStart);
+      canvas.removeEventListener('touchmove', onTouchMove);
+      canvas.removeEventListener('touchend', endTouch);
+      canvas.removeEventListener('touchcancel', endTouch);
+      document.removeEventListener('pointerlockchange', onLockChange);
     }
 
     reset(0, 0, 0);
