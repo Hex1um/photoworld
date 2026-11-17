@@ -532,7 +532,14 @@
              炸开的放射状尖刺（winter 实测截图），而空中该看的是地面层 top。
              旧代码只对粒子点云 pointsMesh 做了 showPlan 门控，
              真正的重建点云 splatGround/splatBody/splat 一直照画 —— 修错了对象。 */
-        } else if (world.splatMode && world.meshes.splat) {
+        } else if (world.splatMode && (world.meshes.splat
+          || (world.meshes.splatGround && world.meshes.splatBody))) {
+          /* v2.15.13 修（回归）：条件里**不能**只认全量 `meshes.splat`。
+             v2.15.12 的 F17 为了省显存不再构建全量点云（只留分层两份），
+             而这里仍要求 `meshes.splat` 非空 → 整块点云绘制被跳过、退化成正面的
+             单层网格（背面被剔除），画面只剩一张平坦地面 + 顶部一条照片带
+             —— 用户实测"什么地物都没有了"。而 32 机位质检**测不出来**
+             （地面不是清屏色，void/lowVoid 都不动），只能靠眼睛。 */
           /* LDI 补洞层（?ldi=2）：先用 MI-GAN 补出的背景点垫在后面，
              再画原照片点云 —— 侧移时前景移开，背后不是洞。 */
           if (world.meshes.splatHole && world.tex.bg) {

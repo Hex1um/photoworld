@@ -659,17 +659,22 @@
     const rFarRaw = q(farVals, 0.20);
     if (!nearVals.length || !farVals.length) return null;
     const rNear = Math.max(0.08, rNearRaw);
-    /* 退化判据必须在**钳位之前**判断（v2.15.6 修）：
-       旧代码先 `rFar = min(rNear*0.85, rFarRaw)`，再用 `rNear <= rFar*1.02`
-       判退化 —— clamp 已经保证 rFar ≤ 0.85·rNear，所以这条 null 判据**恒不成立**，
-       坏标定（远锚与近锚几乎同深度）会被静默夹到 p=3.2，深度→米整条曲线失真，
-       而且没有任何告警。现在直接用原始 20 分位判定。 */
-    if (!(rFarRaw > 0.005) || rFarRaw >= rNear * 0.85) {
+    /* 双锚点标定的钳位（v2.15.14 **回退** v2.15.6 的激进改法）。
+       事故经过：v2.15.6 为了"别静默钳位"，把判据改成"远锚不够远就 `return null`"。
+       但 `rFar = min(rNear*0.85, rFarRaw)` 这个钳位**不是**安全兜底，而是整条
+       深度→米曲线的承重件：rFar 直接进 `p = ln(far/zNear)/ln(rNear/rFar)`，
+       rFar 取值一变，p 从 ~1.5 跳到被夹的 3.2，t 被压到地平面附近 →
+       **整片山体塌成平地**（实测：alpine 从"立起来的崖壁"变成"一张拉丝地面"，
+       而 32 机位指标几乎不动，只有肉眼能看出来）。
+       现在的做法：钳位照旧（保持既有曲线的连续性），只在"确实钳位了"时告警 ——
+       这才是 P1-3 的本意（"别静默"），而不是"别钳位"。 */
+    const rFarClamped = Math.min(rNear * 0.85, Math.max(0.005, rFarRaw));
+    if (rFarRaw >= rNear * 0.85 || !(rFarRaw > 0.005)) {
       console.warn('[world] 双锚点标定退化：rNear=' + rNear.toFixed(4)
-        + ' rFar(20%)=' + rFarRaw.toFixed(4) + '，回退到经验曲线');
-      return null;
+        + ' rFar(20%)=' + rFarRaw.toFixed(4) + ' → 钳位到 ' + rFarClamped.toFixed(4)
+        + '（曲线与旧版一致，仅告警）');
     }
-    const rFar = rFarRaw;
+    const rFar = rFarClamped;
     const zNear = zN ? Math.max(2.0, zSum / zN) : eye / 0.30;
     const pRaw = Math.log(HORIZON_FAR / zNear) / Math.log(rNear / rFar);
     const p = clamp(pRaw, 0.6, 3.2);
@@ -3210,7 +3215,17 @@
       mode: worldInfo.mode,
       eyeHeight: worldInfo.eyeHeight,
       walkRadius: worldInfo.walkRadius,
-      reliefMeta: relief ? Object.assign({ vfov: relief.vfov }, relief.meta || {}) : null,
+      /* reliefMeta 会经 body.dataset.dbg 进质检 JSON（multiview 的 rec.relief）。
+         v2.15.14 把标定参数也塞进来：`cal.p` 被夹在边界（0.6 / 3.2）就意味着
+         "深度→米曲线处于硬钳位"，几何极可能被压平 —— 这是**唯一**能从指标侧
+         发现"山塌了"的信号（void/stripe 全都看不出来）。 */
+      reliefMeta: relief ? Object.assign({
+        vfov: relief.vfov,
+        calP: relief.calibration ? relief.calibration.p : null,
+        calZNear: relief.calibration ? relief.calibration.zNear : null,
+        calRNear: relief.calibration ? relief.calibration.rNear : null,
+        calRFar: relief.calibration ? relief.calibration.rFar : null
+      }, relief.meta || {}) : null,
       // 单体实例（bbox / 中位深度 / 世界中心），供 js/object3d.js 升级为真网格
       objectInstances: (relief && relief.instances) ? relief.instances : [],
       _cardsData: (relief && relief.cards) ? relief.cards : null,

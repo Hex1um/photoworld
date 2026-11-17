@@ -74,14 +74,15 @@ const ok = (msg) => { console.log('PASS  ' + msg); pass++; };
   ok('P0-6  点云路径的地面层不再抛 UnboundLocalError');
 }
 
-// P1-3 标定退化护栏：判据必须在钳位之前
+// 标定退化：**钳位 + 告警**，不能 return null（v2.15.14 事故）
 {
   const src = read('js/world.js');
-  assert.ok(!/rFar = Math\.min\(rNear \* 0\.85/.test(src),
-    'P1-3 回归：rFar 仍先钳位到 0.85·rNear 再判退化（判据恒不成立）');
-  assert.ok(/rFarRaw >= rNear \* 0\.85/.test(src),
-    'P1-3 回归：缺少基于原始 20 分位的退化判据');
-  ok('P1-3  标定退化判据不再恒假，坏标定会回退经验曲线并告警');
+  assert.ok(/rFarClamped = Math\.min\(rNear \* 0\.85/.test(src),
+    '回归：标定的 rFar 钳位被去掉了（它是深度→米曲线的承重件，去掉会把世界压平）');
+  assert.ok(!/rFarRaw >= rNear \* 0\.85[\s\S]{0,200}?return null/.test(src),
+    '回归：标定退化又改成 return null（v2.15.6 就是这么把山塌成平地的）');
+  assert.ok(/rFarRaw >= rNear \* 0\.85/.test(src), '缺少退化告警判据');
+  ok('标定退化 = 钳位 + 告警（不再 return null）');
 }
 
 // P1-4 行基线必须是真中值
@@ -279,6 +280,19 @@ function cliffScene() {
   assert.ok(r.postStats && r.postStats.band > 0,
     '深度后处理没有在端到端路径生效（postStats=' + JSON.stringify(r.postStats) + '）');
   assert.ok(r.layer2 && r.layer2.count > 0, '端到端路径没有产出第二层点');
+  /* v2.15.14 回归：标定**必须**钳位而不是返回 null。
+     v2.15.6 曾把"远锚不够远"改成 `return null`，结果整条深度→米曲线换成经验
+     兜底（近端全部夹到 2.6m）→ 山体塌成平地，而 32 机位指标几乎不动。
+     这里用"远近深度几乎相同"的合成图触发那条判据，断言仍拿到了标定参数。 */
+  {
+    const flatD = new Float32Array(DW * DW).fill(0.5);
+    const rf = s.PW.world.buildCartesianWorld(A2, { data: flatD, width: DW, height: DW }, {
+      sem: null, fgMask: null, gw: 160, gh: 100,
+    });
+    assert.ok(rf && rf.calibration, '标定退化时不能返回 null（会把整个世界的纵深压平）');
+    assert.ok(rf.calibration.p > 0.5 && rf.calibration.p <= 3.2,
+      '标定指数越界：' + (rf.calibration && rf.calibration.p));
+  }
   ok('端到端  buildCartesianWorld：' + r.tris + ' 三角、裙边 '
     + (r.skirt.pos.length / 3) + ' 顶点、后处理带 ' + r.postStats.band
     + ' px、第二层 ' + r.layer2.count + ' 点');
