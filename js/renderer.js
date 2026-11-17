@@ -7,6 +7,12 @@
 
   const SKIP = (typeof location !== 'undefined' ? (new URLSearchParams(location.search).get('skip') || '') : '').split(',');
   const skip = (k) => SKIP.indexOf(k) >= 0;
+  /* ISSUES #3：地形地面片元级世界坐标噪声（mode 10，编译已由
+     tools/test_shader_mode10_compile.py 验证）。观感无法用 stripe 可靠 A/B
+     （见 ISSUES #18 教训），故默认仍用 mode 1 顶点色；?terrain=10 显式启用，
+     用户可在同机位手动对比地面视角与俯视细节是否统一。 */
+  const GROUND_MODE = (typeof location !== 'undefined'
+    && new URLSearchParams(location.search).get('terrain') === '10') ? 10 : 1;
 
 
   function createRenderer(canvas) {
@@ -445,7 +451,7 @@
            但那段 GLSL 编译失败（undeclared identifier），先退回可用的方案；
            地面细节目前由 ldi 里的多尺度顶点噪声提供。 */
         drawMesh(world, groundMeshNow, {
-          tex: null, mode: 1, fog: 0.55, mipBias: 0,
+          tex: null, mode: GROUND_MODE, fog: 0.55, mipBias: 0,
           skyAmb: [1.05, 1.02, 0.98]
         });
         gl.enable(gl.CULL_FACE);

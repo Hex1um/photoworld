@@ -181,6 +181,72 @@ def test_exif_sensor_size():
     ok("P1-3.11  hfov_from_image 接受存储朝向尺寸")
 
 
+def test_exif_portrait_fov():
+    """P1（本轮）：竖拍 ±90° 的 FOV 口径与显示尺寸必须随旋转换算。
+
+    26mm 等效、120×80 存储图、Orientation=6（竖拍显示 80×120）：
+      · 横拍口径 hfov=2atan(36/52)=69.39°、vfov(80,120)=92.16°
+      · 竖拍口径 hfov=2atan(24/52)=49.55°、vfov(80,120)=69.39°
+    修复前两个调用点都没传 rotated90，会用横拍口径 → hfov 偏大 20°。
+    """
+    import math
+    from PIL import Image
+    from exif import hfov_from_image, vfov_of
+
+    im = Image.new("RGB", (120, 80))
+    ex = Image.Exif()
+    ex[0xA405] = 26            # FocalLengthIn35mmFilm
+    # PIL 需通过 save 往返才能让图片带上 getexif
+    import io
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", exif=ex)
+    buf.seek(0)
+    img = Image.open(buf)
+
+    hf_land = hfov_from_image(img, sensor_size=(120, 80), rotated90=False)[0]
+    hf_port = hfov_from_image(img, sensor_size=(120, 80), rotated90=True)[0]
+    exp_land = 2 * math.atan(36.0 / (2 * 26))
+    exp_port = 2 * math.atan(24.0 / (2 * 26))
+    assert abs(hf_land - exp_land) < 1e-6, \
+        "横拍 35mm 口径被破坏：%.4f != %.4f" % (hf_land, exp_land)
+    assert abs(hf_port - exp_port) < 1e-6, \
+        "竖拍仍按 36mm 长边算 hfov（应换 24mm 短边）：%.4f != %.4f" % (hf_port, exp_port)
+    # 显示朝向 80×120：竖拍 vfov 应回到 69.39°，而不是 92.16°。
+    vf_port = vfov_of(hf_port, 80, 120)
+    assert abs(vf_port - exp_land) < 1e-6, \
+        "竖拍 vfov 口径错：%.4f != %.4f" % (vf_port, exp_land)
+    ok("P1（本轮）  EXIF 竖拍 ±90° FOV 按短边换算（69.39°→49.55°）")
+
+
+def test_exif_portrait_resize():
+    """P1（本轮）：reconstruct.load_photo 缩放按显示朝向，竖图不能被压扁。"""
+    import io
+    from PIL import Image
+    import reconstruct
+
+    img = Image.new("RGB", (120, 80), (120, 140, 160))
+    ex = Image.Exif()
+    ex[0x0112] = 6              # Orientation=6 → transpose 后显示 80×120
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", exif=ex)
+    path = os.path.join(ROOT, "out", "_exif_portrait_tmp.jpg")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(buf.getvalue())
+    try:
+        out, arr, _src, meta = reconstruct.load_photo(path, max_side=60)
+        # 摆正后是 80×120（竖），等比缩到 max=60 → 40×60，绝不能是 60×40。
+        assert out.size == (40, 60), \
+            "竖拍 resize 仍用存储宽高：得到 %s，应为 (40, 60)" % (out.size,)
+        assert arr.shape[:2] == (60, 40), "arr 形状与显示尺寸不一致：%s" % (arr.shape,)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    ok("P1（本轮）  load_photo 竖拍 resize 按显示朝向（60×40→40×60）")
+
+
 def test_geom_meta():
     src = read("pipeline/geom.py")
     assert not re.search(r'"n":\s*int\(r_n\)', code_only("pipeline/geom.py")), \
@@ -253,7 +319,8 @@ def main() -> int:
     tests = [
         test_reconstruct_p0, test_api_py, test_ldi,
         test_build_solid_skirt, test_build_points_thinning,
-        test_depth_polarity, test_exif_sensor_size, test_geom_meta,
+        test_depth_polarity, test_exif_sensor_size,
+        test_exif_portrait_fov, test_exif_portrait_resize, test_geom_meta,
         test_tools, test_threshold_single_source,
         test_ckpt_meta_key, test_trainer_fixes, test_data_and_eval,
     ]

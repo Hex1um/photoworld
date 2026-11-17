@@ -19,7 +19,7 @@ def _ratio(value) -> Optional[float]:
         return None
 
 
-def hfov_from_image(img, sensor_size=None) -> tuple[float, str, dict]:
+def hfov_from_image(img, sensor_size=None, rotated90: bool = False) -> tuple[float, str, dict]:
     """返回 (水平视场角弧度, 来源说明, 元数据)。
 
     优先级：EXIF 35mm 等效焦距 → EXIF 物理焦距 + 传感器宽度 → 默认。
@@ -29,11 +29,19 @@ def hfov_from_image(img, sensor_size=None) -> tuple[float, str, dict]:
     v2.15.8 起 load_photo 会先按 EXIF 摆正图像，摆正后的 img.size 是显示朝向，
     而 FocalPlaneXResolution 是按存储像素给的 —— 两者混用会让 sensor_w
     差一个宽高比（竖拍旋转 90° 时错 1.7~2 倍），进而 FOV 偏大。
+
+    `rotated90`：图像是否被 EXIF Orientation 旋转了 ±90°（orientation 5/6/7/8）。
+    35mm 等效焦距的口径固定为传感器**长边 36mm**；手机竖拍时传感器相对显示画面
+    转了 90°，显示画面的"水平方向"对应传感器**短边 24mm**。若仍按 36mm 算 hfov，
+    再把显示宽高比（w<h）交给 vfov_of，会得到 hfov 69.39°/vfov 92.16°，
+    而正确口径应是 hfov 49.55°/vfov 69.39°（26mm 等效）。物理焦距分支同理：
+    显示水平方向对应的是存储的**高度**像素，传感器物理宽度要取短边。
     """
     meta: dict = {}
     exif = getattr(img, "getexif", lambda: None)()
     w, h = img.size
-    sensor_px_w = int(sensor_size[0]) if sensor_size else int(w)
+    sensor_px_w, sensor_px_h = ((int(sensor_size[0]), int(sensor_size[1]))
+                                if sensor_size else (int(w), int(h)))
 
     f35 = None
     focal = None
@@ -51,12 +59,17 @@ def hfov_from_image(img, sensor_size=None) -> tuple[float, str, dict]:
     #   13mm 等效（运动相机/手机超广）和 250mm 等效（长焦）都是常见输入，
     #   旧区间 [20,200] 把它们分别推到 26mm —— 视场角错 26%，而验收全绿。
     if f35 and 8.0 <= f35 <= 400.0:
-        hfov = 2.0 * math.atan(36.0 / (2.0 * f35))
+        # 35mm 等效焦距按传感器长边 36mm 定义；竖拍（±90°）时显示画面的水平
+        # 方向对应传感器短边 24mm，基准宽度要跟着换成 24mm。
+        base_mm = 24.0 if rotated90 else 36.0
+        hfov = 2.0 * math.atan(base_mm / (2.0 * f35))
         # 0.06 rad ≈ 3.4°：覆盖到 400mm 等效（5.15°）。0.14(8°) 会把 300mm 拒掉。
         if 0.06 <= hfov <= 2.4:
             meta["focal35"] = f35
             meta["fov_confidence"] = "high"
             meta["fov_source"] = "exif-35mm"
+            meta["basis_mm"] = base_mm
+            meta["rotated90"] = rotated90
             return hfov, "exif-35mm", meta
 
     # 物理焦距分支：**先读 FocalPlaneXResolution 求真实传感器宽度**，
@@ -67,9 +80,13 @@ def hfov_from_image(img, sensor_size=None) -> tuple[float, str, dict]:
         fpx = _ratio(exif.get(0xA20E)) if exif else None      # FocalPlaneXResolution
         unit = exif.get(0xA210) if exif else None             # FocalPlaneResolutionUnit
         if fpx and fpx > 1.0:
-            # 单位 3 = cm（Exif 标准），2 = inch；像素数取照片宽度
+            # 单位 3 = cm（Exif 标准），2 = inch。
+            # FocalPlaneXResolution 描述的是**存储朝向的 X 方向**（宽）像素密度。
+            # 竖拍（±90°）时显示画面的水平方向对应的是存储的**高度**像素，
+            # 传感器物理宽度要按 sensor_px_h 算，否则偏大 1.7~2 倍。
             per_unit = 10.0 if (unit in (3, "3") or unit is None) else 25.4
-            sensor_w = float(sensor_px_w) * per_unit / fpx
+            px_horizontal = sensor_px_h if rotated90 else sensor_px_w
+            sensor_w = float(px_horizontal) * per_unit / fpx
             if not (2.0 <= sensor_w <= 90.0):                 # 物理上不合理的值直接丢
                 sensor_w = None
     except Exception:

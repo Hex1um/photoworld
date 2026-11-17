@@ -42,10 +42,21 @@ import calib                     # noqa: E402
 def load_photo(path: str, max_side: int):
     # P1（v2.15.8）：按 EXIF 摆正（手机竖拍 orientation=6/8），
     # 否则深度模型看到的是躺倒的图，建出来的世界横竖颠倒。
+    _raw = Image.open(path)
+    _stored_size = _raw.size
+    # P1（本轮修）：transpose 之前读 Orientation；竖拍 FOV 要按传感器短边换算。
+    _ori = 1
+    try:
+        _ori = int(_raw.getexif().get(0x0112, 1))
+    except Exception:
+        pass
+    _rotated90 = _ori in (5, 6, 7, 8)
     from PIL import ImageOps
-    img = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+    img = ImageOps.exif_transpose(_raw).convert("RGB")
     src = img.size
-    hfov, fov_src, meta = hfov_from_image(img)
+    hfov, fov_src, meta = hfov_from_image(img, sensor_size=_stored_size,
+                                          rotated90=_rotated90)
+    # 缩放按显示朝向（transpose 之后）的宽高，竖拍才不会被压成横图。
     if max(src) > max_side:
         s = max_side / float(max(src))
         img = img.resize((max(1, round(src[0] * s)), max(1, round(src[1] * s))), Image.LANCZOS)

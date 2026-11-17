@@ -168,10 +168,19 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
     # 与实际朝向相反（视场/外扩/地面判定全跟着错）。
     _im_raw = Image.open(io.BytesIO(data))
     _stored_size = _im_raw.size                 # 存储朝向，供 EXIF 焦距换算使用
+    # P1（本轮修）：在 transpose **之前**读 Orientation。exif_transpose 会把
+    # orientation tag 归一掉，之后再读就永远是 1，竖拍会被当成横拍算 FOV。
+    _ori = 1
+    try:
+        _ori = int(_im_raw.getexif().get(0x0112, 1))
+    except Exception:
+        pass
+    _rotated90 = _ori in (5, 6, 7, 8)
     from PIL import ImageOps
     img_src = ImageOps.exif_transpose(_im_raw).convert("RGB")
     src_size = img_src.size
-    hfov, fov_src, meta = hfov_from_image(img_src, sensor_size=_stored_size)
+    hfov, fov_src, meta = hfov_from_image(img_src, sensor_size=_stored_size,
+                                          rotated90=_rotated90)
     hfov0 = hfov
 
     # ---- 视锥外扩：把"照片只有一块梯形"补成"周围也有世界" --------------

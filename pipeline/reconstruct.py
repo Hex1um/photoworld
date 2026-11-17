@@ -48,12 +48,25 @@ def load_photo(path: str, max_side: int = 1600) -> tuple[Image.Image, np.ndarray
     # 建出来的世界横竖拉伸。注意 hfov 的传感器宽度分支要用**存储宽度**
     # （transpose 之前的 size），见 hfov_from_image 的注释。
     src_w, src_h = img.size          # 存储朝向（供传感器宽度/FOV 使用）
+    # P1（本轮修）：先读出 EXIF Orientation，判断是否为 ±90° 竖拍。
+    # 竖拍时 35mm 等效焦距的基准边、物理焦距的传感器宽度都要按旋转后的
+    # 显示朝向换算，见 exif.hfov_from_image 的 rotated90 参数。
+    _ori = 1
+    try:
+        _ori = int(img.getexif().get(0x0112, 1))
+    except Exception:
+        pass
+    rotated90 = _ori in (5, 6, 7, 8)
     from PIL import ImageOps
     img = ImageOps.exif_transpose(img).convert("RGB")
-    hfov, src, meta = hfov_from_image(img, sensor_size=(src_w, src_h))
-    if max(src_w, src_h) > max_side:          # 等比缩放，保持宽高比
-        s = max_side / float(max(src_w, src_h))
-        img = img.resize((max(1, round(src_w * s)), max(1, round(src_h * s))), Image.LANCZOS)
+    hfov, src, meta = hfov_from_image(img, sensor_size=(src_w, src_h), rotated90=rotated90)
+    # P1（本轮修）：缩放必须按**显示朝向**的宽高（transpose 之后），不能用
+    # 存储朝向。竖拍 120×80 / Orientation=6 摆正后是 80×120，若仍按 120×80
+    # 缩放会把竖图压成横图（max_side=60 时输出 60×40 而非 40×60）。
+    dw, dh = img.size
+    if max(dw, dh) > max_side:                # 等比缩放，保持显示朝向的宽高比
+        s = max_side / float(max(dw, dh))
+        img = img.resize((max(1, round(dw * s)), max(1, round(dh * s))), Image.LANCZOS)
     arr = np.asarray(img, dtype=np.float32) / 255.0
     meta["source_size"] = [src_w, src_h]
     meta["used_size"] = list(img.size)

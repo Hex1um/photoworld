@@ -137,6 +137,25 @@ void main() {
     vec3 envCol = mix(uSkyAmb, uGroundTint, smoothstep(0.42, 0.62, vUV.y));
     col = mix(col, envCol, vEdge.x);
     col = mix(col, uGroundTint, vEdge.y);
+  } else if (mode == 10) {
+    // 地形专用（ISSUES #3）：片元级世界坐标噪声，地面视角与高空俯视看到
+    // 同一套细节，不受网格密度限制（顶点色做法在高空会糊成网格）。
+    // 顶点色只保留大尺度色相与坡面明暗，细节由 vWorld.xz 的多尺度噪声补。
+    // 已用 tools/test_shader_mode10_compile.py 在 WebGL2 下验证编译+链接通过。
+    vec3 albedo = vC.rgb;
+    vec2 wp = vWorld.xz;
+    float macro = vnoise(wp * 0.06) * 0.6 + vnoise(wp * 0.021 + 11.3) * 0.4;
+    float meso  = vnoise(wp * 0.31 + 3.7) * 0.6 + vnoise(wp * 0.83 - 5.1) * 0.4;
+    float micro = vnoise(wp * 2.7) * 0.5 + vnoise(wp * 6.1 + 1.9) * 0.5;
+    float fineFade = clamp(1.0 - vDist / 90.0, 0.0, 1.0);
+    albedo *= 0.86 * (0.84 + 0.32 * macro) * (1.0 + (meso - 0.5) * 0.30);
+    albedo *= 1.0 + (micro - 0.5) * 0.16 * fineFade;
+    float k10 = smoothstep(70.0, 200.0, vDist);
+    albedo = mix(albedo, uGroundTint, k10 * 0.55);
+    col = albedo * (uSkyAmb * fill + uSunColor * ndl * 1.02 + 0.02);
+    vec3 V10 = normalize(uEye - vWorld);
+    float fres10 = pow(1.0 - clamp(dot(n, V10), 0.0, 1.0), 4.5);
+    col = mix(col, uSkyAmb * 1.05 + uFogColor * 0.30, fres10 * 0.22 * (1.0 - k10));
   } else {
     vec3 albedo = srgb2lin(texture(uTex, vUV, uMipBias).rgb) * vC.rgb;
     col = albedo * (uSkyAmb * fill + uSunColor * ndl * 1.02 + 0.02);
