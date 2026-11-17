@@ -3,7 +3,23 @@
 
 把一张风景照片还原成"拍摄那一刻你面前的三维场景"，可以自由走动、转头、走近看。纯前端、零构建，深度推理与重建全部在浏览器本地完成，照片不上传。
 
-## 用法
+## 一键启动（Windows，推荐）
+
+双击仓库根目录的 **`start_v3.bat`** 即可 —— 起静态站、等页面就绪、自动开浏览器进世界。
+关服务双击 `stop_v3.bat`。`start_v2.bat` / `stop_v2.bat` 对应 v2（会附带尝试起 GPU 服务）。
+
+```bash
+python tools/start.py                 # 任意平台等价命令：静态站 + 首页
+python tools/start.py --world alpine  # 直接进 alpine（自动挑存在的 GLB，缺则回退在线链路）
+python tools/start.py --v2            # 附带尝试 GPU 服务；缺依赖只警告、不拖垮静态站
+python tools/start.py --stop          # 关闭本启动器起的服务（按 PID 精确关闭）
+```
+
+四个 `.bat` 都是薄包装，真正逻辑在零第三方依赖的 `tools/start.py`；不再受 PowerShell
+执行策略限制，也不再因为 v2 的可选重依赖缺失就整个起不来。默认端口 8199（v3），
+v2 静态站 8099 / GPU 8100；可用 `--port` / `--api-port` 改。
+
+若要完全手工启动（不依赖启动器）：
 
 ```bash
 # 静态站点，任意 http 服务即可（不能直接用 file:// 打开，浏览器会阻止读取像素）
@@ -44,11 +60,10 @@ v2 把重建搬到 GPU 上重做：**高分辨率深度 + LDI 分层 + 裙边 + 
 观感是照片级的。8 张代表图里 7 张明显改善，逐图结论与复现命令见
 [`docs/AB_v2.md`](docs/AB_v2.md)。
 
-**一键启动（Windows）**：双击仓库根目录的 `start_v2.bat`（或桌面上的
-`PHOTOWORLD v2 - 启动.bat`）。它会起 GPU 服务 + 静态站，等 `/health` 真的就绪
-（不是"端口开了"就算），再打开浏览器到带 `?api=` 的地址。
-关服务双击 `stop_v2.bat`。已经在跑就直接复用，不会因为端口占用报错；
-缺依赖 / 缺权重 / 端口被别人占，都会给出下一步该敲什么。
+**一键启动（Windows）**：双击仓库根目录的 `start_v2.bat`（等价
+`python tools/start.py --v2`）。它会先起静态站，再尝试起 GPU 服务；缺
+fastapi/torch 等依赖时只警告并跳过加速，页面仍可用（在线链路）。
+关服务双击 `stop_v2.bat`。已经在跑就直接复用，不会因为端口占用报错。
 
 ```bash
 # 手工启动（任意平台）
@@ -117,8 +132,10 @@ v2 的 LDI 仍是"薄片 + 裙边"。v3 换成用户给的目标形态：**视�
 python pipeline/v3/bake.py worlds/alpine.jpg --out out/v3/alpine      # ≈2 分钟/张（RTX 5070L）
 python pipeline/v3/bake.py photo.jpg --out out/x --no-diffusion        # 只做视锥内
 python tools/test_v3.py                                               # 20 条断言（验证 GLB 交付物）
-python -m http.server 8199 --bind 127.0.0.1                           # 然后
-#   http://127.0.0.1:8199/?glb=assets/world-v3-alpine.glb
+python tools/start.py --world alpine                                   # 起服务并直接进 alpine
+# 或手工：python -m http.server 8199 --bind 127.0.0.1，然后打开
+#   http://127.0.0.1:8199/?glb=out/v3/alpine/world.glb
+# 注意：仓库自带的是 v2 内置资产 assets/world-alpine.glb；v3 资产需先按上面命令烘焙。
 ```
 
 `worlds/alpine.jpg` 实测：**原点视角 PSNR 48.2dB / SSIM 0.973 / 覆盖 99.0%**，
@@ -270,10 +287,11 @@ python tools/bump_cache.py --check           # 缓存串一致性（mjs 入口�
 在别的角度看还站不站得住」：
 
 ```bash
-node tools/multiview.mjs --base http://127.0.0.1:8099 \
+python tools/multiview.py --base http://127.0.0.1:8099 \
   --list reports/mv_sample.txt --views 16 --gl hw \
   --out shots/mv --json reports/mv.json \
   --baseline reports/clarity_baseline.json
+# 旧入口 node tools/multiview.mjs ... 保留为薄包装，参数完全一致
 ```
 
 - `--list` 每行一个相对 base 的图片路径（`corpus/xxx.jpg`），`--corpus <dir>` 可直接整目录

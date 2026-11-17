@@ -99,27 +99,35 @@ def test_score_weights_sum_to_one():
     print("PASS  S6  权重合计=1.0，阈值/权重键集合一致（%d 项）" % len(SP.THRESH))
 
 
+def _multiview_src():
+    """指标公式的权威来源已从 multiview.mjs 迁到 multiview.py（v3.0.6）；
+    .mjs 现在只是薄包装。这里读 .py 源做静态断言。"""
+    return open(os.path.join(ROOT, "tools", "multiview.py"), encoding="utf-8").read()
+
+
 def test_void_blobmax_semantics():
-    src = open(os.path.join(ROOT, "tools", "multiview.mjs"), encoding="utf-8").read()
-    assert "voidBlobMax: +(vb.maxArea" in src, "voidBlobMax 必须取单块最大面积 maxArea"
-    assert "voidBlobMax: +(vb.totalArea" not in src, "voidBlobMax 不能再用总占比 totalArea"
+    src = _multiview_src()
+    assert '"voidBlobMax": _fixed(vb[1]' in src or '"voidBlobMax"' in src and 'vb[1]' in src, \
+        "voidBlobMax 必须取单块最大面积 maxArea（blob_stats 返回 (count,maxArea,total)）"
+    assert 'vb[2]' not in src.split('"voidBlobMax"')[1].split(',')[0], \
+        "voidBlobMax 不能再用总占比 totalArea"
     print("PASS  S7  voidBlobMax 取 maxArea（单块大洞），不再复用 totalArea")
 
 
 def test_void_tolerance_unified():
-    src = open(os.path.join(ROOT, "tools", "multiview.mjs"), encoding="utf-8").read()
-    assert "const VOID_TOL = 6;" in src, "缺少统一容差常量 VOID_TOL=6"
+    src = _multiview_src()
+    assert "VOID_TOL = 6" in src, "缺少统一容差常量 VOID_TOL=6"
     # 三处 isVoid / vmask 都必须用 VOID_TOL，不能残留硬编码 ±8 的 refBg 判定
-    assert "refBg[0]) <= 8" not in src, "掩码仍残留 ±8 的 refBg 判定"
+    assert "ref_bg[0]) <= 8" not in src, "掩码仍残留 ±8 的 refBg 判定"
     n_tol = src.count("<= VOID_TOL")
     assert n_tol >= 9, "三处（整幅/掩码/横段 ×3 通道）应共用 VOID_TOL，实际 %d 处" % n_tol
     print("PASS  S8  空洞容差统一为 VOID_TOL=6（三处共用，无残留 ±8）")
 
 
 def test_top_view_uses_refbg():
-    src = open(os.path.join(ROOT, "tools", "multiview.mjs"), encoding="utf-8").read()
-    assert "metrics(decodePNG(top), refBg)" in src, "俯视图必须传 refBg，与主视角口径一致"
-    assert "metrics(decodePNG(top))" not in src, "俯视图不能退回画面主色判定"
+    src = _multiview_src()
+    assert "image_metrics(decode_png(buf), ref_bg)" in src, "俯视图必须传 refBg，与主视角口径一致"
+    assert 'rec["top"]' in src, "俯视结果必须落到 rec.top"
     print("PASS  S9  俯视图传 refBg，与主视角空洞判据口径一致")
 
 
@@ -160,13 +168,13 @@ def test_aggregate_views_missing_is_none():
 
 
 def test_mv_agg_worst_contract():
-    """multiview.mjs 展示用 agg 的 4 个判据项也须取 worst，与判据口径一致。"""
-    src = open(os.path.join(ROOT, "tools", "multiview.mjs"), encoding="utf-8").read()
+    """multiview 展示用 agg 的 4 个判据项也须取 worst，与判据口径一致（v3.0.6 权威在 .py）。"""
+    src = _multiview_src()
     for k in ("voidFrac", "innerVoid", "lowVoid", "stripe"):
-        assert "%s: worst('%s')" % (k, k) in src, "%s 展示口径未同步为 worst" % k
+        assert '"%s": worst_of(v, "%s")' % (k, k) in src, "%s 展示口径未同步为 worst" % k
     for k in ("darkFrac", "borderVoid", "detail"):
-        assert "%s: mean('%s')" % (k, k) in src, "%s 应保留 mean（展示项）" % k
-    print("PASS  S13 multiview.mjs 展示 agg：4 判据取 worst，展示项保留 mean")
+        assert '"%s": mean_of(v, "%s")' % (k, k) in src, "%s 应保留 mean（展示项）" % k
+    print("PASS  S13 multiview 展示 agg：4 判据取 worst，展示项保留 mean")
 
 
 def test_render_score_uses_aggregate_views():

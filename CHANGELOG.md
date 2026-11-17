@@ -3,6 +3,55 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [3.0.6] - 2026-11-18  · 一键启动从根上重写；multiview 工具链 Python 化
+
+**一键启动脚本与启动命令此前不可用，本版从根上修复，并实测到浏览器真正渲染出世界。**
+
+**根因与影响：**
+
+1. **旧启动器会被 PowerShell 执行策略直接拦掉**：`start_v2.bat` / `start_v3.bat`
+   实际是把所有逻辑放在 `tools/start_*.ps1`。只要机器策略禁止脚本（本机实测
+   "禁止运行脚本"错误），双击 `.bat` 传 `-ExecutionPolicy Bypass` 之外的一切入口
+   （例如直接在 PowerShell 里敲命令）都起不来。
+2. **v2 启动器因可选重依赖缺失而整个失败**：它会强制探测
+   `fastapi/uvicorn/torch/transformers`，缺一个就报错退出。但静态站与 v3 资产链路
+   根本不需要这些；本机 Python311 恰好全缺，于是 `start_v2.bat` 必然失败，连带
+   静态站也起不来。
+3. **文档与脚本给出了不存在的资产 URL**：README 与 `start_v3.ps1` 指向
+   `assets/world-v3-alpine.glb`（仓库里根本没有，只有 v2 的 `world-alpine.glb`），
+   照着打开只会得到 404。`-World alpine` 沿这条路径找三处候选全落空，直接报错。
+4. **环境变量大小写重复项让 Start-Process 崩溃**：本机同时存在 `HTTPS_PROXY` 与
+   `https_proxy`，PS 5.1 的 `Start-Process -RedirectStandardOutput` 拼字典时抛
+   "已添加项"，服务起不来且症状晦涩。
+
+**修法：** 新增零第三方依赖的 `tools/start.py` 作为唯一逻辑来源，四个 `.bat` 与两个
+`.ps1` 全部改为薄包装转调它（旧调用方零改动）：
+
+- 不依赖 PowerShell 执行策略，双击 `.bat` 或直接
+  `python tools/start.py --world alpine` 都可用；
+- v2 GPU 服务改为**可选**：缺依赖只警告并跳过，页面仍能用在线链路 / v3 资产；
+- 世界资产按 `v3 预烘 → v3 烘焙 → v2 内置 GLB` 顺序挑**确实存在**的文件，
+  全都没有才回退 `?w=` 在线链路，不再送用户去 404；
+- 后台服务用 `DETACHED_PROCESS` 启动并设 `NO_PROXY` 含回环，关掉启动窗口不被回收、
+  本地请求不走代理；`--stop` 按 PID 精确关闭，不误杀其他 python；
+- 默认端口 v3=8199、v2 静态站=8099 / GPU=8100，可用 `--port` / `--api-port` 改。
+
+**实测**：`.bat` 等价入口起服务后，生成的 URL `.../?glb=assets/world-alpine.glb&instant=1`
+返回 HTTP 200、GLB 头为 `glTF`，无头浏览器 `ready=1 / mode=asset / world=true`，
+零页面错误；`--stop` 后 8199/8100 端口释放。
+
+**multiview 工具链 Python 化（延续"尽量用 Python"）：** `tools/multiview.mjs`
+（原 659 行）的逻辑迁到 `tools/multiview.py`：浏览器链路复用 `tools/cdp.py`，清晰度
+六项复用 `tools/clarity.py`，PNG 解码用 Pillow（缺失时回退标准库 zlib）。机位套餐
+A/B/C(32)、PLAN_V2/V3(32)、空洞/拉丝/块数指标、判据取最差机位聚合、基线 A/B
+逐项对齐。`.mjs` 保留为薄包装，`node tools/multiview.mjs ...` 参数/输出/退出码不变。
+
+**验证**：新增 `tools/test_multiview_parity.py` 20 项断言，含用 JS 原版算法对 8 组
+合成输入（纯色/带参考底色/全黑/横带/竖带/纹理/渐变/天空陆地）逐指标比对，
+全部一致；`test_score_params.py` 的 3 处源码断言改指向 .py 权威来源。
+20 套 Python 测试通过（另 3 套因本机缺 torch / 17MB v3 GLB 跳过，非代码缺陷），
+全仓 JS/MJS `node --check` 通过，compileall 通过，20 处 `?v=` 全部 3.0.6。
+
 ## [3.0.5] - 2026-11-17  · 修两个必崩回归与四处"假成功"验收陷阱
 
 本版全部是 bug 修复，无功能增删。**两个核心流程此前会直接崩溃**，另有四处工具在
