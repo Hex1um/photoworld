@@ -179,7 +179,10 @@ def calibrate_scale(depth_rel: np.ndarray, cam: Camera, eye: float = 1.7,
         p_ = float(np.clip(math.log(horizon_far / max(z_n, 0.1))
                            / max(1e-6, math.log(r_n / r_f)), 0.1, 4.0))
         A_ = z_n * (r_n ** p_)
-        return {"A": A_, "p": p_, "b": 0.0, "n": int(r_n), "rms": None,
+        # P2（v2.15.8 修）：这里原来写 "n": int(r_n) —— r_n 是**近端视差中位**（0.x），
+        # int() 之后恒 0/1，但 n 字段的语义是"拟合样本数"。退化分支本来没有逐像素拟合，
+        # 写 0 并在 mode 里注明，比给一个假样本数诚实。
+        return {"A": A_, "p": p_, "b": 0.0, "n": 0, "rms": None,
                 "mode": "two-anchor", "r_near": r_n, "z_near": z_n,
                 "r_far": r_f, "z_far": horizon_far, "degenerate": False}
     p_, b_ = fit["p"], fit["b"]

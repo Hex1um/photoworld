@@ -19,15 +19,21 @@ def _ratio(value) -> Optional[float]:
         return None
 
 
-def hfov_from_image(img) -> tuple[float, str, dict]:
+def hfov_from_image(img, sensor_size=None) -> tuple[float, str, dict]:
     """返回 (水平视场角弧度, 来源说明, 元数据)。
 
     优先级：EXIF 35mm 等效焦距 → EXIF 物理焦距 + 传感器宽度 → 默认。
     注意：竖直方向按等比换算，绝不对照片做非等比缩放。
+
+    `sensor_size=(w,h)`：**存储朝向**的像素尺寸（EXIF transpose 之前）。
+    v2.15.8 起 load_photo 会先按 EXIF 摆正图像，摆正后的 img.size 是显示朝向，
+    而 FocalPlaneXResolution 是按存储像素给的 —— 两者混用会让 sensor_w
+    差一个宽高比（竖拍旋转 90° 时错 1.7~2 倍），进而 FOV 偏大。
     """
     meta: dict = {}
     exif = getattr(img, "getexif", lambda: None)()
     w, h = img.size
+    sensor_px_w = int(sensor_size[0]) if sensor_size else int(w)
 
     f35 = None
     focal = None
@@ -63,7 +69,7 @@ def hfov_from_image(img) -> tuple[float, str, dict]:
         if fpx and fpx > 1.0:
             # 单位 3 = cm（Exif 标准），2 = inch；像素数取照片宽度
             per_unit = 10.0 if (unit in (3, "3") or unit is None) else 25.4
-            sensor_w = float(w) * per_unit / fpx
+            sensor_w = float(sensor_px_w) * per_unit / fpx
             if not (2.0 <= sensor_w <= 90.0):                 # 物理上不合理的值直接丢
                 sensor_w = None
     except Exception:

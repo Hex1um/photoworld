@@ -163,9 +163,15 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
     import depth_gpu
 
     t0 = time.time()
-    img_src = Image.open(io.BytesIO(data)).convert("RGB")
+    # P1（v2.15.8）：手机竖拍（EXIF Orientation=6/8）必须先按 EXIF 摆正 ——
+    # PIL 不会自动旋转，不转的话深度模型看到的是躺倒的图，而且 src_size 的宽高
+    # 与实际朝向相反（视场/外扩/地面判定全跟着错）。
+    _im_raw = Image.open(io.BytesIO(data))
+    _stored_size = _im_raw.size                 # 存储朝向，供 EXIF 焦距换算使用
+    from PIL import ImageOps
+    img_src = ImageOps.exif_transpose(_im_raw).convert("RGB")
     src_size = img_src.size
-    hfov, fov_src, meta = hfov_from_image(img_src)
+    hfov, fov_src, meta = hfov_from_image(img_src, sensor_size=_stored_size)
     hfov0 = hfov
 
     # ---- 视锥外扩：把"照片只有一块梯形"补成"周围也有世界" --------------
@@ -174,6 +180,11 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
     wall = False
     wall_why = ""
     seg = None
+    # P1（v2.15.8）：sem 必须在这里初始化。它原来只在 `if opts["semantics"]` 的
+    # try 里赋值，而下面 `_sem_obj_aligned(sem, seg, ...)` 是**实参求值**，
+    # 函数体首行的 `if seg is None: return None` 拦不住 NameError。
+    # 触发条件：调用方传 semantics=false，或 semantics 模块 import 失败。
+    sem = None
     if opts["semantics"]:
         try:
             import importlib
@@ -296,6 +307,15 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
     pad = (oinfo or {}).get("pass1", {}).get("pad") if isinstance(oinfo, dict) else None
     if pad and len(pad) == 4 and max(pad) > 0:
         l, t, r, b = pad
+        # P1（v2.15.8）：pad 是**原图像素**（outpaint 的 _padding 按原图宽高算），
+        # 而 disp 是缩到 work_side 之后的网格。不乘缩放比的话：
+        #   4000px 宽照片、outpaint=1.7 → left pad ≈1400 > tw2 → h0/w0 变负
+        #   → 下面的 `h0>32 and w0>32` 静默跳过 → 退化成在整幅扩展图上标定，
+        #   生成区的天空/地面把分位锚点带偏（画面变暗、地平线抬高）。
+        _sx = disp.shape[1] / max(1.0, float(src_size[0]))
+        _sy = disp.shape[0] / max(1.0, float(src_size[1]))
+        l, r = int(round(l * _sx)), int(round(r * _sx))
+        t, b = int(round(t * _sy)), int(round(b * _sy))
         h0, w0 = disp.shape[0] - t - b, disp.shape[1] - l - r
         if h0 > 32 and w0 > 32:
             disp_c = disp[t:t + h0, l:l + w0]
@@ -356,20 +376,27 @@ def bake(data: bytes, **over) -> tuple[bytes, dict]:
     tex.save(buf, format="JPEG", quality=opts["jpeg_quality"], optimize=True)
 
     out = io.BytesIO()
-    tmp = os.path.join(HERE, "_tmp_out.glb")
+    # P1（v2.15.8）：固定名 _tmp_out.glb 在并发下会互相覆盖/删掉对方的文件
+    # （server/app.py 用线程池并发跑 bake），前端可能收到半截 GLB。
+    # 改成每个请求一个唯一临时文件，且清理放在 finally 里。
+    import tempfile
+    _fd, tmp = tempfile.mkstemp(prefix="pw_", suffix=".glb", dir=HERE)
+    os.close(_fd)
     splat_stat = res["stats"].get("splat") or {}
     cam_extras = {"camera": {"hfov": cam.hfov, "vfov": cam.vfov, "w": tw, "h": th,
                              "pitch": cam.pitch, "eyeHeight": opts["eye"], "yaw": 0.0,
                              "pointPx": splat_stat.get("point_px", 0.0),
                              "generator": "photoworld-v2"}}
-    info = glb_mod.write_glb(tmp, res["layers"], buf.getvalue(),
-                             name="photoworld", extras=cam_extras)
-    with open(tmp, "rb") as f:
-        glb_bytes = f.read()
     try:
-        os.remove(tmp)
-    except OSError:
-        pass
+        info = glb_mod.write_glb(tmp, res["layers"], buf.getvalue(),
+                                 name="photoworld", extras=cam_extras)
+        with open(tmp, "rb") as f:
+            glb_bytes = f.read()
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
     manifest = {
         "version": "v2", "source_size": list(src_size), "work_size": [tw, th],

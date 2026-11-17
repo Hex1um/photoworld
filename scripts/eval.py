@@ -27,6 +27,7 @@ from PIL import Image
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from worldmodel.infer.rollout import rollout, parse_actions  # noqa: E402
+from worldmodel.action_codec import mat4_from_rowmajor, rel_action  # noqa: E402
 
 
 def to_np(t: torch.Tensor) -> np.ndarray:
@@ -118,7 +119,20 @@ def main() -> int:
             continue
         prev = load_image(os.path.join(td, "frames", frames[5]["file"]), size)
         tgt = load_image(os.path.join(td, "frames", frames[6]["file"]), size)
-        out = rollout(prev, [torch.zeros(7)], args.ckpt, steps=args.steps, cfg_scale=args.cfg)[0]
+        # P1（v2.15.8 修）：这里原来喂 `torch.zeros(7)`（idle 动作），而 GT 是
+        # frames[5]→[6] 的真实运动帧 —— 等于"要求模型不动却要它移动"，
+        # 增益被系统性压低，而且"模型没学到动作"和"评测没喂动作"无法区分。
+        # 现在用两帧的位姿关系算出真实相对动作（与训练标签同一个 rel_action）。
+        try:
+            _Ts = [mat4_from_rowmajor(f["camToWorld"]) for f in frames]
+            _fov = float(pj.get("fovX") or pj.get("fovY") or 1.2)
+            _sp = float(np.linalg.norm(_Ts[6][:3, 3] - _Ts[5][:3, 3])) or 0.08
+            _a = rel_action(_Ts[5], _Ts[6], _fov, _fov, max(_sp, 1e-3))
+            _act = torch.from_numpy(np.asarray(_a, dtype=np.float32))
+        except Exception as _e:
+            print("  动作算不出来（%s），本样本退回 idle" % _e, flush=True)
+            _act = torch.zeros(7)
+        out = rollout(prev, [_act], args.ckpt, steps=args.steps, cfg_scale=args.cfg)[0]
         pred = to_np(out)
         gt = to_np(tgt[0])
         ps.append(psnr(pred, gt))

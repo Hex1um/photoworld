@@ -3,6 +3,70 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [2.15.8] - 2026-11-17  · 后端/管线审查 26 条：2 个 P0 与 24 条 P1/P2 全修
+
+外部审查报告 `findings_backend.md` 覆盖 `pipeline/`、`server/`、`worldmodel/`、`scripts/`、
+`tools/`，共 26 条（P0×2 / P1×13 / P2×11）。逐条核对后**全部成立**（仅 P0-2.2 在
+2.15.6 已修，本次补了断言）。新增 `tools/test_backend_fixes.py`（13 项断言，含 4 项
+功能测试），并把两条"钉住旧 bug"的测试改为断言新语义。
+
+### P0（必然触发级）
+
+- **`pipeline/reconstruct.py:261` `pos` 未定义**：v1 主流程建完网格、写完 GLB 后
+  抛 `NameError`，`world.json` 永远不落盘，验收的退出码逻辑永远走不到。
+  改为 `pos_m`（重构时改名漏改一处，且没有任何端到端测试跑到该行）。
+- **`pipeline/v2/ldi.py` 点云分支 `seg` NameError**（2.15.6 已修，本次补断言）：
+  空中俯视"从中心炸开的尖刺"的地面层修复曾在生产路径静默失效。
+
+### P1（13 条）
+
+| 位置 | 症状 | 修法 |
+|---|---|---|
+| `api.py:296` | 标定裁剪的 pad 用原图像素去裁缩放网格 → 宽图必然 `h0/w0` 变负 → 静默退化成整幅标定（画面变暗、地平线抬高） | pad 按 `disp/src` 比例缩放 |
+| `api.py:174/332` | `sem` 未初始化即被引用，`semantics=false` 或 import 失败时 bake 抛 NameError | `sem = None` |
+| `api.py:355` | 固定名 `_tmp_out.glb` 并发竞态，前端可能收到半截 GLB | `tempfile.mkstemp` + `finally` 清理 |
+| `server/app.py:101` | 并发请求直进线程池跑 CUDA bake，无锁（ISSUES 附录 A 事故复发面） | 全局 `threading.Lock` 串行化 |
+| `ldi.py:1387/1447` | `sky.shape == zs.shape` 恒 False → 两处修复是死代码（山脊白线、天空混进顶面把飞行阈值抬到 300m） | 改用已降采样的 `sky_s` |
+| `ldi.py:463` | `build_solid` 封边判据互斥，`idx +=` 永远不可达 → 封闭体四周**永远开口** | 改判"轮廓边"：两端在体内但覆盖它的 quad 至少缺一个 |
+| `trainer.py:259` | 续训不恢复 optimizer/scheduler → LR 重回 warmup、动量清零 | 存/取 `opt`/`sched` |
+| `trainer.py:324` | `noise_proxy` 把**本步目标 z1** 塞进历史（教模型抄帧 → rollout 塌黑） | 改扰动真历史帧 |
+| `rollout.py:125` + `prepare_data.py:137` | rollout 冷启动历史是 `init×4`，训练集里从没有这种样本 → 第一帧分布外 | 数据窗口从 `i=0` 起、历史用首帧补齐 |
+| `eval.py:121` | 一步预测喂 `zeros(7)`（idle）却拿真实运动帧当 GT → 指标不可信 | 用两帧位姿算真实 `rel_action` |
+| 三处 `Image.open` | EXIF orientation 未处理，手机竖拍几何/FOV 全错 | `ImageOps.exif_transpose` + 传感器宽度用**存储**宽度 |
+| `tune_per_image.py:38` | `text=True` 遇 GBK 字节整轮 0 分（score_params 已修、验收链路没修） | 收字节 + `decode(replace)` |
+| `ckpt_meta.py:28` | 读 `hist_frames` 而配置写 `n_hist` → 保护从没生效 | 读 `n_hist`（兼容旧键） |
+
+### P2（11 条）
+
+`depth.py` 极性改**乘性**翻转（旧 `1-d` 破坏 `z ∝ 1/r`，且 `inverted` 算了没用）；
+`reconstruct.py` 不再在缩图后重算 hfov、`meta_out` 合并重复的 `"camera"` 键（`eye_height`
+被静默覆盖）；`ldi.py` 把 `cap_depth_gradient` 移到 `cliff_mask` 之前（与注释一致）、
+`build_points` 抽稀步长改 `ceil` 且 `size` 同步切片（旧写法超预算时永不抽稀、真抽稀则
+产生非法 glTF）；`geom.py` 退化分支 `n` 不再写视差；`acc_report` 的阈值改为引用
+`score_params.THRESH`（此前 4 项 vs 8 项，同一张图可以"验收通过 / 训练 hard=0"）；
+`score_server` 的锁探活改 `os.kill(pid,0)`（旧 `tasklist` 在非 Windows 上把**任何**锁
+判陈旧、互斥失效）且等锁超时改为报错；`prepare_data` 统计并写入 `action_scale`
+（动作 7 维量纲差 20 倍，是 turn 无效的主因之一）、`hist_actions` 不再包含目标动作本身；
+`trainer` 的历史噪声增强加退火（前 10% 步不加噪）。
+
+### 测试
+
+- `python tools/test_backend_fixes.py` → 13 项断言全绿（含 `build_solid` 封边 20 个
+  quad、`build_points` 抽稀到 400 点且 size 同步、`ckpt_meta` 读 `n_hist`）。
+- 12 套 Python 回归 + 3 套 Node 回归全绿；`py_compile` 全绿。
+- 两处"钉住旧行为"的测试已改：`test_regression_p2` 原来断言 `z_self = (1-alpha)*z1`
+  （即泄漏本身），`test_regression` 的 hist 用例用错键 `hist_frames` —— 正是审查报告
+  §五 点名的测试盲区 #1；现在都断言新语义。
+- **16 图 × 32 视角验收**（`tools/multiview.mjs --views 32`，Edge + D3D11，960×600）：
+  `stripe 2.817 / innerVoid 0.0642 / voidFrac 0.0622 / lowVoid 0.1012`，按阈值
+  **0/16 通过**，全部卡在 `stripe`（2.32~3.69 vs 阈值 2.0）。明细见
+  `docs/acc32_v2158.md`。**这不是本轮改动的结果**：本轮 26 条修复全在 Python 路径，
+  `js/` 与 `index.html` 零改动（`git diff --stat -- js/ index.html` 为空）；同一批图
+  在 `docs/acc32b.md` 的基线是 stripe 1.20~1.60，差异来自采集条件（光栅后端/视口/机位），
+  按仓库纪律"指标只能同后端比较"，本表应作为**本机新基线**。另外
+  `0116beac09cf82d5`（黑白雪山）的 void/lowVoid 是指标失效（`voidFrac` 统计"接近
+  clear color 的像素"，整张深灰阶图会把暗部全判成空底），不是世界空了。
+
 ## [2.15.7] - 2026-11-17  · 回退两项未经验证的视觉改动；记录 `stripe` 指标不可复现
 
 2.15.6 里有两项"压地面放射状拉丝"的改动是基于**无效对比**做的（对比的两组截图

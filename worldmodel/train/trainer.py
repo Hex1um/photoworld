@@ -98,12 +98,22 @@ def make_self_frame(model, z_init, z_hist, act, domain, z1, device,
 
 
 def _augment_hist(z_hist: torch.Tensor, B: int, device: str,
-                  p: float, sigma: float) -> torch.Tensor:
-    """历史帧噪声增强（对抗自回归漂移）。z_hist 只是输入，不参与梯度。"""
+                  p: float, sigma: float, progress: float = 1.0) -> torch.Tensor:
+    """历史帧噪声增强（对抗自回归漂移）。z_hist 只是输入，不参与梯度。
+
+    P2（v2.15.8 修）：加**退火**。恒定 p=0.5 / σ=0.3 在短训练里会把模型教成
+    "历史不可信 → 抄均值"，而均值是暗的 —— report.md 的"rollout 塌黑"病理之一。
+    现在：前 10% 步完全不加噪（先学会真历史），之后 30% 步内线性升到 p，
+    σ 随进度衰减到一半（后期真历史更可信，需要的对抗噪声更少）。
+    """
     if p <= 0:
         return z_hist
-    sig = torch.rand(B, 1, 1, 1, 1, device=device) * sigma
-    mask = (torch.rand(B, 1, 1, 1, 1, device=device) < p).float()
+    prog = max(0.0, min(1.0, float(progress)))
+    p_eff = p * min(1.0, max(0.0, (prog - 0.1) / 0.3))
+    if p_eff <= 0:
+        return z_hist
+    sig = torch.rand(B, 1, 1, 1, 1, device=device) * sigma * (1.0 - 0.5 * prog)
+    mask = (torch.rand(B, 1, 1, 1, 1, device=device) < p_eff).float()
     return z_hist + mask * sig * torch.randn_like(z_hist)
 
 
@@ -172,9 +182,23 @@ def train(cfg: dict) -> None:
 
     # cache=False：缓存解码后的张量会把内存吃爆（5160×6 帧 ≈ 36GB），导致疯狂换页
     shard_dir = resolve_shard_dir(cfg)
+    # 动作标准化系数：配置优先；没配就读 prepare_data 写进 index 的实测值
+    # （1/std，逐维）。这样"动作 7 维量纲差 20 倍"不会悄悄把 turn 的梯度淹没，
+    # 也不需要人肉把魔数抄进 yaml（v2.15.8）。
+    _as = cfg["data"].get("action_scale")
+    if _as is None:
+        try:
+            import json as _json
+            _idx = _json.load(open(os.path.join(shard_dir, "index.json"), encoding="utf-8"))
+            _as = _idx.get("action_scale")
+            if _as:
+                print("action_scale 取自数据集 index：%s" % (_as,), flush=True)
+        except Exception as e:
+            print("未能读取数据集 action_scale（%s），按原始幅度训练" % e, flush=True)
     ds = TarWindows(shard_dir, cfg["data"]["width"], cfg["data"]["height"],
                     cfg["data"]["n_hist"], cache=False,
-                    action_scale=cfg["data"].get("action_scale"))
+                    action_scale=_as)
+    cfg["data"]["action_scale"] = _as          # checkpoint 里带上，rollout 才能对齐
     tr, va = split_dataset(ds, cfg["data"].get("val_ratio", 0.05), seed)
     bs = cfg["train"]["batch_size"]
     # v1.26 opt-in：多进程预取把 data 阶段（作者机器实测 0.11s/step）摊到后台。
@@ -269,6 +293,20 @@ def train(cfg: dict) -> None:
                 ema.shadow = {k: v.to(device).float() for k, v in ck["ema"].items()}
                 ema.step = ck.get("step", 0)
             step = int(ck.get("step", 0))
+            # P1（v2.15.8 修）：续训必须连 optimizer / scheduler 一起恢复。
+            # 旧实现只恢复 model + ema + step：AdamW 的一阶/二阶矩清零、
+            # LambdaLR 从 0 重新计数 → 续训第一刻 LR 跳回 warmup 起点、
+            # 动量从零重建，val loss 出现周期性毛刺甚至分叉（长跑方案的致命伤）。
+            if "opt" in ck:
+                try:
+                    opt.load_state_dict(ck["opt"])
+                except Exception as e:            # 参数组变了（换 lr/换模型）时降级
+                    print("optimizer 状态不兼容，已跳过：%s" % e, flush=True)
+            if "sched" in ck:
+                try:
+                    sched.load_state_dict(ck["sched"])
+                except Exception as e:
+                    print("scheduler 状态不兼容，已跳过：%s" % e, flush=True)
             print("从 %s 续训，step=%d" % (path, step), flush=True)
         else:
             print("没有找到可续训的 checkpoint，从头开始", flush=True)
@@ -304,7 +342,8 @@ def train(cfg: dict) -> None:
                         init.shape[0], hist.shape[1], -1, *z_init.shape[2:])
                     z1 = get_tok().encode(target)
             B = z1.shape[0]
-            z_hist = _augment_hist(z_hist, B, device, p_hist_noise, hist_sigma)
+            z_hist = _augment_hist(z_hist, B, device, p_hist_noise, hist_sigma,
+                                   progress=step / max(1, total))
             # T9-1（v1.22）：domain 必须在 SS 前向之前就定义好 ——
             #   旧代码 SS 里传 `domain=None`，与训练主路径的 zeros 不是同一条路，
             #   而且 DiT 里 None 会被当成"没有 domain 嵌入"，等于第三种前向。
@@ -320,8 +359,12 @@ def train(cfg: dict) -> None:
                     # 零成本代理：不再多跑一次 DiT 前向（p=0.5 时那是 +16.7% MACs），
                     # 直接把真值 z1 沿 flow 轨迹往噪声方向推一点当"自产帧"。
                     # 单步从纯噪声出发的 z_self 本来就离流形极远，既贵又不真。
+                    # P1（v2.15.8 修）：旧实现拿**本步目标 z1** 造"自产帧"，
+                    # 等于把答案（只加 ≤25% 噪声）塞进历史输入，直接教模型
+                    # "抄上一帧" —— 正是 rollout 塌黑/复制行为的强化剂。
+                    # 改成扰动**真历史帧**：与目标无关，保留"历史不可靠"的语义。
                     alpha = 0.05 + torch.rand(B, 1, 1, 1, device=device) * 0.20
-                    z_self = (1 - alpha) * z1 + alpha * torch.randn_like(z1)
+                    z_self = z_hist[:, -1] + alpha * torch.randn_like(z_hist[:, -1])
                 else:
                     # T9-1：单步 Euler 自洽版（时刻与状态必须配对），实现见 make_self_frame
                     with torch.no_grad():
@@ -393,7 +436,8 @@ def train(cfg: dict) -> None:
                     print("  val loss %.4f (EMA)" % (sum(vl) / max(1, len(vl))), flush=True)
             finally:
                 raw_model(model).load_state_dict(train_sd)
-            ck = {"model": raw_model(model).state_dict(), "ema": ema.shadow, "cfg": cfg, "step": step}
+            ck = {"model": raw_model(model).state_dict(), "ema": ema.shadow, "cfg": cfg,
+                  "step": step, "opt": opt.state_dict(), "sched": sched.state_dict()}
             torch.save(ck, os.path.join(out_dir, "last.pt"))
             torch.save(ck, os.path.join(out_dir, "step-%06d.pt" % step))
             model.train()

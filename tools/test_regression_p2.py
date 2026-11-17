@@ -437,9 +437,12 @@ def test_noise_proxy_distribution() -> None:
     amin, span = float(m.group(1)), float(m.group(2))
     assert amin == 0.05 and span == 0.20, "alpha 采样区间不是 U(0.05, 0.25)"
     for frag in ('if ss_mode == "noise_proxy":',
-                 'z_self = (1 - alpha) * z1 + alpha * torch.randn_like(z1)',
                  'v_self = model('):
         assert frag in tr, "scheduled sampling 双路径被改动：%s" % frag
+    # v2.15.8：noise_proxy 原来用**目标帧 z1** 造"自产帧"，等于把答案塞进历史输入
+    # （教模型抄上一帧 → rollout 塌黑）。现在必须扰动**真历史帧**，不得出现 z1。
+    assert 'z_self = z_hist[:, -1] + alpha' in tr,         "noise_proxy 应扰动真历史帧（不得用目标帧 z1）"
+    assert '(1 - alpha) * z1' not in tr,         "回归：noise_proxy 又把目标帧 z1 泄漏进历史输入"
 
     rng = np.random.default_rng(20261114)
     n = 400000

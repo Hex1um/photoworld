@@ -41,9 +41,16 @@ DEFAULT_MODEL = os.path.join(ROOT, "models", "model_quantized.onnx")
 
 
 def load_photo(path: str, max_side: int = 1600) -> tuple[Image.Image, np.ndarray, str, dict]:
-    img = Image.open(path).convert("RGB")
-    src_w, src_h = img.size
-    hfov, src, meta = hfov_from_image(img)
+    img = Image.open(path)
+    # P1（v2.15.8）：手机竖拍（EXIF Orientation=6/8）必须先按 EXIF 摆正。
+    # PIL 不会自动旋转：不转的话 img.size 是**存储朝向**（横向），
+    # vfov_of(hfov,w,h) 宽高颠倒、深度模型的"近景在下"极性判据整体失真、
+    # 建出来的世界横竖拉伸。注意 hfov 的传感器宽度分支要用**存储宽度**
+    # （transpose 之前的 size），见 hfov_from_image 的注释。
+    src_w, src_h = img.size          # 存储朝向（供传感器宽度/FOV 使用）
+    from PIL import ImageOps
+    img = ImageOps.exif_transpose(img).convert("RGB")
+    hfov, src, meta = hfov_from_image(img, sensor_size=(src_w, src_h))
     if max(src_w, src_h) > max_side:          # 等比缩放，保持宽高比
         s = max_side / float(max(src_w, src_h))
         img = img.resize((max(1, round(src_w * s)), max(1, round(src_h * s))), Image.LANCZOS)
@@ -91,8 +98,11 @@ def main() -> int:
         hfov = math.radians(args.fov)
         meta["fov_source"] = "cli"
     else:
-        hfov, _, m = hfov_from_image(img)
-        meta = {**meta, **m}
+        # P2（v2.15.8）：不要在 resize 后的图上重算 hfov。
+        # `hfov_from_image` 的物理焦距分支用 sensor_w = w*per_unit/fpx，
+        # 这里的 w 是被缩到 max_side 之后的宽度 → FOV 系统性偏小；
+        # 而且会把 load_photo 用原图尺寸算好的结果覆盖掉。直接用它的返回值。
+        hfov = hfov if hfov else math.radians(60.0)
     vfov = vfov_of(hfov, img.size[0], img.size[1])
     cam = geom.Camera(hfov=hfov, vfov=vfov, w=img.size[0], h=img.size[1])
     # T5（v1.22）：俯仰角由地面带拟合残差反解（旧实现恒 0，注释却声称会反解）。
@@ -253,23 +263,30 @@ def main() -> int:
         # ONNX 是相对深度 + 几何标定，不能把标定后的米写成"度量深度后端"
         "metric": bool(res.metric),
         "depth_kind": "metric" if res.metric else "relative-calibrated",
-        "camera": {"hfov": hfov, "vfov": vfov, "w": img.size[0], "h": img.size[1],
-                   "eye_height": args.eye, "fov_source": meta.get("fov_source")},
         "extended": {"hfov": cam2.hfov, "w": cam2.w, "h": cam2.h},
         "calibration": {k: (None if isinstance(v, float) and not math.isfinite(v) else v)
                         for k, v in cal.items()},
-        "bbox": {"min": pos.min(axis=0).tolist(), "max": pos.max(axis=0).tolist()},
+        # P0（v2.15.8 修）：这里原来写的是 `pos` —— 全函数从未赋值（上文只有
+        # pos_m = mesh["pos"]），任何一次 `python pipeline/reconstruct.py photo.jpg`
+        # 都会在建完网格、写完 GLB 后抛 NameError，world.json 永远不落盘，
+        # 验收的退出码逻辑也就永远走不到。
+        "bbox": {"min": pos_m.min(axis=0).tolist(), "max": pos_m.max(axis=0).tolist()},
         "mesh": {"vertices": info["vertices"], "triangles": info["triangles"],
                  "layers": info.get("layers", 1),
                  "near_triangles": int(near_mask.sum()),
                  "split_m": args.split,
                  "skipped_quads": round(mesh["skipped"], 4)},
-        "camera": {"hfov_deg": round(math.degrees(cam2.hfov), 3),
+        # 注意：这里**只能有一个** "camera" 键（v2.15.8 修）。旧代码上方还有一份
+        # 含 eye_height / 原始 hfov / fov_source 的 "camera"，dict 字面量重复键会被
+        # 静默覆盖 → world.json.camera.eye_height 永远读不到。
+        "camera": {"hfov": hfov, "vfov": vfov, "w": img.size[0], "h": img.size[1],
+                   "eye_height": args.eye, "fov_source": meta.get("fov_source"),
+                   "hfov_deg": round(math.degrees(cam2.hfov), 3),
                    "vfov_deg": round(math.degrees(cam2.vfov), 3),
-                   "w": int(cam2.w), "h": int(cam2.h),
+                   "w_ext": int(cam2.w), "h_ext": int(cam2.h),
                    "pitch_deg": round(math.degrees(cam2.pitch), 3),
                    "pitch_source": ("fit" if (pitch_fit and pitch_fit.get("ok")) else "none"),
-                   "fov_source": fov_source, "fov_confidence": fov_conf},
+                   "fov_confidence": fov_conf},
         "check": chk,
         "walkable": walkable,
         "elapsed_s": round(time.time() - t0, 1),

@@ -21,8 +21,22 @@ import json
 import os
 import statistics as st
 
-INNER_T = {"stripe": 2.0, "innerVoid": 0.06}
-OUTER_T = {"voidFrac": 0.10, "lowVoid": 0.08}
+# P2（v2.15.8 修）：阈值**单一来源**。
+# 以前这里手写 4 项、score_params.THRESH 有 8 项（多 voidBlobs/streakBlobs/
+# voidRunMax/voidBlobMax，且缺项判 invalid），于是同一张图可以"验收报告通过"
+# 而"训练评分 hard=0"——ISSUES #6 的"阈值重新定标"根本没有载体。
+# 现在直接引用 score_params 的 THRESH；改阈值只需要改一处。
+try:
+    import sys as _sys
+    if os.path.dirname(os.path.abspath(__file__)) not in _sys.path:
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from score_params import THRESH as _TH
+except Exception as _e:                      # 单文件拷贝出去用时留一份兜底
+    _TH = {"stripe": 2.0, "innerVoid": 0.06, "voidFrac": 0.10, "lowVoid": 0.08}
+    print("[acc_report] 无法导入 score_params.THRESH（%s），用内置副本" % _e)
+
+INNER_T = {"stripe": _TH["stripe"], "innerVoid": _TH["innerVoid"]}
+OUTER_T = {"voidFrac": _TH["voidFrac"], "lowVoid": _TH["lowVoid"]}
 
 
 def pct(xs, q):

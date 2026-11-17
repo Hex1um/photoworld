@@ -40,7 +40,10 @@ import calib                     # noqa: E402
 
 
 def load_photo(path: str, max_side: int):
-    img = Image.open(path).convert("RGB")
+    # P1（v2.15.8）：按 EXIF 摆正（手机竖拍 orientation=6/8），
+    # 否则深度模型看到的是躺倒的图，建出来的世界横竖颠倒。
+    from PIL import ImageOps
+    img = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
     src = img.size
     hfov, fov_src, meta = hfov_from_image(img)
     if max(src) > max_side:

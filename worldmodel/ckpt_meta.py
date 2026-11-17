@@ -25,7 +25,13 @@ def resolve_hist_frames(cfg: dict, requested: int) -> tuple[int, str | None]:
 
     返回 (实际使用的帧数, 警告文案或 None)。抽成纯函数便于无 torch 回归。
     """
-    hist_cfg = ((cfg or {}).get("data") or {}).get("hist_frames")
+    # P1（v2.15.8 修）：配置里的键是 **n_hist**（trainer.py 与 configs/*.yaml 都是），
+    # 旧代码读 `hist_frames` → hist_cfg 恒为 None → 永远返回调用方的值，
+    # "按 checkpoint 覆盖 + 告警"这个保护从来没生效过（T9-3 是死代码）。
+    _d = (cfg or {}).get("data") or {}
+    hist_cfg = _d.get("n_hist")
+    if hist_cfg is None:                     # 兼容旧存档
+        hist_cfg = _d.get("hist_frames")
     if hist_cfg is None:
         return int(requested), None
     if int(hist_cfg) != int(requested):

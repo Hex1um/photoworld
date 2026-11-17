@@ -109,9 +109,22 @@ class OnnxDepthAnything:
         hi = float(np.percentile(d, 98))
         d = np.clip(d / max(1e-6, hi), 0.0, 1.0)
         # 统一成"越大越近"：风景照里近景在下 ⇒ 行均值应随行号递增
+        #
+        # P2（v2.15.8 修）两处：
+        # ① `inverted` 上面算出来了却从没被用过 —— 注释承诺"|rho|<0.3 时不翻转并标记
+        #    不可信"，实际只要 corr<0 照样翻。现在以 polarity_confident 为准。
+        # ② `1.0 - d` 是**加性平移**，而标定拟合的模型是 z ∝ 1/r（严格乘性，见上一条
+        #    注释里 T2 的结论）。平移会把偏移压进幂指数 p，等于把刚修好的口径又破坏掉。
+        #    改成乘性翻转：1/d 再按 98 分位重新归一，保持"远=小、近=大"且不动标定结构。
         corr = np.corrcoef(d.mean(axis=1), np.arange(d.shape[0]))[0, 1]
-        if corr < 0:
-            d = 1.0 - d
+        if polarity_confident and rho < 0:
+            d = np.clip(d, 1e-6, None)
+            d = 1.0 / d
+            hi2 = float(np.percentile(d, 98))
+            d = np.clip(d / max(1e-6, hi2), 0.0, 1.0)
+        elif not polarity_confident and corr < 0:
+            # 不可信：不翻转（旧行为会翻，把仰拍/室内彻底弄反），只在 note 里标注。
+            pass
         return DepthResult(depth=d, metric=False, backend=self.name,
                            note=("relative-depth; scaled by ground-plane fit"
                                  + ("" if polarity_confident else

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import threading
 
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,6 +36,12 @@ try:
     _spec.loader.exec_module(_v2)
 except Exception:                              # noqa: BLE001
     _v2 = None
+# P1（v2.15.8）：CUDA 只有一把，bake 必须串行。
+# 旧代码把 bake 直接丢进 run_in_executor：两个请求并发时多线程同时调 CUDA +
+# 共享 _model/_cache（api.py 的 LRU 还会 KeyError）。ISSUES 附录 A 记过这个事故
+# （ThreadingHTTPServer + CUDA → 非主线程调 CUDA 直接崩、客户端只见连接被关），
+# tools/score_server.py 换单线程规避了，但这条主链路一直没有等价保护。
+_BAKE_LOCK = threading.Lock()
 
 app = FastAPI(title="photoworld generation service", version="1.0.0")
 app.add_middleware(
@@ -98,8 +105,11 @@ async def api_reconstruct(image: UploadFile = File(...), opts: str = Form("")):
             over = {}
     try:
         import asyncio
+        def _locked_bake():
+            with _BAKE_LOCK:
+                return _v2.bake(data, **over)
         glb, manifest = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: _v2.bake(data, **over))
+            None, _locked_bake)
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": "bake_failed", "detail": str(e)})
     return Response(content=glb, media_type="model/gltf-binary",

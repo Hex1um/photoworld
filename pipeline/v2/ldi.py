@@ -366,9 +366,15 @@ def build_points(P: np.ndarray, rgb: np.ndarray, valid: np.ndarray,
     # 少了它，走近时点距被放大、画面变稀（实测雪山图的近景就是一片点雾）。
     size = np.linalg.norm(pos, axis=1).astype(np.float32)
     if pos.shape[0] > max_points:
-        k = int(max_points / pos.shape[0])
-        pos = pos[::max(1, k)]
-        col = col[::max(1, k)]
+        # P2（v2.15.8 修）：k 必须是**向上取整的步长**。
+        #   旧写法 `k = int(max_points / N)` 在超预算时算出 0（N>max_points），
+        #   `max(1,0)=1` → 抽稀永远不发生；而且 size 没跟着切片，
+        #   一旦真的抽稀就会让 _SIZE 的 count 与 POSITION 不一致 → 非法 glTF。
+        k = int(np.ceil(pos.shape[0] / float(max_points)))
+        k = max(1, k)
+        pos = pos[::k]
+        col = col[::k]
+        size = size[::k]
     return {"name": "splat", "points": True, "pos": pos.astype(np.float32),
             "color": col.astype(np.float32), "size": size,
             "point_px": float(step_used) * 2.0}
@@ -464,16 +470,32 @@ def build_solid(P: np.ndarray, uv: np.ndarray, mask: np.ndarray, z: np.ndarray,
             a, b, c, d = back[(y, x)], back[(y + 1, x)], back[(y, x + 1)], back[(y + 1, x + 1)]
             idx += [a, c, b, c, d, b]          # 背面反向绕，保证外法线朝外
 
-    # 封边：把"正面的边界像素"与它对应的背面连成一条环带
+    # 封边：把"正面/背面的一对边界点"连成环带，实体才不会在轮廓处开缝
+    #
+    # P1（v2.15.8 修）：旧实现是死代码 —— 先 `if (ny2,nx2) in vid: continue`
+    # 跳过"邻点在体内"的情况，紧接着又要求邻点在体内才封边，两个条件互斥，
+    # `idx += ...` 永远不可达 → 所有封闭体只有前后两张皮、四周开口
+    # （ISSUES #5"极近物体长尾/竖条"里 build_solid 一侧的残留）。
+    #
+    # 正确判据：一条边（p→q，q 是右/下邻点）是**轮廓边**，当且仅当它两端的点都在体内，
+    # 但覆盖它的正面 quad（边两侧各一个）至少缺一个。内部边两侧都有 quad → 跳过。
+    def _quad_ok(qy, qx):
+        return ((qy, qx) in vid and (qy + 1, qx) in vid
+                and (qy, qx + 1) in vid and (qy + 1, qx + 1) in vid)
+
     for (y, x) in order:
         for dy, dx in ((1, 0), (0, 1)):
             ny2, nx2 = y + dy, x + dx
-            if (ny2, nx2) in vid:
-                continue                        # 内部边，不需要封
+            if (ny2, nx2) not in vid:
+                continue                        # 单端悬空，没有边可封
+            if dy == 1:                          # 竖边：两侧 quad 是 (y,x-1) 与 (y,x)
+                qa, qb = (y, x - 1), (y, x)
+            else:                                # 横边：两侧 quad 是 (y-1,x) 与 (y,x)
+                qa, qb = (y - 1, x), (y, x)
+            if _quad_ok(*qa) and _quad_ok(*qb):
+                continue                        # 内部边
             f1, f2 = vid[(y, x)], back[(y, x)]
-            f3, f4 = vid[(ny2, nx2)] if (ny2, nx2) in vid else None, back[(ny2, nx2)] if (ny2, nx2) in vid else None
-            if f3 is None:
-                continue
+            f3, f4 = vid[(ny2, nx2)], back[(ny2, nx2)]
             idx += [f1, f2, f3, f3, f2, f4]
 
     if not idx:
@@ -1100,12 +1122,11 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
             zs = zs.astype(np.float32)
             zs[fill] = zs[ny[fill], nx2[fill]]
             valid = valid | fill
-    # 断崖掩码要在表示选择之前算：它是"该用网格还是点云"两个判据之一
-    cliff, ratio, edge_str = cliff_mask(zs, step, edge_ratio)
-
     # ---- 深度梯度限幅：去掉剪影处的"长尾" --------------------------
-    # 必须在分层、cliff 判定**之前**做：几何本身就是按 zs 建的，
-    # 先限幅，后面的分层/剪面也都在更合理的深度上判断。
+    # P2（v2.15.8 修）：限幅必须在分层、cliff 判定**之前**做 —— 几何本身就是按 zs
+    # 建的，先限幅，后面的 cliff 剪面 / 地物分割 / 顶面才都在合理深度上判断。
+    # 旧代码把 cliff_mask 放在限幅之前（与注释自相矛盾）：cliff 掩码和 edge_str
+    # 全部基于**未限幅**的深度，长尾像素被压回后掩码却没重算 → 分层行为与实际几何不一致。
     if depth_cap < 100.0:
         zs = cap_depth_gradient(zs, k=depth_cap, iters=12)
         # 用当前分辨率的 rays（build 里已经按 step 降采样过），
@@ -1113,6 +1134,9 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
         P = rays * zs[..., None]
         P[..., 2] *= -1.0
         fwd = -P[..., 2]
+
+    # 断崖掩码要在表示选择之前算：它是"该用网格还是点云"两个判据之一
+    cliff, ratio, edge_str = cliff_mask(zs, step, edge_ratio)
 
     # ---- 非风景照：退回"照片墙" -----------------------------------
     # 判据用两个便宜的统计量：能识别成地面的像素几乎没有，且地平线以上占绝大多数。
@@ -1390,8 +1414,12 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
             continue
         # 该层对应的天空掩码（与 zs 同形状）；没有就传 None
         sky_slice = None
-        if sky is not None and sky.shape == zs.shape:
-            sky_slice = sky
+        # P1（v2.15.8 修）：这里原来比较 `sky.shape == zs.shape` —— sky 是**全分辨率**
+        # 掩码，zs 是 `z[::step, ::step]`，step≥2 时形状永远不等 → 这段是死代码，
+        # 天空边界照常挤裙边 → 山脊上那条亮白线（ISSUES #4）修不掉。
+        # 1038 行已经把降采样版本备好了（sky_s），直接用。
+        if sky_s is not None:
+            sky_slice = sky_s
         L = build_layer(P, uv, mask, q, zs, dir_world, skirt_min, skirt_max,
                         skirt_cap=skirt_cap, no_skirt=sky_slice)
         L["name"] = names[lid]
@@ -1450,8 +1478,10 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
         # 不加这个限制，天空像素（y 高达几百米）会把顶面抬到 300m 以上：
         # 阈值随之变成"飞到 313m 才显示"，等于这功能永远不生效（实测命中）。
         near_mask = valid & (fwd < max(60.0, far_split * 1.5))
-        if sky is not None and sky.shape == near_mask.shape:
-            near_mask &= ~sky
+        # P1（v2.15.8 修）：同上的形状比较错误。天空像素混进 top skin 会把顶面
+        # 高度按天空深度（800m+）拉高 → 飞行阈值抬到 300m → 俯视功能永远不触发。
+        if sky_s is not None:
+            near_mask &= ~sky_s
         # 有语义地面掩码时，顶面**只用地面的像素**：否则"每格取最高点"会把崖壁顶
         # 连成一片屋顶，低视角看就是一块悬空的板（实测截图）。
         gm = near_mask

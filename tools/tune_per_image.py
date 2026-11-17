@@ -35,10 +35,17 @@ HIGHER_IS_BETTER = ["centerHF", "centerLapVar", "detail", "localContrast", "hfEn
 
 
 def run(cmd, **kw):
-    r = subprocess.run(cmd, capture_output=True, text=True, **kw)
+    # P1（v2.15.8 修）：**不要用 text=True**。multiview（node）经由管道吐出的
+    # 字节流里混着 GBK（0xcf 之类），text 模式会在 reader 线程抛
+    # UnicodeDecodeError，主线程只看到 None → 整轮 32 图验收全 0 分，
+    # 而且 `r.stderr[-2000:]` 对 None 切片会再抛一次异常。
+    # 与 tools/score_params.py 对齐：收字节，自己 decode(replace)。
+    r = subprocess.run(cmd, capture_output=True, **kw)
+    out = (r.stdout or b"").decode("utf-8", "replace")
+    err = (r.stderr or b"").decode("utf-8", "replace")
     if r.returncode != 0:
-        raise RuntimeError(f"命令失败({r.returncode}): {' '.join(cmd)}\n{r.stderr[-2000:]}")
-    return r.stdout
+        raise RuntimeError(f"命令失败({r.returncode}): {' '.join(cmd)}\n{err[-2000:]}")
+    return out
 
 
 def bake_variants(images, out_root, variants, extra):

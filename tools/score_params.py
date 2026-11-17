@@ -90,16 +90,19 @@ def _gpu_lock():
                         except Exception:
                             pid = 0
                         if pid:
-                            import subprocess as _sp
-                            # tasklist 在中文 Windows 上输出 **GBK**，
-                            # text=True 会抛 UnicodeDecodeError（0xcf），
-                            # 而这个异常发生在子线程里，主线程只看到 None →
-                            # 评分直接失败（实测整轮训练全 0 分）。
-                            _r = _sp.run(["tasklist", "/FI", f"PID eq {pid}"],
-                                         capture_output=True)
-                            out = (_r.stdout or b"").decode("cp936", "replace")
-                            if str(pid) not in out:      # 进程没了 → 锁是遗产
-                                stale = True
+                            # P2（v2.15.8 修）：探活改成跨平台的 os.kill(pid, 0)。
+                            # 旧实现用 `tasklist`（Windows 专用）：Linux/macOS 上抛
+                            # FileNotFoundError → 被外层 except OSError 兜住 →
+                            # **任何锁都被判陈旧并删除**，互斥彻底失效。
+                            # （顺带省掉了中文 Windows 上 tasklist 输出 GBK 的坑。）
+                            try:
+                                os.kill(pid, 0)
+                            except ProcessLookupError:
+                                stale = True          # 进程没了 → 锁是遗产
+                            except PermissionError:
+                                pass                  # 存在但没权限发信号：活着
+                            except OSError:
+                                pass
                 except OSError:
                     stale = True
                 if stale:
@@ -109,6 +112,11 @@ def _gpu_lock():
                     except OSError:
                         pass
                 _t.sleep(1.0)
+        if fh is None:
+            # P2（v2.15.8 修）：等锁超时必须报错，不能无锁裸跑 ——
+            # 旧代码 1800 次失败后直接 yield，两个 multiview 抢同一个调试端口，
+            # 结果是两边都失败、错误信息还是空的。
+            raise RuntimeError("获取渲染锁超时（30 分钟）：%s" % lock_path)
         try:
             yield
         finally:

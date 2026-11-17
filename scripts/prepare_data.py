@@ -121,6 +121,7 @@ def main() -> int:
 
     open_shard()
     t0 = time.time()
+    _ACT_SAMPLES = []          # 4.7：动作标准化的统计样本
 
     for tdir in traj_dirs:
         tr = load_traj(tdir)
@@ -130,22 +131,31 @@ def main() -> int:
         scene = os.path.basename(tdir)
         frames = tr["frames"]
         n = len(frames)
-        for i in range(N_HIST, n - 1):
+        # P1（v2.15.8 修）：窗口从 i=0 开始，历史不足的部分用 frames[0] 补齐。
+        # 原因：rollout 的冷启动历史是 `[z_init] * hist_frames`（同一帧复制 N 份），
+        # 而旧数据只产 i ≥ N_HIST 的窗口 —— 训练集里**从来没有**这种"历史全是首帧"
+        # 的样本，模型第一帧就处于分布外，动作响应最先失真（rollout 塌黑的第一帧来源）。
+        for i in range(0, n - 1):
             a = rel_action(tr["Ts"][i], tr["Ts"][i + 1], tr["fov"], tr["fov"], tr["speed"])
             key = "%s_%06d" % (scene, i)
             try:
                 add(key + ".init.jpg", jpeg_bytes(os.path.join(tdir, "frames", frames[0]["file"]), size, args.quality))
                 for k in range(N_HIST):
-                    src = frames[i - N_HIST + 1 + k]["file"]
+                    # 早于 0 的历史帧用首帧补齐（与 rollout 的 init×N 同构）
+                    src = frames[max(0, i - N_HIST + 1 + k)]["file"]
                     add("%s.h%d.jpg" % (key, k), jpeg_bytes(os.path.join(tdir, "frames", src), size, args.quality))
                 add(key + ".target.jpg", jpeg_bytes(os.path.join(tdir, "frames", frames[i + 1]["file"]), size, args.quality))
             except Exception as exc:  # noqa: BLE001
                 print("跳过 %s：%s" % (key, exc))
                 continue
 
+            # P2（v2.15.8 修）：历史动作只收到**目标动作之前**那一帧（j ≤ i-1），
+            # 否则最后一项 rel(Ts[i], Ts[i+1]) 就是 action 本身 —— 元数据泄漏，
+            # 任何"用历史动作做条件"的后续开发都会把答案读进输入。
             hist_actions = []
             for k in range(N_HIST):
-                j = i - N_HIST + 1 + k
+                j = i - N_HIST + k
+                j = max(0, j)
                 hist_actions.append(rel_action(tr["Ts"][j], tr["Ts"][j + 1], tr["fov"], tr["fov"], tr["speed"]).tolist())
             meta = {
                 "action": [round(float(v), 5) for v in a],
@@ -156,6 +166,7 @@ def main() -> int:
             }
             add(key + ".json", json.dumps(meta).encode("utf-8"))
 
+            _ACT_SAMPLES.append(a)
             total += 1
             sample_in_shard += 1
             index["actions"][meta["action_dsl"]] = index["actions"].get(meta["action_dsl"], 0) + 1
@@ -166,6 +177,17 @@ def main() -> int:
                 open_shard()
 
     tf.close()
+    # P2（v2.15.8 修）：动作 7 维量纲差 ~20 倍（平移按速度归一、旋转是 raw 弧度）。
+    # 不标准化的话 MSE 里旋转的梯度天然被淹没 → "turn 无效、forward 还行"
+    # （report.md 症状①）。这里一次性统计每维标准差，存成 1/std 供两端使用：
+    #   · dataset.py 会对 rel_action 再乘一次 action_scale
+    #   · rollout.py 的 parse_actions 也乘同一个值（T6，训推一致）
+    #   配置里显式给 `data.action_scale` 时以配置为准。
+    if _ACT_SAMPLES:
+        _a = np.asarray(_ACT_SAMPLES, dtype=np.float64)
+        _std = _a.std(axis=0) + 1e-6
+        index["action_scale"] = [round(float(v), 4) for v in (1.0 / _std)]
+        print("动作标准化系数（1/std）：" + str(index["action_scale"]))
     index["samples"] += total
     index["shards"] = shard_idx + (1 if sample_in_shard > 0 else 0)
     index["size"] = [args.width, args.height]

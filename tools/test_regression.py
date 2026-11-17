@@ -193,9 +193,11 @@ def test_ckpt_mark() -> None:
 def test_hist_frames() -> None:
     """T9-3（v1.22）：历史帧数以 checkpoint 配置为准，不一致要给出警告。"""
     from worldmodel.ckpt_meta import resolve_hist_frames
-    n, w = resolve_hist_frames({"data": {"hist_frames": 6}}, 4)
+    # v2.15.8：配置里的键是 n_hist（trainer/configs 都是），原来测试用 hist_frames
+    # 与 ckpt_meta 的错键"互相迁就"，把 3.13 的 bug 盖住了（测试盲区 #1）。
+    n, w = resolve_hist_frames({"data": {"n_hist": 6}}, 4)
     assert n == 6 and w, "应覆盖为 checkpoint 的 6 帧并警告"
-    n2, w2 = resolve_hist_frames({"data": {"hist_frames": 4}}, 4)
+    n2, w2 = resolve_hist_frames({"data": {"n_hist": 4}}, 4)
     assert n2 == 4 and w2 is None, "一致时不应警告"
     n3, w3 = resolve_hist_frames({"data": {}}, 5)
     assert n3 == 5 and w3 is None, "无配置时沿用调用方取值"
