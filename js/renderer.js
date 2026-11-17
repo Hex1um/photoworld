@@ -141,6 +141,15 @@
       gl.enable(gl.DEPTH_TEST);
     }
 
+    /* 照片薄壳的整体透明度（v2.15.9）：由 app.js 每帧算好放在 world.shellAlpha。
+       走出照片覆盖矩形后淡出 —— 单层壳在矩形外被侧视时只会摊成放射状尖刺
+       （32 机位 C 圈实测），而那里本来就该由程序化地面 + 世界幕接管。
+       `?shellfade=0` 可关掉（world.shellAlpha 恒 1）。 */
+    function shellA(world) {
+      const v = world.shellAlpha;
+      return (v === undefined) ? 1 : v;
+    }
+
     function drawMesh(world, mesh, opt) {
       const p = progs.main;
       gl.useProgram(p.prog);
@@ -160,6 +169,7 @@
         uMipBias: opt.mipBias || 0.0,
         uGroundTint: world.groundTint || [0.3, 0.3, 0.3],
         uAlphaTest: opt.alphaTest || 0.3,
+        uAlphaMul: opt.alphaMul === undefined ? 1 : opt.alphaMul,
         uExposure: opt.exposure === undefined ? 1 : opt.exposure
       });
       gl.activeTexture(gl.TEXTURE0);
@@ -188,7 +198,8 @@
         uFogColor: world.fogColor,
         uFogDensity: world.lights.fogDensity,
         uFogAmt: opt.fog === undefined ? 0.5 : opt.fog,
-        uMipBias: opt.mip || 0
+        uMipBias: opt.mip || 0,
+        uAlphaMul: opt.alphaMul === undefined ? 1 : opt.alphaMul
       });
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, opt.tex || null);
@@ -295,7 +306,7 @@
         gl.enable(gl.CULL_FACE);
         drawMesh(world, world.meshes.reliefBackdrop, {
           tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.26, mipBias: 0,
-          backdrop: [cam.eye[0], cam.eye[2]]
+          backdrop: [cam.eye[0], cam.eye[2]], alphaMul: shellA(world)
         });
         gl.disable(gl.BLEND);
         gl.enable(gl.CULL_FACE);
@@ -308,7 +319,8 @@
         gl.depthMask(true);
         gl.disable(gl.CULL_FACE);
         drawMesh(world, world.meshes.reliefSurround, {
-          tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.65, mipBias: 1.4
+          tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.65, mipBias: 1.4,
+          alphaMul: shellA(world)
         });
         gl.disable(gl.BLEND);
         gl.enable(gl.CULL_FACE);
@@ -322,7 +334,8 @@
         gl.depthMask(true);
         gl.enable(gl.CULL_FACE);      // 同理：补洞层也是单面薄壳
         drawMesh(world, world.meshes.reliefBg, {
-          tex: world.tex.backdrop, mode: 4, fog: 0.30, mipBias: 1.0
+          tex: world.tex.backdrop, mode: 4, fog: 0.30, mipBias: 1.0,
+          alphaMul: shellA(world)
         });
         gl.disable(gl.BLEND);
         gl.enable(gl.CULL_FACE);
@@ -489,7 +502,8 @@
         gl.depthMask(true);
         gl.disable(gl.CULL_FACE);
         drawMesh(world, world.meshes.flat, {
-          tex: world.tex.photo, mode: 4, fog: 0.12, mipBias: 0
+          tex: world.tex.photo, mode: 4, fog: 0.12, mipBias: 0,
+          alphaMul: shellA(world)
         });
         gl.disable(gl.BLEND);
         gl.enable(gl.CULL_FACE);
@@ -511,7 +525,7 @@
              再画原照片点云 —— 侧移时前景移开，背后不是洞。 */
           if (world.meshes.splatHole && world.tex.bg) {
             drawSplat(world, world.meshes.splatHole, {
-              tex: world.tex.bg, fog: 0.5, scale: 34
+              tex: world.tex.bg, fog: 0.5, scale: 34, alphaMul: shellA(world)
             });
           }
           /* 点云路径（?splat=1）：三角形网格在掠射角会拉丝、单层壳侧面是竖幕，
@@ -519,14 +533,17 @@
           if (world.meshes.splatGround && world.meshes.splatBody) {
             /* 层化：地面用 mip 2.2 的低频照片色（掠射不拉丝），主体保持原图清晰。 */
             drawSplat(world, world.meshes.splatGround, {
-              tex: world.tex.photo, fog: 0.5, scale: world.splatScale || 30, mip: 2.2
+              tex: world.tex.photo, fog: 0.5, scale: world.splatScale || 30, mip: 2.2,
+              alphaMul: shellA(world)
             });
             drawSplat(world, world.meshes.splatBody, {
-              tex: world.tex.photo, fog: 0.5, scale: world.splatScale || 30, mip: 0
+              tex: world.tex.photo, fog: 0.5, scale: world.splatScale || 30, mip: 0,
+              alphaMul: shellA(world)
             });
           } else {
             drawSplat(world, world.meshes.splat, {
-              tex: world.tex.photo, fog: 0.5, scale: world.splatScale || 30
+              tex: world.tex.photo, fog: 0.5, scale: world.splatScale || 30,
+              alphaMul: shellA(world)
             });
           }
         } else {
@@ -547,7 +564,7 @@
                   /* fog 从 0.26 降到 0.12：0.26 让站在原点看到的画面比原片"淡一层"
                      （山脊对比度被雾色压平）。近景本来就是照片本身，不需要雾去遮。 */
                   tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.16, mipBias: 0,
-                  backdrop: [0, 0],
+                  backdrop: [0, 0], alphaMul: shellA(world),
                   /* 近景壳单独提一点天光：实测 fog 调到 0.12 后对比度对了，但整体
                      比原片暗（均值 0.494 对 0.582）。雾量再往上加已无变化 ——
                      差的不是雾，是光照。 */

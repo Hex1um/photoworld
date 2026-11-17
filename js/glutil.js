@@ -55,6 +55,10 @@ uniform vec3 uGroundTint;
 /* 图层调试：把某一层整片画成一个纯色，用来定位"这条artifact是哪一层画的"。
    mode 9 时直接输出 uDebugCol，绕过所有光照与贴图。 */
 uniform vec3 uDebugCol;
+/* 全局 alpha 乘子（v2.15.9）：走出照片范围时把"照片薄壳"整体淡出 ——
+   单层壳在矩形外被侧视/背视时只会摊成一堆放射状尖刺（C 圈实测），
+   而那里本来就该由程序化地面 + 世界幕接管。默认 1，不影响任何原有绘制。 */
+uniform float uAlphaMul;
 out vec4 fragColor;
 
 vec3 srgb2lin(vec3 c) {
@@ -75,7 +79,8 @@ float vnoise(vec2 p) {
 void main() {
   int mode = int(uMode + 0.5);
   vec3 col;
-  float alpha = vC.a;
+  float alpha = vC.a * uAlphaMul;
+  if (alpha < 0.004) discard;
 
   if (mode == 9) {
     fragColor = vec4(uDebugCol * uExposure, 1.0);
@@ -382,6 +387,7 @@ uniform vec3 uFogColor;
 uniform float uFogDensity;
 uniform float uFogAmt;
 uniform float uMipBias;
+uniform float uAlphaMul;
 out vec4 fragColor;
 void main() {
   vec2 d = gl_PointCoord - 0.5;
@@ -390,7 +396,9 @@ void main() {
   vec3 col = texture(uTex, vUV, uMipBias).rgb * vC.rgb;
   float f = clamp(1.0 - exp(-pow(vDist * uFogDensity, 2.2)), 0.0, 1.0);
   col = mix(col, uFogColor, f * uFogAmt);
-  fragColor = vec4(col, (1.0 - r * r) * 0.9 * vC.a);
+  float a = (1.0 - r * r) * 0.9 * vC.a * uAlphaMul;
+  if (a < 0.004) discard;
+  fragColor = vec4(col, a);
 }`;
 
   function compile(gl, type, src) {

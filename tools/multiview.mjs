@@ -223,9 +223,30 @@ function metrics(png, refBg = null) {
       // **空洞 = 看到背景**。参照色优先用渲染的 clearColor（= world.fogColor），
       // 而不是"画面主色"。否则水面/雪原这种大面积单色的场景会被整片误判成洞
       // （实测 lake 从侧后方看就是一片平坦湖面，被算成 voidFrac 0.43）。
-      const isVoid = refBg
+      const isVoidColor = refBg
         ? (Math.abs(r - refBg[0]) <= VOID_TOL && Math.abs(g - refBg[1]) <= VOID_TOL && Math.abs(b - refBg[2]) <= VOID_TOL)
         : (Math.abs(r - mr) <= 4 && Math.abs(g - mg) <= 4 && Math.abs(b - mb) <= 4);
+      /* v2.15.10：**颜色接近 ≠ 洞**。加一条"完全平坦"的判据。
+         病因（16 图 × 32 机位实测）：`0116beac…`（黑白雪山）整张是深灰阶，
+         它的暗部与 clear color 只差几个色阶，于是 voidFrac 0.64 / lowVoid 0.998
+         —— 指标把"照片本身"当成了空底，报告直接判它崩了，实际画面内容还在。
+         真正的空底是**渲染器清屏色**：逐像素完全一致、邻域对比为 0；
+         而照片/几何像素即使整体很暗，也总有颗粒与纹理。
+       */
+      let isVoid = isVoidColor;
+      if (isVoidColor) {
+        const oR = x < w - 1 ? o + bpp : o;
+        const oL = x > 0 ? o - bpp : o;
+        const oU = y > 0 ? o - w * bpp : o;
+        const oD = y < h - 1 ? o + w * bpp : o;
+        const lr = luma(data[oR], data[oR + 1], data[oR + 2]);
+        const ll = luma(data[oL], data[oL + 1], data[oL + 2]);
+        const lu = luma(data[oU], data[oU + 1], data[oU + 2]);
+        const ld = luma(data[oD], data[oD + 1], data[oD + 2]);
+        const mx = Math.max(l, lr, ll, lu, ld);
+        const mn = Math.min(l, lr, ll, lu, ld);
+        if (mx - mn > 0.02) isVoid = false;          // ≈5/255：有任何纹理就不算空底
+      }
       if (isVoid) voidN++;
       const inMid = x >= x0 && x < x1 && y >= y0 && y < y1;
       if (inMid) { innerN++; if (isVoid) innerVoid++; }
@@ -256,9 +277,19 @@ function metrics(png, refBg = null) {
       const sy = Math.min(h - 1, Math.floor((y + 0.5) * scale));
       const o = (sy * w + sx) * bpp;
       const r = data[o], g = data[o + 1], b = data[o + 2];
-      vmask[y * sw + x] = (refBg
+      /* 与主判据同口径：颜色接近 **且** 邻域完全平坦才算空底 */
+      const _colNear = refBg
         ? (Math.abs(r - refBg[0]) <= VOID_TOL && Math.abs(g - refBg[1]) <= VOID_TOL && Math.abs(b - refBg[2]) <= VOID_TOL)
-        : (Math.abs(r - mr) <= 6 && Math.abs(g - mg) <= 6 && Math.abs(b - mb) <= 6)) ? 1 : 0;
+        : (Math.abs(r - mr) <= 6 && Math.abs(g - mg) <= 6 && Math.abs(b - mb) <= 6);
+      let _flat = _colNear;
+      if (_colNear) {
+        const li = sy * w + sx;
+        const a1 = L[li];
+        const a2 = L[sx < w - 1 ? li + 1 : li];
+        const a3 = L[sy > 0 ? li - w : li];
+        if (Math.max(a1, a2, a3) - Math.min(a1, a2, a3) > 0.02) _flat = false;
+      }
+      vmask[y * sw + x] = _flat ? 1 : 0;
       // 拉丝像素：竖直差分明显大于水平差分（竖条/拉花），且不是噪点
       if (sy > 0 && sx > 0) {
         const k = sy * w + sx;

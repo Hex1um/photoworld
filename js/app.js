@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.15.8';
+  const VERSION = '2.15.11';
 
   /* v2 服务的地址：显式 ?api= 优先，其次是自动发现（本机常见端口）。
      自动发现写在启动流程里，不需要使用者改 URL —— 这是"更快捷地启用 v2"的关键。 */
@@ -1135,6 +1135,12 @@
     el('hudCoords').textContent = s.x.toFixed(1) + ' / ' + s.z.toFixed(1);
   }
 
+  /* 照片薄壳淡出开关（v2.15.11）。默认开，`?shellfade=0` 关掉做 A/B。
+     判据是"相机是否还在照片覆盖矩形内"：走出矩形就说明你已经在照片壳的背面/
+     侧后方，单层壳在那里只会摊成放射长刺；而程序化地面 + 世界幕接管反而干净。 */
+  const SHELL_FADE = (typeof location !== 'undefined'
+    && new URLSearchParams(location.search).get('shellfade') !== '0');
+
   function frame(now) {
     if (!running) return;
     const dt = Math.min((now - lastT) / 1000 || 0.016, 0.05);
@@ -1169,6 +1175,30 @@
         world._stash = null;
       }
     }
+    /* 照片薄壳淡出（v2.15.9）：走出照片覆盖矩形（x∈[-55,55]、z∈[-100,0]）后淡出。
+       原因：单层壳在矩形外被**侧视/背视**时，只会把纹理沿视线摊成一片放射状长刺
+       （32 机位 C 圈 r=75 的实测截图），而那里本来就该由程序化地面 + 世界幕接管 ——
+       同一机位 `?skip=shell` 的画面反而干净。
+       出界 2m 起淡、18m 外全透明；`?shellfade=0` 可关掉做 A/B。 */
+    if (SHELL_FADE) {
+      const bb = world.groundColorMeta || { x0: -55, z0: -100, spanX: 110, spanZ: 100 };
+      const x0 = bb.x0, x1 = bb.x0 + bb.spanX, z0 = bb.z0, z1 = bb.z0 + bb.spanZ;
+      const px = player.state.x, pz = player.state.z;
+      const dOut = Math.max(0, x0 - px, px - x1, z0 - pz, pz - z1);
+      /* 判据（v2.15.11 修正）：不是"离矩形多远"，而是**在壳的哪一侧**。
+         C 圈（r=75）落在 z=-101，已经在照片壳的**背面**：那里每条射线看到的都是
+         壳的背面/极掠射面，单层壳必然摊成放射长刺（`?skip=shell` 干净得多）。
+         所以只要出界就淡出，0.6m 过渡（≈跑动 0.2s），不做 16m 长坡 —— 长坡在
+         出界 1m 处几乎不生效，等于没修。 */
+      const t = Math.min(1, Math.max(0, dOut / 0.6));
+      world.shellAlpha = 1 - (t * t * (3 - 2 * t));       // smoothstep(2, 18, dOut) 的补
+      if (typeof window !== 'undefined' && window.PW) {
+        window.PW.__shellAlpha = { a: +world.shellAlpha.toFixed(3), dOut: +dOut.toFixed(1) };
+      }
+    } else {
+      world.shellAlpha = 1;
+    }
+
     if (world.extender) {
       world.extender.update(player.state.x, player.state.z, now,
         { yaw: player.state.yaw, fov: fovRad() });
