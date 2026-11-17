@@ -1155,9 +1155,30 @@
     /* 再加一条语义墙判据：墙面占比 > 55% 也是室内，哪怕地平线落在 0.42~0.72
        的「正常」区间（深色墙 + 白色家具的那张图 horizon=0.445、wall=0.762，
        被判成户外后墙面被竖墙剔除删掉一万个面，画面碎成黑块）。 */
-    let indoor = ((analysis.horizon < 0.42 || analysis.horizon > 0.72)
-        || (opt.sem && opt.sem.stats && opt.sem.stats.wall > 0.55))
-      && !(opt.sem && opt.sem.stats && opt.sem.stats.sky > 0.18);
+    /* 室内判定（v2.15.17 重写）：
+       旧判据是"地平线分位不在 0.42~0.72，且语义天空 <18%"。实测四张**户外**风景
+       （草地雪山 / 山林 / 秋林 / 黑白云海）全被判成 indoor —— 因为 SegFormer 在
+       大面积草地/植被上给的 sky 只有 0~0.14，永远过不了 18% 那道门；
+       而 indoor 会把深度→米换成 0.6~18m 的短基线，**整个世界被压成一个 18m 的碗**
+       （01_grass_snowmtn 六个机位全是平面就是这么来的）。
+       改成**看语义构成**（这才是"室内"的定义）：
+         · 墙面占比高 → 室内；
+         · 天花板明显且几乎没有天空 → 室内（俯拍桌面/床这类）；
+         · 只有"地平线异常 + 没有天空 + 地面/植被/地形也不占多数"时才用旧启发式兜底。
+       实测：四张户外 wall=0 / ceiling=0 全部翻回户外；钢琴房 wall=0.545 仍是室内。 */
+    const _st = (opt.sem && opt.sem.stats) ? opt.sem.stats : null;
+    let indoor;
+    if (_st) {
+      const skyS = _st.sky || 0;
+      const openS = (_st.ground || 0) + (_st.vegetation || 0) + (_st.terrain || 0)
+        + (_st.water || 0) + (_st.building || 0);
+      indoor = ((_st.wall || 0) > 0.35)
+        || ((_st.ceiling || 0) > 0.20 && skyS < 0.05)
+        || (((analysis.horizon < 0.42 || analysis.horizon > 0.72)
+             && skyS < 0.05 && openS < 0.45));
+    } else {
+      indoor = (analysis.horizon < 0.42 || analysis.horizon > 0.72);
+    }
 
     const dw = depth.width || depth.size;
     const dh = depth.height || depth.size;
