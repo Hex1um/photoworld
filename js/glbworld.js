@@ -48,7 +48,23 @@
     } else if (acc.componentType === 5125) {
       arr = new Uint32Array(bytes.buffer, 0, count);
     } else if (acc.componentType === 5123) {
-      arr = new Uint16Array(bytes.buffer, 0, count);
+      if (acc.normalized) {
+        // compact GLB：TEXCOORD_0 用 UINT16 规范化整数
+        arr = new Float32Array(count);
+        const src = new Uint16Array(bytes.buffer, 0, count);
+        for (let i = 0; i < count; i++) arr[i] = src[i] / 65535;
+      } else {
+        arr = new Uint16Array(bytes.buffer, 0, count);   // 索引
+      }
+    } else if (acc.componentType === 5122 || acc.componentType === 5121) {
+      // compact GLB：NORMAL=INT16、COLOR_0=UINT8，均为规范化整数
+      arr = new Float32Array(count);
+      if (acc.componentType === 5122) {
+        const src = new Int16Array(bytes.buffer, 0, count);
+        for (let i = 0; i < count; i++) arr[i] = src[i] / 32767;
+      } else {
+        for (let i = 0; i < count; i++) arr[i] = bytes[i] / 255;
+      }
     } else {
       throw new Error('不支持的 accessor 类型 ' + acc.componentType);
     }

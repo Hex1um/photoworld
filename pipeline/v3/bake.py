@@ -108,7 +108,9 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
         t = time.time()
         views = terrain.render_views(pn["pano"], n=int(cfg.get("views", 8)), size=int(cfg.get("view_size", 448)))
         cloud = terrain.point_cloud(views, device=cfg.get("device", "cuda"),
-                                   long_side=int(cfg.get("view_size", 448)))
+                                   long_side=int(cfg.get("view_size", 448)),
+                                   reconcile=bool(cfg.get("view_reconcile", True)))
+        view_bias = cloud.get("view_bias", {})
         field = terrain.polar_heightfield(cloud, pn["pano"], cam.eye, near_edge=edge)
         fov_half = cam.hfov * 0.5
         far = terrain.heightfield_mesh(field, cam.eye, edge, (0.5, 0.5), fov_half=fov_half)
@@ -134,6 +136,7 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
 
     # ---- 统一着色 ----
     light = shade.sun_from_pano(pn["pano"])
+    view_bias = {}
     # 天空壳只做很轻的明暗（天空本身不该有地形那种坡面明暗）
     # 天空壳完全不烘焙光照：它是"远处本身"，再打光只会让天空出现球面明暗
     # （实测：侧视里天空穹顶变成一个圆盘，边界肉眼可见）。
@@ -168,7 +171,9 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
         "pointPx": 2.2,
     }
     glb_path = os.path.join(out_dir, "world.glb")
-    info = common.write_world_glb(glb_path, layers, tex_jpeg, extras, name=os.path.basename(out_dir))
+    info = common.write_world_glb(glb_path, layers, tex_jpeg, extras,
+                                  name=os.path.basename(out_dir),
+                                  compact=bool(cfg.get("compact", True)))
 
     # ---- 验证：真的从原点光栅化一遍 ----
     tex_full = _texture_array(rgb)
@@ -213,7 +218,9 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
         "calib": cal["cal"],
         "frustum": fr["stats"],
         "pano": {"prompt": pn["prompt"], "known_frac": pn["known_frac"],
-                 "diffusion": not cfg.get("no_diffusion", False)},
+                 "diffusion": not cfg.get("no_diffusion", False),
+                 "horizon_shift_med": pn.get("horizon_shift_med", 0.0)},
+        "terrain": {"view_bias": view_bias},
         "layers": [{"name": l["name"], "verts": int(l["pos"].shape[0]),
                     "tris": int(l["index"].size // 3)} for l in layers],
         "glb": info, "verify": rep, "light": light,
@@ -259,6 +266,12 @@ def main() -> int:
                     help="复用一张已有全景（只重算几何，跳过扩散；A/B 用）")
     ap.add_argument("--cliff", type=float, default=1.8, help="断崖判据（越小切得越狠）")
     ap.add_argument("--prop-density", type=float, default=1.0)
+    ap.add_argument("--no-compact", action="store_true",
+                    help="GLB 退回全 float32（默认用规范化整数，体积更小）")
+    ap.add_argument("--no-horizon-align", action="store_true",
+                    help="关闭全景地平线对齐（P1-2，默认开）")
+    ap.add_argument("--no-view-reconcile", action="store_true",
+                    help="关闭 8 视角高度偏差校正（P1-3，默认开）")
     args = ap.parse_args()
 
     files = []
@@ -276,7 +289,10 @@ def main() -> int:
            "pano_from": args.pano_from,
            "pano_w": args.pano_w, "pano_h": args.pano_w // 2,
            "pano_steps": args.pano_steps, "views": args.views,
-           "device": args.device, "seed": args.seed}
+           "device": args.device, "seed": args.seed,
+           "compact": not args.no_compact,
+           "horizon_align": not args.no_horizon_align,
+           "view_reconcile": not args.no_view_reconcile}
     reports = []
     for f in files:
         name = os.path.splitext(os.path.basename(f))[0]

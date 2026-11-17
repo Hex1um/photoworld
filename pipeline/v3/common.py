@@ -194,13 +194,16 @@ def white_uv(uv_v_scale: float) -> tuple[float, float]:
 # --------------------------------------------------------------------------- GLB
 
 def write_world_glb(path: str, layers: list, tex_jpeg: bytes, extras: dict,
-                    name: str = "world") -> dict:
+                    name: str = "world", compact: bool = True) -> dict:
     """把图层列表写成 GLB。复用 pipeline/glb.py 的写出器（已验证过对齐/双面等坑）。
 
     每个 layer: {"name","pos","nrm","uv","color"(可选),"index"}
+    compact=True（默认）把 NORMAL/UV/COLOR 写成规范化整数、索引尽量用 uint16，
+    只省字节不改几何；--no-compact 可退回全 float32 以便对比。
     """
     import glb as glbmod
-    return glbmod.write_glb(path, layers, tex_jpeg, name=name, extras=extras)
+    return glbmod.write_glb(path, layers, tex_jpeg, name=name, extras=extras,
+                            compact=compact)
 
 
 # --------------------------------------------------------------------------- 小工具

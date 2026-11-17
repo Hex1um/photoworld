@@ -80,8 +80,38 @@ def render_views(pano: np.ndarray, n: int = 8, fov_deg: float = 90.0,
     return views
 
 
+def reconcile_view_bias(pos: np.ndarray, yaw: np.ndarray, eye_h: float,
+                        strength: float = 1.0) -> tuple[np.ndarray, dict]:
+    """P1-3：8 个视角各自标定带来的低频高度偏差，按重叠的远场环对齐。
+
+    只改 y，不动 x/z，因此原点投影与方位都不变。每个视角取 30~90m、近水平
+    的地面点中位高度，减去全体中位；这样沙漠那种"整体沉成碗/浮起来"的低频
+    偏差在合并点云前就被消掉，而不是等高度场成型后再全局抬降。
+    """
+    out = pos.copy()
+    r = np.hypot(pos[:, 0], pos[:, 2])
+    elev = np.arctan2(pos[:, 1] - eye_h, np.maximum(r, 1e-3))
+    ground = (r > 30) & (r < 90) & (pos[:, 1] > -6.0) & (pos[:, 1] < 14.0) \
+        & (elev < 0.10) & (elev > -0.45)
+    med = {}
+    for y in np.unique(yaw):
+        sel = (yaw == y) & ground
+        med[float(y)] = float(np.median(pos[sel, 1])) if int(sel.sum()) >= 32 else None
+    valid = [v for v in med.values() if v is not None]
+    if len(valid) < 2:
+        return out, {k: 0.0 for k in med}
+    g = float(np.median(valid))
+    applied = {}
+    for y, v in med.items():
+        bias = (v - g) * float(strength) if v is not None else 0.0
+        applied[round(math.degrees(y), 1)] = round(bias, 3)
+        if bias:
+            out[yaw == y, 1] -= bias
+    return out, applied
+
+
 def point_cloud(views: list[dict], device: str = "cuda",
-                long_side: int = 448) -> dict:
+                long_side: int = 448, reconcile: bool = True) -> dict:
     """每个视角跑深度 + 标定 + 反投影，合并成一个世界点云。"""
     pts, cols, srcs = [], [], []
     metas = []
@@ -99,8 +129,14 @@ def point_cloud(views: list[dict], device: str = "cuda",
         metas.append({"yaw": round(math.degrees(v["yaw"]), 1),
                       "pitch_deg": round(math.degrees(res["cam"].pitch), 2),
                       "cal": res["cal"].get("mode_used")})
-    return {"pos": np.concatenate(pts), "color": np.concatenate(cols),
-            "yaw": np.concatenate(srcs), "views": metas}
+    P = np.concatenate(pts)
+    yaw = np.concatenate(srcs)
+    biases = {}
+    if reconcile and len(views) >= 2:
+        eye_h = float(np.median([v["cam"].eye_pos[1] for v in views]))
+        P, biases = reconcile_view_bias(P, yaw, eye_h)
+    return {"pos": P, "color": np.concatenate(cols),
+            "yaw": yaw, "views": metas, "view_bias": biases}
 
 
 def polar_heightfield(cloud: dict, pano: np.ndarray, eye: float,
