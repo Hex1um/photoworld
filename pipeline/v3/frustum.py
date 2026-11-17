@@ -353,6 +353,10 @@ def build(z: np.ndarray, rgb: np.ndarray, cam: common.Camera3, cfg: dict,
     # 背景层压在前景上（实测 near+fill 从 48.5dB 掉到 30.6dB）。
     z_bg = np.maximum(z_bg, z_snap * 1.02).astype(np.float32)
     src = nearest_source(valid_bg)
+    # 视锥内的规则 UV 网格：断崖角安全取色（uv_core）与背景外推（uv_src）都要用，
+    # 必须在引用之前定义（曾因 P0-2 断崖角修复插队而触发 UnboundLocalError）。
+    uu, vv = np.meshgrid((np.arange(w) + 0.5) / w, (np.arange(h) + 0.5) / h)
+    uv_photo = np.stack([uu, vv], axis=-1).astype(np.float32)
     # P0-2：前景内部（腐蚀 1px）作为断崖角的安全取色源。
     # 只有"完全落在前景内部"的像素才允许把自己的 UV 用在断崖角上；
     # 边缘 1px（可能混入天空色）改用最近内部像素的 UV。
@@ -365,8 +369,6 @@ def build(z: np.ndarray, rgb: np.ndarray, cam: common.Camera3, cfg: dict,
     def sub(a: np.ndarray) -> np.ndarray:
         return a[::step, ::step]
 
-    uu, vv = np.meshgrid((np.arange(w) + 0.5) / w, (np.arange(h) + 0.5) / h)
-    uv_photo = np.stack([uu, vv], axis=-1).astype(np.float32)
     uv_src = uv_photo.reshape(-1, 2)[src].reshape(h, w, 2)
 
     pos = eye[None, None, :] + dirs * z_snap[..., None]

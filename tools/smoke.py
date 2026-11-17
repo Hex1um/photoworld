@@ -30,6 +30,10 @@ def main() -> int:
     shots = a.get("shots", "")
     only = a.get("only", "")
     cases = [c for c in CASES if not only or only in c["name"]]
+    if not cases:
+        print("--only %r 未匹配任何用例（可用：%s）"
+              % (only, ", ".join(c["name"] for c in CASES)), file=sys.stderr)
+        return 2
 
     rows = []
     b = None

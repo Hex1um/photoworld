@@ -113,14 +113,24 @@ def _ready(c):
 
 
 def open_page(c, url: str, wait_ms: int, extra_check=None):
+    """导航并等待 ready='1'。超时未就绪时抛错——绝不返回给截图流程。
+
+    v3.0.5 修：旧实现轮询超时后静默继续，服务未启动时会把 Chrome 错误页
+    当画面截两次，得出 PSNR 99dB 的假满分报告（真值/重建都是同一张错误页）。
+    """
     c.send("Page.navigate", {"url": url})
+    ready = False
     for _ in range(int(math.ceil(wait_ms / 250.0))):
         time.sleep(0.25)
         try:
             if _ready(c):
+                ready = True
                 break
         except Exception:
             pass
+    if not ready:
+        raise RuntimeError("页面未就绪（等待 %ss 后 dataset.ready 仍未置 1）：%s —— 确认静态服务已启动"
+                           % (wait_ms / 1000.0, url))
     if extra_check:
         try:
             c.ev(extra_check)
