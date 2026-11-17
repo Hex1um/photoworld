@@ -3,6 +3,38 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [3.0.4] - 2026-11-17  · 工具链进一步 Python 化（A/B 截图 / 真值基准 / 轨迹渲染 / GitHub 采集）
+
+延续 v2.15.4/5 的「尽量用 Python」路线，把最后四个依赖重复 CDP 启动样板或纯数据处理的
+工具脚本改写为 Python 权威实现。症状：想用 Python 跑质检链路仍要装 Node，且
+`abshots` / `bench_glb` / `render_traj` 各自复制了一份「spawn Edge → 轮询
+CDP → WebSocket → taskkill」样板，改一处公共行为要动三个文件。
+
+- **`tools/abshots.py`**（A/B 多机位截图台）：改用共用 `tools/cdp.py`，去掉自带
+  的浏览器启动/CDP 握手代码。`--hw` / `--mode glb` / `--views` 等参数与输出
+  （逐图 mode/耗时/错误 + `_summary.json`）保持不变。
+- **`tools/bench_glb.py`**（GLB 真值基准）：JPEG 解码从 `jpeg-js` 换成 Pillow，
+  PSNR 与六项像素指标（voidFrac/innerVoid/lowVoid/darkFrac/stripe/detail）
+  公式逐字对齐 JS 原版；输入视角/新视角 PSNR 报告结构不变。
+- **`scripts/render_traj.py`**（合成轨迹渲染）：位姿生成（同一 LCG 种子公式）与
+  trsArray 变换矩阵移植到 Python，`traj_XXXX/frames/*.jpg + poses.json` 产物结构不变。
+- **`tools/harvest_github.py`**（GitHub 图集采集）：`curl` + Pillow 替代 Node
+  `https` + `jpeg-js`，天空启发式（顶部 12% 亮度方差 + 上下亮度差）逐字对齐，
+  manifest 结构与去重/并发计数不变。
+
+四个旧 `.mjs` 改为薄包装转调 Python（依次试 python/python3），旧的
+`node tools/xxx.mjs` 调用方零改动，退出码/输出透传。缓存串 20 处 v3.0.3→v3.0.4，
+`version.json` / `js/app.js` VERSION / `__PW_BUILD__` 同步。
+新增 `tools/test_pythonization_parity.py`（13 项）锁纯计算函数；并用原始 `.mjs`
+算法体做了逐位数值比对：`makePoses`(12 帧)、`trsArray`、`viewMetrics`(6 项)、
+`psnr` 与 JS 输出完全一致。原有 12 套 Python 回归全绿（`test_v3` 需 17MB GLB 资产，
+单独验证）。
+
+**保留为 JS 的边界**：`multiview.mjs`（同步 import 浏览器侧 `clarity.mjs` 镜像）、
+`eval.mjs` / `train_live_params.mjs` / `test_fixes.mjs` / `test_inference_cache.mjs`
+（用 `node:vm` 执行浏览器源码）、`diag_*.js`（注入表达式）—— 这些需要 JS 引擎，
+转 Python 等于重写被测对象，不属本次范围。
+
 ## [3.0.2] - 2026-11-17  · P0/P1：v3 接入主路径 + 断崖边缘抠除 + GLB/地平线/多视角一致性
 
 按"单步可验证、可回滚"逐项落地上一轮分析里的 P0/P1。没有改默认视场/标定，也没有用

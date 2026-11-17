@@ -66,7 +66,7 @@ python -m http.server 8099 --bind 127.0.0.1
 
 ```bash
 python pipeline/v2/bake.py "corpus_test/*.jpg" --out out/v2/all
-node tools/abshots.mjs --base http://127.0.0.1:8099 \
+python tools/abshots.py --base http://127.0.0.1:8099 \
   --list glb_list.txt --out shots/ab --mode glb --hw --views front,side,back
 ```
 
@@ -296,9 +296,15 @@ node tools/multiview.mjs --base http://127.0.0.1:8099 \
   用 `python tools/probe.py` 可直接断言
 
 **无头浏览器工具已 Python 化**：`cdp_eval` / `probe` / `shot` / `smoke` /
-`orbit_shot` / `probe_depth` / `probe_layer` / `probe_walk` 共用零依赖的
-`tools/cdp.py`（标准库手写 WebSocket，无需 pip 装包）。旧 `node tools/xxx.mjs`
-入口保留为薄包装，参数与输出不变；新脚本直接跑 `python tools/xxx.py`。
+`orbit_shot` / `probe_depth` / `probe_layer` / `probe_walk` / `abshots` /
+`bench_glb` / `render_traj` 共用零依赖的 `tools/cdp.py`（标准库手写 WebSocket，
+无需 pip 装包）；采集类的 `harvest_github` 也改为 Python（Pillow 解码）。
+旧 `node tools/xxx.mjs` / `node scripts/render_traj.mjs` 入口保留为薄包装，
+参数与输出不变；新脚本直接跑 `python tools/xxx.py` / `python scripts/render_traj.py`。
+`abshots` / `bench_glb` 的 JPEG 解码需 `pip install pillow`；其余工具零依赖。
+保留为 JS 的例外：`multiview.mjs`（同步 import 浏览器侧 `clarity.mjs` 镜像）、
+`eval.mjs` / `train_live_params.mjs` / `test_fixes.mjs` / `test_inference_cache.mjs`
+（用 `node:vm` 跑浏览器源码）与注入表达式 `diag_*.js` —— 这些需要 JS 引擎。
 - 空底色用「画面主色」判定（16 级直方图最大桶），不依赖雾色 —— 夜景里雾色接近黑，
   用雾色比色会把整屏误判成雾
 
