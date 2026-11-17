@@ -471,7 +471,7 @@
          塞进那个 else-if 里会整块被跳过（实测表现：只画出天空，点全都不见）。
          网格在"细枝/树叶"这类几像素跨 30 倍深度的内容上必然被剪碎；
          点云没有"连接"，既不拉丝也不会被剪碎。 */
-      if (world.points2Mesh && !skip('shell')) {
+      if (world.points2Mesh && !skip('shell') && !world.showPlan) {
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(true);
@@ -501,7 +501,12 @@
            读起来比雾还假；剔除后露出低频世界幕 + 雾，观感连续。
            混合与剔除可以并存（alpha 只用于天空渐隐），不影响正面边缘。
            ?cull=0 可回到 v1.16 的双面行为做 A/B。 */
-        if (world.splatMode && world.meshes.splat) {
+        if (world.showPlan) {
+          /* 飞行/俯视时**不画 splat / 点云**：点云没有"壳"，从上方看就是从中心
+             炸开的放射状尖刺（winter 实测截图），而空中该看的是地面层 top。
+             旧代码只对粒子点云 pointsMesh 做了 showPlan 门控，
+             真正的重建点云 splatGround/splatBody/splat 一直照画 —— 修错了对象。 */
+        } else if (world.splatMode && world.meshes.splat) {
           /* LDI 补洞层（?ldi=2）：先用 MI-GAN 补出的背景点垫在后面，
              再画原照片点云 —— 侧移时前景移开，背后不是洞。 */
           if (world.meshes.splatHole && world.tex.bg) {

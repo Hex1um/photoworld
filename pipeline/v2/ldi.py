@@ -1166,10 +1166,16 @@ def build(z: np.ndarray, cam, step: int = 1, eye: float = 1.7,
         try:
             _gm = valid
             if sem_ground is not None:
-                _g2 = sem_ground
-                if _g2.shape != seg.shape:
-                    _iy2 = (np.arange(seg.shape[0]) * _g2.shape[0] // seg.shape[0]).astype(np.int32)
-                    _ix2 = (np.arange(seg.shape[1]) * _g2.shape[1] // seg.shape[1]).astype(np.int32)
+                _g2 = np.asarray(sem_ground)
+                # 掩码必须与 valid 同形（= zs.shape）。这里**曾经写的是 seg.shape**，
+                # 而 seg 要等地物分割（本函数后半段）才赋值 → 点云分支必然抛
+                # UnboundLocalError，被下面宽泛的 except 吞掉 → v2.15.0 的
+                # "点云路径也建地面层"在生产路径（api.py 总传 sem_ground）静默失效，
+                # 空中俯视时只剩从中心炸开的点云尖刺。
+                _tgt = zs.shape
+                if _g2.shape != _tgt:
+                    _iy2 = (np.arange(_tgt[0]) * _g2.shape[0] // _tgt[0]).astype(np.int32)
+                    _ix2 = (np.arange(_tgt[1]) * _g2.shape[1] // _tgt[1]).astype(np.int32)
                     _g2 = _g2[_iy2][:, _ix2]
                 if _g2.any() and int((_g2 & valid).sum()) > 500:
                     _gm = valid & _g2

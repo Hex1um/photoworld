@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.15.5';
+  const VERSION = '2.15.6';
 
   /* v2 服务的地址：显式 ?api= 优先，其次是自动发现（本机常见端口）。
      自动发现写在启动流程里，不需要使用者改 URL —— 这是"更快捷地启用 v2"的关键。 */
@@ -401,8 +401,18 @@
         /* 平坦地面顶点法线早退（v1.26，默认开，严格数学等价）：
            ?fastnorm=0 关掉逐元素 A/B。 */
         fastNorm: params.get('fastnorm') !== '0',
-        // 竖直夸张（只作用于地平线以上）：?ygain=2 做 A/B
-        yGain: params.has('ygain') ? Math.max(0.6, Math.min(4, parseFloat(params.get('ygain')) || 1.35)) : undefined,
+        // 竖直夸张（只作用于地平线以上）：?ygain= / ?yg= 做 A/B
+        // 注意：这里**不能再写一次 yGain 键** —— 对象字面量重复键会静默覆盖，
+        // 旧代码就是这么让 ?yg= 永久失效的（见上方 yGainRaw 的解析）。
+        /* 深度后处理（v2.15.6）：遮挡边界重切分 + 双层窄带（见 js/depthpost.js）。
+           **默认只在网格路径开启**（?splat=0）：它的机理是消除"混合深度连成的斜坡片"，
+           而斜坡片只有三角形连接才会形成；点云不连接，实测指标与观感都中性。
+           ?dpost=1 强制开（点云路径也能看第二层点），?dpost=0 强制关。 */
+        noDepthPost: params.get('dpost') === '0'
+          || (params.get('splat') !== '0' && params.get('dpost') !== '1'),
+        dpostThin: params.has('dpostthin') ? parseFloat(params.get('dpostthin')) : undefined,
+        dpostK: params.has('dpostk') ? parseFloat(params.get('dpostk')) : undefined,
+        dpostSpan: params.has('dpostspan') ? parseFloat(params.get('dpostspan')) : undefined,
         // 照片投影 UV 地面层（默认关，?groundphoto=1 打开；掠射角会拉丝）
         // v1.24.6：照片 UV 地面**默认关**。v1.24.5 的 desert A/B 里细节更好，
         // 但 32 视角语料质检暴露了代价：雪地/水面/建筑这类低纹理题材，
@@ -1141,13 +1151,21 @@
     if (planNow !== world.showPlan) {
       world.showPlan = planNow;
       if (planNow) {
-        world._stash = { ground: world.meshes.ground, extra: world.extraMeshes };
+        world._stash = {
+          ground: world.meshes.ground,
+          extra: world.extraMeshes,
+          // tex.ground 必须一并存下来：它是 GL 纹理句柄，置 null 后渲染器
+          // drawMesh(tex: world.tex.ground) 拿到 null → 降级成纯顶点色，
+          // 落地后整片地面变黑白板（旧代码只存 mesh 不存 tex，永久丢失）。
+          texGround: world.tex ? world.tex.ground : null,
+        };
         world.meshes.ground = null;
         world.extraMeshes = [];
         if (world.tex) world.tex.ground = null;
       } else if (world._stash) {
         world.meshes.ground = world._stash.ground;
         world.extraMeshes = world._stash.extra || [];
+        if (world.tex && world._stash.texGround) world.tex.ground = world._stash.texGround;
         world._stash = null;
       }
     }

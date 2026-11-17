@@ -655,16 +655,34 @@
       a.sort((x, y) => x - y);
       return a[Math.min(a.length - 1, Math.floor(a.length * f))];
     };
-    const rNear = Math.max(0.08, q(nearVals, 0.5));
-    const rFar = Math.min(rNear * 0.85, Math.max(0.005, q(farVals, 0.20)));
+    const rNearRaw = q(nearVals, 0.5);
+    const rFarRaw = q(farVals, 0.20);
+    if (!nearVals.length || !farVals.length) return null;
+    const rNear = Math.max(0.08, rNearRaw);
+    /* 退化判据必须在**钳位之前**判断（v2.15.6 修）：
+       旧代码先 `rFar = min(rNear*0.85, rFarRaw)`，再用 `rNear <= rFar*1.02`
+       判退化 —— clamp 已经保证 rFar ≤ 0.85·rNear，所以这条 null 判据**恒不成立**，
+       坏标定（远锚与近锚几乎同深度）会被静默夹到 p=3.2，深度→米整条曲线失真，
+       而且没有任何告警。现在直接用原始 20 分位判定。 */
+    if (!(rFarRaw > 0.005) || rFarRaw >= rNear * 0.85) {
+      console.warn('[world] 双锚点标定退化：rNear=' + rNear.toFixed(4)
+        + ' rFar(20%)=' + rFarRaw.toFixed(4) + '，回退到经验曲线');
+      return null;
+    }
+    const rFar = rFarRaw;
     const zNear = zN ? Math.max(2.0, zSum / zN) : eye / 0.30;
-    if (!nearVals.length || !farVals.length || rNear <= rFar * 1.02) return null;
-    let p = clamp(Math.log(HORIZON_FAR / zNear) / Math.log(rNear / rFar), 0.6, 3.2);
+    const pRaw = Math.log(HORIZON_FAR / zNear) / Math.log(rNear / rFar);
+    const p = clamp(pRaw, 0.6, 3.2);
+    /* p 被夹说明标定只是"勉强可用"：以前这里一声不响，
+       现在至少留一条日志，A/B 时能看出是哪张图在吃钳位。 */
+    if (Math.abs(p - pRaw) > 1e-6) {
+      console.warn('[world] 标定指数被钳位：p=' + pRaw.toFixed(2) + ' → ' + p.toFixed(2));
+    }
     const A = zNear * Math.pow(rNear, p);
     const r0 = Math.pow(A / HORIZON_FAR, 1 / p);
     const Aeff = A * Math.pow(1 + r0 / rNear, p);
     const metric = (d) => clamp(Aeff * Math.pow(Math.max(0, d) + r0, -p), 0.6, HORIZON_FAR * 1.2);
-    return { p, r0, Aeff, zNear, rNear, rFar, metric };
+    return { p, r0, Aeff, zNear, rNear, rFar, metric, clamped: Math.abs(p - pRaw) > 1e-6 };
   }
 
   function buildRelief(analysis, depth, opt) {
@@ -1244,11 +1262,18 @@
        单目深度在台阶、雪地、水面上常出现局部反号，反投影后就是
        「向下的楼梯被识别成略微向上」。用行中位的单调包络修正整体趋势，
        局部台阶细节保留 45%，方向一定正确。 */
+    /* 行基线（v2.15.6：真中值，不再是均值）。
+       旧注释写「行中位」，实现是 s/GW ——近景大片（雪坡/水面/前景物体）
+       会把整行均值拽过去，单调包络随之偏，近景限幅与地面判定一起失准。
+       320×200 网格上每行排序 320 个数，总计约 2ms。 */
     const rowD = new Float32Array(GH);
-    for (let j = 0; j < GH; j++) {
-      let s = 0;
-      for (let i = 0; i < GW; i++) s += gS[j * GW + i];
-      rowD[j] = s / GW;
+    {
+      const buf = new Float32Array(GW);
+      for (let j = 0; j < GH; j++) {
+        for (let i = 0; i < GW; i++) buf[i] = gS[j * GW + i];
+        buf.sort();
+        rowD[j] = buf[(GW - 1) >> 1];
+      }
     }
     for (let j = 1; j < GH; j++) rowD[j] = Math.max(rowD[j], rowD[j - 1]);
     for (let j = 0; j < GH; j++) {
@@ -1329,6 +1354,7 @@
        被判成地面 → y=0 → 压成远处一条扁带。
        做法：底部 20% 一定踩在地面上，求使 `metric(深度) ≈ 眼高/(-dirY)` 残差最小的
        pitch（一维搜索 65 档）。残差过大就不用这个解，退回原估计 —— 宁可保守。 */
+    let planeConf = 0;
     (function fitPitchFromGround() {
       const rowMed = new Float32Array(GH);
       const buf = [];
@@ -1357,9 +1383,91 @@
       }
       if (bestN >= 6 && bestErr < 0.45) pitch = best;
       cosP = Math.cos(pitch); sinP = Math.sin(pitch);
+      /* 地面平面置信度（v2.15.6）：bestErr 是「底部 20% 行的中位深度 ≈ 平地交点
+         距离」的对数残差均方。残差小 = 脚下确实有一块连续平地，可以放心把地平线
+         以下的像素压到 y=0；残差大 = 底部根本不是地面（岩壁填满画幅 / 云海 /
+         俯拍），这时再把像素压平就会把整片远景拍成一块平板 + 放射拉丝
+         （canyon A02 实测：整张画面塌成一块土色板）。
+         0.45 本来就是"接受该 pitch 解"的门限，这里把它连续化成 0~1 置信度。 */
+      planeConf = (bestN >= 6) ? Math.max(0, Math.min(1, 1 - bestErr / 0.45)) : 0;
+      if (global.PW) global.PW.__planeConf = { err: +bestErr.toFixed(4), n: bestN, conf: +planeConf.toFixed(3), pitch: +pitch.toFixed(3) };
     })();
 
     /* 1) 反投影：世界坐标点（相机朝 -Z，yaw=0，眼高 1.7m） */
+
+    /* 0-bis) 深度后处理（v2.15.6，报告 P0-3 / 长文方案一）
+       「遮挡边界竖直条纹」的真因在深度图：轮廓两侧 3~8 px 的深度是前景与背景的
+       混合值，反投影后在两者之间连成一层斜坡片，岩壁竖面 + 近水平相机下正好
+       投影成竖直条纹。这里在反投影**之前**把不连续带内的像素重新归属到近/远两侧，
+       并把深度压扁进 3% 厚的薄层；同时为前景轮廓内侧烘出"第二层（远侧）点"，
+       供横移时补背景（窄带版 LDI）。
+       全部在 CPU 上一次性完成（320×200 ≈ 64k 像素），漫游期零开销；
+       ?dpost=0 可整条关掉做 A/B。 */
+    let post = null;
+    const gZm = new Float32Array(GW * GH);
+    if (!opt.noDepthPost && global.PW && global.PW.depthPost) {
+      try {
+        const lumG = guideLum(analysis, GW, GH);
+        /* 引导灰度如果是"平的"（画布被污染、纯色兜底图、或 guideLum 失败返回全零），
+           灰度梯度判据会否掉所有像素，特性静默失效 —— 这时降级成"只看深度跨度"。
+           正常照片在这里的方差远大于阈值。 */
+        let lumVar = 0, lumN = 0;
+        for (let q = 0; q < lumG.length; q += 97) { lumVar += lumG[q]; lumN++; }
+        const lumMean = lumN ? lumVar / lumN : 0;
+        let lumVar2 = 0;
+        for (let q = 0; q < lumG.length; q += 97) lumVar2 += (lumG[q] - lumMean) ** 2;
+        const lumFlat = !(lumN > 8 && lumVar2 / lumN > 1e-4);
+        const alphaG = new Uint8Array(GW * GH);
+        /* 只对「确定为几何」的像素做重切分：天空/边缘渐隐区的深度是无穷远，
+           参与重切分会把天幕拉进薄层。用同一套天空判据（深度 > 天空基线 + 0.03）。 */
+        for (let j = 0; j < GH; j++) {
+          for (let i2 = 0; i2 < GW; i2++) {
+            const k2 = j * GW + i2;
+            const v2 = j / (GH - 1);
+            const d2 = gS[k2];
+            const keep = indoor || !hasSky ? true : (d2 > skyD + 0.03);
+            alphaG[k2] = keep ? 1 : 0;
+            gZm[k2] = metric(d2);
+          }
+        }
+        post = global.PW.depthPost.process({
+          depth: gZm,
+          lum: lumFlat ? null : lumG,
+          alpha: alphaG,
+          W: GW, H: GH,
+          opt: {
+            bandSpan: opt.dpostSpan === undefined ? 0.12 : opt.dpostSpan,
+            bandGrad: opt.dpostGrad === undefined ? 8 : opt.dpostGrad,
+            thin: opt.dpostThin === undefined ? 0.03 : opt.dpostThin,
+            k: opt.dpostK === undefined ? 8 : opt.dpostK,
+            probe: 5,
+          },
+        });
+        for (let k2 = 0; k2 < GW * GH; k2++) gZm[k2] = post.depth[k2];
+      } catch (e) {
+        console.warn('[world] 深度后处理（边缘重切分）失败，退回原始深度：', e && e.message);
+        post = null;
+      }
+    }
+    if (!post) {
+      for (let j = 0; j < GH; j++) {
+        for (let i2 = 0; i2 < GW; i2++) gZm[j * GW + i2] = metric(gS[j * GW + i2]);
+      }
+    }
+    /* 后处理后的米制深度（供反投影用）。地面分支仍走"平地 + 眼高"解析解，
+       不受影响；地形/物体分支用这份重切分过的深度。 */
+    const zPostAt = (k) => gZm[k];
+    if (post) {
+      const st = post.stats;
+      /* 无条件挂到 PW 上（调试/质检要能读到）：?dbgpost=1 打到控制台。 */
+      global.PW.__postStats = st;
+      if (opt.dbgPost) {
+        console.info('[world] 深度后处理：带内 ' + st.band + ' px（近侧 ' + st.near
+          + ' / 远侧 ' + st.far + ' / 判不动 ' + st.ambiguous + '），第二层点 '
+          + st.layer2);
+      }
+    }
+
     const pos = new Float32Array(GW * GH * 3);
     const uv = new Float32Array(GW * GH * 2);
     const col = new Float32Array(GW * GH * 4);
@@ -1430,7 +1538,7 @@
           t = clamp(metric(d0), 0.6, 220);
           y = Math.max(eye + dirY * t, eye + 0.45);
         } else if (v > groundLine + 0.005 && !isFg && dirY < -0.012
-          && metric(d0) > (eye / Math.max(0.06, -dirY)) * 0.72) {
+          && zPostAt(k) > (eye / Math.max(0.06, -dirY)) * 0.72) {
           /* v1.24.6 地面判定加**深度一致性**：只靠「射线朝下」会把近景建筑、
              水面、雪坡也判成地面（它们的射线同样朝下），压到 y=0 后贴图沿射线
              拉满全屏 —— 32 视角质检里 lowVoid 0.3~0.76 的那几张就是这个。
@@ -1455,7 +1563,9 @@
              等于在半径 220m 处生成一层"壳"；再叠上近处的壳，从外面看就是一层层
              漂浮的横向薄片（32 视角质检里 stripe>3 的那类）。
              tanh 把 220 附近压缩成 172、1000m 压成 219 —— 远山仍然在，但不再重叠成壳。 */
-          const tRaw = metric(d0);
+          /* 深度用**重切分后**的值（zPostAt）：遮挡边界带内的像素已被归属到
+             近侧或远侧，不再以混合深度连成斜坡片 —— 这就是"竖直条纹"的源头。 */
+          const tRaw = zPostAt(k);
           t = Math.max(0.6, 220 * Math.tanh(tRaw / 220));
           y = eye + dirY * t * ((hasSky && dirY > 0) ? yGain : 1);
           // 室内不做近景限幅：室内深度范围只有 18m，按行中位判定会把
@@ -1725,8 +1835,6 @@
       return { pos, normal: nrm, uv, color: col, edge, index: idx };
     }
     const baseLin = [0.18, 0.18, 0.18];
-    let skirt = null;
-    try { skirt = buildSkirt(); } catch (e) { skirt = null; }
 
     /* 照片底行颜色剖面（v1.19）：竖屏时相机竖直视场比照片大，照片底边以下那条
        地面只能由近景补片兜底。补片原来用 groundColorAt（整图下半带平均），
@@ -1765,6 +1873,20 @@
         }
       }
     }
+    /* 裙边必须在**照片底行剖面（edgeCol）算完之后**构建：buildSkirt 内部调用
+       bottomRowColor → 读 edgeCol。旧代码把调用放在 edgeCol 声明之前，
+       命中 TDZ（Cannot access 'edgeCol' before initialization），
+       又被裸 catch 吞掉 → 整条"照片底边以下的地面裙边"特性 100% 失效。
+       现在顺序正确，且失败时大声告警，不再静默降级。 */
+    let skirt = null;
+    try {
+      skirt = buildSkirt();
+    } catch (e) {
+      console.warn('[world] 地面裙边构建失败（不是致命错误，但会露出照片底边断口）：',
+        e && e.message);
+      skirt = null;
+    }
+
     /* 按世界 x 取照片底行颜色（-A..A 映射到整幅宽度） */
     function bottomRowColor(x) {
       const t = clamp((x + A) / (2 * A), 0, 1) * (EDGE_N - 1);
@@ -2264,12 +2386,25 @@
              （这就是最早那版"满屏放射条纹"的来源），所以脚下 5m 内交给平铺贴图，
              5~45m 的中景交给照片（这一段的 texel:quad 比最接近 1，细节最真实），
              45m 之外也逐渐淡出回到平铺。 */
+          /* 权重 = 视锥内 × **各向异性拉伸**。照片投影 UV 在贴地掠射角下必然拉丝，
+             而且拉伸比随距离按 d/eye 增长：
+               · 横向：1 个 texel ≈ d·(2tanH)/W 米；
+               · 沿视线方向：由 v 反解的距离导数 ≈ d²/(eye·f)，比横向快一倍。
+             所以 d=10m 时已约 6 倍各向异性、20m 约 12 倍 —— 这一段的"细节"
+             实际上是沿射线糊开的色带，肉眼看就是**放射状拉丝**。
+             v1.26.5 把照片地面开回来是为了救"地面只剩程序化色板"，
+             但它的距离带（3.5~9m 起，45~95m 才淡出）在 10~40m 区间留下了
+             最长的一段拉丝（coast 的 A02/A03 实测：整片地面都是沿视线的糊条）。
+             现在按机理收窄：3~7m 进入、8~22m 淡出（22m 处各向异性已 13 倍），
+             更远交给平铺贴图 + 顶点色的低频色差 —— 那一层没有方向性，不会拉丝。
+             注：`stripe` 指标对这类**沿射线**的糊条不敏感（它量的是列/行能量比），
+             所以这项改动的验收必须看图，不能只看指标。 */
           const dist = Math.hypot(x, z);
           const w = smoothstep(0.0, 0.06, Math.min(edgeU, edgeV))
             * (1 - smoothstep(0.985, 1.0, uvp[1]))
-            * smoothstep(3.5, 9, dist)
-            * (1 - smoothstep(45, 95, dist))
-            * (opt.groundPhoto ? 1 : 0);   /* 默认关：投影 UV 在掠射角必拉丝 */
+            * smoothstep(3.0, 7, dist)
+            * (1 - smoothstep(8, 22, dist))
+            * (opt.groundPhoto ? 1 : 0);   /* 默认开；?groundphoto=0 完全关掉做 A/B */
 
           pcol[id * 4] = 1; pcol[id * 4 + 1] = 1; pcol[id * 4 + 2] = 1;
           pcol[id * 4 + 3] = clamp(w, 0, 1);
@@ -2344,6 +2479,12 @@
       bottomRowColor,
       /* 底部裙边网格（照片底行向下连续延伸）：消掉照片底边的几何断口 */
       skirt,
+      /* 双层窄带（v2.15.6）：前景轮廓内侧那一圈像素的"远侧深度"与射线方向。
+         buildSplat 用它在同 (u,v) 上多发一层更远的点 —— 原地不动时被近点
+         挡住，相机横移后正好补住露出的背景（窄带版 LDI，见 js/depthpost.js）。 */
+      layer2: post ? post.layer2 : null,
+      dirs: { x: gDirX, y: gDirY, z: gDirZ },
+      postStats: post ? post.stats : null,
       semGroups: sem ? sem.groups : null,
       /* 逐顶点语义组（v1.26.7 层化用：地面层与主体层分开绘制，贴图 mip 不同） */
       grp: gGrp,
@@ -2506,6 +2647,18 @@
     const st = step || 2;
     const pos = [], uv = [], col = [];
     const GND = 4, WATER = 5, TERRAIN = 11, SKY = 1;
+    /* 第二层（v2.15.6）：layer2 给的是"带内近侧像素的远侧深度"。
+       稀疏标记表缓存在 relief 上（同一张图 ground/body 两层共用），
+       避免每个点都去 layer2.idx 里线性查找。 */
+    let l2mark = null;
+    if (relief.layer2 && relief.layer2.count && relief.dirs) {
+      if (!relief._l2mark) {
+        const m = new Uint8Array(GW * GH);
+        for (let q = 0; q < relief.layer2.count; q++) m[relief.layer2.idx[q]] = q + 1;
+        relief._l2mark = m;
+      }
+      l2mark = relief._l2mark;
+    }
     for (let j = 0; j < GH; j += st) {
       for (let i = 0; i < GW; i += st) {
         const k = j * GW + i;
@@ -2544,6 +2697,21 @@
         uv.push(relief.uv[k * 2], relief.uv[k * 2 + 1]);
         col.push(relief.color[k * 4], relief.color[k * 4 + 1], relief.color[k * 4 + 2],
           relief.color[k * 4 + 3] * aEdge);
+        /* 第二层点（v2.15.6）：同一 (u,v)、远侧深度。原地视角被近点遮住，
+           横移 0.3m 后正好补住前景移开露出的背景，而不是露出黑洞。
+           alpha 略低、只在主体层发（地面层本身就是最远的那层，不需要）。 */
+        if (l2mark && l2mark[k] && which !== 'ground') {
+          const q2 = l2mark[k] - 1;
+          const zf2 = relief.layer2.z[q2];
+          const dx2 = relief.dirs.x[k], dy2 = relief.dirs.y[k], dz2 = relief.dirs.z[k];
+          const pxx = dx2 * zf2, pyy = 1.7 + dy2 * zf2, pzz = dz2 * zf2;
+          if (pyy > -0.3 && Math.abs(pxx) < 400 && Math.abs(pzz) < 400) {
+            pos.push(pxx, pyy, pzz);
+            uv.push(relief.uv[k * 2], relief.uv[k * 2 + 1]);
+            col.push(relief.color[k * 4], relief.color[k * 4 + 1], relief.color[k * 4 + 2],
+              relief.color[k * 4 + 3] * 0.9);
+          }
+        }
         /* 掠射/边缘加密（v1.27.2，方案 ③ 的自适应点尺寸替代）：
            深度变化剧烈的点再复制一份、带细微抖动与半透明，
            等效于把那一片的 splat 放大，补住掠射角拉开的缝。 */

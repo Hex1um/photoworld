@@ -57,7 +57,11 @@
     'clock', 'flag'
   ];
 
-  /* 类别 → 分组。只登记对几何有意义的类别，其余保持 UNKNOWN（不特殊处理）。 */
+  /* 类别 → 分组。只登记对几何有意义的类别，其余保持 UNKNOWN（不特殊处理）。
+     v2.15.6 修正（报告 P1-7）：33 desk / 41 box / 44 chest of drawers /
+     50 refrigerator 原来划进 TERRAIN（"当可走地形"，室内桌柜被压平），
+     111 barrel 原来划进 WATER（压平+反光，酒桶直接消失）。
+     这五类都是**独立物体**，归 OBJECT 才走单体卡片 / 封闭体分支。 */
   const CLASS_GROUP = new Uint8Array(150);
   const mark = (group, ids) => { for (const i of ids) CLASS_GROUP[i] = group; };
   mark(GROUP.WALL, [0, 8, 27, 43, 58, 63, 74, 95, 100, 124, 130, 132, 144]);
@@ -66,11 +70,12 @@
   mark(GROUP.GROUND, [3, 6, 9, 11, 13, 29, 46, 52, 53, 54, 59, 94, 121]);
   mark(GROUP.CEILING, [5]);
   mark(GROUP.VEG, [4, 17, 66, 72]);
-  mark(GROUP.TERRAIN, [16, 68, 33, 34, 41, 42, 44, 50]);
-  mark(GROUP.WATER, [21, 26, 60, 104, 109, 111, 113, 128]);
+  mark(GROUP.TERRAIN, [16, 68, 34, 42]);
+  mark(GROUP.WATER, [21, 26, 60, 104, 109, 113, 128]);
   mark(GROUP.PERSON, [12]);
   mark(GROUP.VEHICLE, [20, 76, 80, 82, 90, 102, 103, 116, 127]);
   mark(GROUP.OBJECT, [7, 10, 14, 15, 18, 19, 22, 23, 24, 28, 30, 31, 32,
+    33, 41, 44, 50, 111,
     35, 36, 37, 38, 39, 40, 45, 47, 49, 51, 55, 56, 57, 61, 62, 64, 65,
     67, 69, 70, 71, 73, 75, 77, 78, 81, 83, 85, 87, 88, 89, 91, 92, 93,
     96, 97, 98, 99, 101, 105, 106, 107, 108, 110, 112, 114, 115, 117, 118,
