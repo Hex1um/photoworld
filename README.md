@@ -107,6 +107,35 @@ python tools/tune_per_image.py --corpus corpus_test --views 32   # 按图自适�
 想让别人也用上 GPU 加速、以及为什么"有独显但浏览器只给核显"，
 见 [`docs/WebGPU.md`](docs/WebGPU.md)（三条路线的步骤、实测耗时、失败对照表）。
 
+## v3 逐像素几何 + 扩散外推（推荐，v3.0.0）
+
+v2 的 LDI 仍是"薄片 + 裙边"。v3 换成用户给的目标形态：**视锥内每个像素都反投影成
+世界坐标点 → 断崖处补成连续体 → 扩散模型生成视锥外的地形与地物 → 统一着色**。
+判据只有一条硬的：从原点看必须等于原图。
+
+```bash
+python pipeline/v3/bake.py worlds/alpine.jpg --out out/v3/alpine      # ≈2 分钟/张（RTX 5070L）
+python pipeline/v3/bake.py photo.jpg --out out/x --no-diffusion        # 只做视锥内
+python tools/test_v3.py                                               # 20 条断言（验证 GLB 交付物）
+python -m http.server 8199 --bind 127.0.0.1                           # 然后
+#   http://127.0.0.1:8199/?glb=assets/world-v3-alpine.glb
+```
+
+`worlds/alpine.jpg` 实测：**原点视角 PSNR 48.2dB / SSIM 0.973 / 覆盖 99.0%**，
+顶点重投影误差 3e-05 px（v2 同图是 22.7dB，误差被轮廓上的黑洞主导）。
+
+设计与逐条踩坑记录见 [`docs/v3.md`](docs/v3.md)。核心是三条不变量：
+世界系与前端逐字一致（y 上、-Z 前）、**一切几何修正只沿相机射线做**（沿射线缩放不改投影）、
+视锥内颜色走照片 UV 而不是顶点色。
+
+| 层 | 内容 | 前端行为 |
+|---|---|---|
+| `near` | 视锥内照片贴图网格（断崖双四边形 + 裙边） | 有视差，双面绘制 |
+| `fill` | 前景背后的背景补丁（侧移时露出的那层） | 有视差 |
+| `backdrop` | 照片天空壳（900m）+ 360° 扩散天空穹顶（920m） | 无视差 |
+| `far` | 扩散全景反推的极坐标地形（3~600m） | 顶点色 |
+| `prop` | 视锥外的针叶树/石块 | 顶点色 |
+
 ## 原理
 
 核心是**单目深度重建**，不是把照片贴在地面上：

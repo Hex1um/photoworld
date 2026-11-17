@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '2.15.24';
+  const VERSION = '3.0.0';
   /* F6（v2.15.12）：`__PW_BUILD__` 与 VERSION 必须一致，否则 index.html 的
      "过期缓存自检"会每次打开都强制整页重载一次并打 data-stale 标记。
      bump_cache.py 现在两者一起改，这条断言用来在控制台第一时间暴露漂移。 */
@@ -840,6 +840,11 @@
       const col = asset.img ? colorsFromImage(asset.img)
         : { top: [0.34, 0.44, 0.62], bot: [0.55, 0.56, 0.52], lum: 0.45 };
       const vertexColor = !asset.img;
+      /* v3 资产（pipeline/v3）：视锥内是照片贴图 + 双四边形连续曲面，视锥外是
+         扩散生成的地形/地物/360° 天空穹顶。它自带真实几何，所以两件事必须区别对待：
+           · 不再接程序化延伸器（已有地形会与它打架，且会在照片区铺一块灰板）；
+           · 出生俯仰角 = 拍摄俯仰角（照片光轴常常不是水平的）。 */
+      const v3meta = (asset.extras && asset.extras.v3) || null;
       const gl = renderer.gl;
       const toMesh = (l) => ({
         aPos: buf(gl, l.pos, 3),
@@ -1011,6 +1016,36 @@
       // 与 enterWorld 同一口径：reset() 会把 pitch 置为 -0.02，
       // ?pitch= 指定的出生俯仰角在离线 GLB 路径也要还原。
       if (window.__spawn && typeof window.__spawn.pitch === 'number') player.state.pitch = window.__spawn.pitch;
+      /* v3：没有显式 ?pitch= 时用**拍摄俯仰角**出生。世界是按真实俯仰建的，
+         站在原点用 pitch=0（reset 的默认 -0.02）看，地平线会整条错位。 */
+      else if (v3meta && asset.camera && typeof asset.camera.pitch === 'number') {
+        player.state.pitch = asset.camera.pitch;
+      }
+      if (v3meta) {
+        if (v3meta.bbox) {
+          /* 包围盒要**外扩 8m**：v3 的世界全部在相机前方（z ≤ -1），
+             而玩家出生在 z=0 —— 不扩的话出生点就算"在壳外 0.96m"，
+             照片壳按 shellAlpha 立刻被淡成 0，整屏只剩天空壳，发灰看不清
+             （实测：probe 出 shellAlpha=0，这是最容易被当成"雾太重"的坑）。 */
+          const PAD = 8;
+          w.groundColorMeta = {
+            x0: v3meta.bbox.x0 - PAD, z0: v3meta.bbox.z0 - PAD,
+            spanX: Math.max(1, v3meta.bbox.x1 - v3meta.bbox.x0 + PAD * 2),
+            spanZ: Math.max(1, v3meta.bbox.z1 - v3meta.bbox.z0 + PAD * 2)
+          };
+        }
+        // 天空壳/穹顶不加雾：它们本身就是远景，加雾会整屏发灰
+        w.backdropFog = 0.02;
+        /* v3 的近景层是"每像素反投影"的网格，三角形绕序与 v2 的 LDI 相反，
+           背面剔除会把整层剔掉 —— 症状是"照片层完全不显示，只看到天空壳"，
+           整屏发灰像蒙了一层雾（实测）。v3 一律双面绘制。 */
+        w.reliefCull = false;
+        setHudPipe('v3', 'v3 · 扩散地形');
+      }
+
+      /* 调试钩子：资产世界的运行时对象（质检脚本用）。
+         与 window.__setCam / window.__spawn 同一套路，不改运行时行为。 */
+      if (typeof window !== 'undefined') window.__pwWorld = w;
 
       el('hudName').textContent = '离线重建世界';
       if (!el('hudPipe').textContent) setHudPipe('asset', '资产');
@@ -1023,7 +1058,7 @@
          照片只覆盖一个视锥，其余方向必须是继续生成的地形，不能是雾或空底。
          适配层把资产世界的事实喂给它（近景层的 bbox、照片地面色、
          顶点色 tile、纵向基准），四处契约冲突已在 v2.4.3/2.4.4 修完。 */
-      const wantExt = new URLSearchParams(location.search).get('ext') !== '0';
+      const wantExt = new URLSearchParams(location.search).get('ext') !== '0' && !v3meta;
       if (wantExt && window.PW.createExtender && !isWall) {
         try {
           w.extraMeshes = [];

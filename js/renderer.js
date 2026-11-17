@@ -15,6 +15,11 @@
     && new URLSearchParams(location.search).get('terrain') === '10') ? 10 : 1;
 
 
+  /* 远端雾量：v3 资产会显式给 backdropFog（天空壳不该被雾洗白） */
+  function outerFog(v, dflt) {
+    return (typeof v === 'number' && isFinite(v)) ? v : dflt;
+  }
+
   function createRenderer(canvas) {
     const gl = canvas.getContext('webgl2', {
       antialias: false, alpha: false, depth: true, stencil: false,
@@ -694,7 +699,11 @@
           world.dbgLayers
             ? { mode: 9, debugCol: [0.15, 0.35, 0.95] }
             : {
-              tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.30, mipBias: 0,
+              /* v3 的天空壳/穹顶就是**远处本身**（照片天空 + 扩散天空），
+                 再叠 0.30 的雾会把它洗成一层奶白：实测整屏发灰、山体变剪影。
+                 v3 资产在 extras 里给了 backdropFog，按它来；其它资产仍是 0.30。 */
+              tex: world.tex.photo, mode: world.vertexColor ? 1 : 4,
+              fog: outerFog(world.backdropFog, 0.30), mipBias: 0,
               backdrop: [cam.eye[0], cam.eye[2]]
             });
         gl.disable(gl.BLEND);

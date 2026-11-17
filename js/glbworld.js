@@ -145,9 +145,12 @@
     for (const l of layers) { verts += l.vertices; tris += l.triangles; }
     // 相机内参（v2 管线写进 asset.extras）：没有就用调用方的默认视场。
     // 不做这层传递，几何与视场就会各说各话，整幅重建被放大/错位。
-    const camExtras = (json.asset && json.asset.extras && json.asset.extras.camera) || null;
+    const assetExtras = (json.asset && json.asset.extras) || null;
+    const camExtras = (assetExtras && assetExtras.camera) || null;
+    // v3 资产会在 extras.v3 里写管线标记/太阳/包围盒：前端据此关掉程序化延伸、
+    // 并把出生俯仰角设成拍摄时的俯仰角（否则"从原点看"永远差一个角度）。
     return { layers, img, vertices: verts, triangles: tris, bytes: buf.byteLength,
-             camera: camExtras };
+             camera: camExtras, extras: assetExtras };
   }
 
   global.PW = global.PW || {};
