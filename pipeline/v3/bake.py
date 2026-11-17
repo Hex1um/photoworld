@@ -75,8 +75,18 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
         "step": int(cfg.get("step", 3)),
         "cliff": float(cfg.get("cliff", 1.8)),
         "skirt": float(cfg.get("skirt", 0.30)),
+        # 下面三个默认值就是 v3 的推荐值；参数搜索（tools/v3_sweep.py）会覆盖它们
+        "ground_tol": float(cfg.get("ground_tol", 0.40)),
+        "sky_grad": float(cfg.get("sky_grad", 0.045)),
+        "fg_near": float(cfg.get("fg_near", 70.0)),
+        "skirt_bg": float(cfg.get("skirt_bg", 0.15)),
+        "cliff_bg": float(cfg.get("cliff_bg", 6.0)),
     })
     print(f"[3/6] 视锥内 {time.time()-t:.1f}s  {fr['stats']}")
+
+    # 深度用完了：先把 1.3GB 的 DA-V2-Large 放掉，扩散才有足够的显存
+    if not cfg.get("no_diffusion"):
+        v3depth.unload()
 
     edge, _ = shade.edge_from_near(fr["layers"], bins=terrain.AZ_BINS)
     edge_col = shade.ground_edge_color(rgb, bins=terrain.AZ_BINS)
@@ -84,7 +94,8 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
     pcfg = {"pano_w": cfg.get("pano_w", 1024), "pano_h": cfg.get("pano_h", 512),
             "pano_steps": cfg.get("pano_steps", 20), "seed": cfg.get("seed", 0),
             "no_diffusion": cfg.get("no_diffusion", False),
-            "prompt": cfg.get("prompt")}
+            "prompt": cfg.get("prompt"), "pano_from": cfg.get("pano_from"),
+            "cache_dir": cfg.get("cache_dir")}
     if cfg.get("no_diffusion"):
         print("[4/6] 视锥外：跳过扩散（--no-diffusion），全景=原图填入的已知区")
         pn = panomod.build(rgb, cam, pcfg)
@@ -92,8 +103,8 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
     else:
         t = time.time()
         pn = panomod.build(rgb, cam, pcfg)
-        print(f"[4/6] 全景 {time.time()-t:.1f}s  已知区 {pn['known_frac']*100:.0f}%  "
-              f"prompt={pn['prompt'][:60]}…")
+        print(f"[4/6] 全景 {time.time()-t:.1f}s（{pn.get('cache', '?')}）  "
+              f"已知区 {pn['known_frac']*100:.0f}%  prompt={pn['prompt'][:56]}…")
         t = time.time()
         views = terrain.render_views(pn["pano"], n=int(cfg.get("views", 8)), size=int(cfg.get("view_size", 448)))
         cloud = terrain.point_cloud(views, device=cfg.get("device", "cuda"),
@@ -111,11 +122,23 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
               f"far {far['index'].size//3} 三角  prop {(prop['index'].size//3) if prop else 0} 三角  "
               f"dome {dome['index'].size//3} 三角")
 
+    # ---- 视锥外几何与照片对齐（压到照片表面之后 / 剔掉落在天空的部分）----
+    if layers_far:
+        z_ref = fr["debug"]["z_snap"]
+        sky_ref = fr["debug"]["sky"]
+        layers_far = [terrain.conform_to_photo(l, z_ref, sky_ref, cam, photo=rgb)
+                      for l in layers_far]
+        print("       对齐照片：剔除 %d 顶点、推后 %d 顶点" % (
+            sum(l.get("culled", 0) for l in layers_far),
+            sum(l.get("pushed", 0) for l in layers_far)))
+
     # ---- 统一着色 ----
     light = shade.sun_from_pano(pn["pano"])
     # 天空壳只做很轻的明暗（天空本身不该有地形那种坡面明暗）
+    # 天空壳完全不烘焙光照：它是"远处本身"，再打光只会让天空出现球面明暗
+    # （实测：侧视里天空穹顶变成一个圆盘，边界肉眼可见）。
     layers_far = [shade.bake_lighting(l, light,
-                                      strength=0.2 if l["name"] == "backdrop" else 0.85)
+                                      strength=0.0 if l["name"] == "backdrop" else 0.85)
                   for l in layers_far]
     layers_far = [shade.seam_blend(l, edge, edge_col, band=float(cfg.get("seam_band", 28.0)))
                   if l.get("name") == "far" else l for l in layers_far]
@@ -232,6 +255,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--jpeg", type=int, default=90, help="内嵌照片贴图的 JPEG 质量")
+    ap.add_argument("--pano-from", default=None,
+                    help="复用一张已有全景（只重算几何，跳过扩散；A/B 用）")
     ap.add_argument("--cliff", type=float, default=1.8, help="断崖判据（越小切得越狠）")
     ap.add_argument("--prop-density", type=float, default=1.0)
     args = ap.parse_args()
@@ -248,6 +273,7 @@ def main() -> int:
 
     cfg = {"step": args.step, "no_diffusion": args.no_diffusion, "prompt": args.prompt,
            "jpeg": args.jpeg, "cliff": args.cliff, "prop_density": args.prop_density,
+           "pano_from": args.pano_from,
            "pano_w": args.pano_w, "pano_h": args.pano_w // 2,
            "pano_steps": args.pano_steps, "views": args.views,
            "device": args.device, "seed": args.seed}

@@ -27,6 +27,9 @@ from . import depth as v3depth
 
 AZ_BINS = 720
 R_BINS = 160
+# R_MAX 试过 900（想让地形接到天空穹顶的下沿），结果更糟：600m 以外的
+# 高度场是插值外推出来的，一铺就大面积陷下去 —— lowVoid 16% → 65%。
+# 保持 600，穹顶下沿改由 sky_dome 的 lat 下探来兜（见那里）。
 R_MIN, R_MAX = 3.0, 600.0
 
 
@@ -347,7 +350,12 @@ def sky_dome(pano: np.ndarray, radius: float = 920.0, az_bins: int = 192,
     A = ((np.arange(az_bins) + 0.5) / az_bins - 0.5) * 2 * math.pi
     # 纬度必须**严格小于 90°**：超过极点会让顶点翻到对侧（cos(lat)<0），
     # 那一圈三角形会横跨整个天空，把照片天空整片盖掉 —— 实测 PSNR 46→32dB。
-    LAT = (np.arange(lat_bins) + 0.5) / lat_bins * (math.pi * 0.5) * 0.995
+    # 纬度从 **-8°** 起（不是 0°）：地形只铺到 600m，600m 处的地平线比真地平线低
+    # 0.16°，而穹顶从 0° 起 → 中间夹出一条空带，转身就是一道 void（实测 alpine
+    # 的 B 圈 innerVoid 14%）。压到 -8° 让穹顶与地形外缘重叠，空带消失；
+    # 穹顶在 920m、地形 ≤600m，深度测试保证地形永远在前，不会盖住地面。
+    LAT = ((np.arange(lat_bins) + 0.5) / lat_bins * (math.pi * 0.5 + math.radians(8))
+           - math.radians(8))
     AA, LL = np.meshgrid(A, LAT, indexing="ij")
     dirs = np.stack([np.sin(AA) * np.cos(LL), np.sin(LL), -np.cos(AA) * np.cos(LL)], axis=-1)
     P = (dirs * radius + np.array([0.0, 0.0, 0.0])).reshape(-1, 3).astype(np.float32)
@@ -383,3 +391,76 @@ def sky_dome(pano: np.ndarray, radius: float = 920.0, az_bins: int = 192,
     return {"name": "backdrop", "pos": P, "nrm": nrm,
             "uv": np.tile(np.array(uv_white, dtype=np.float32), (P.shape[0], 1)),
             "color": C.astype(np.float32), "index": np.ascontiguousarray(tri)}
+
+
+# --------------------------------------------------------------------------- 与照片对齐
+
+def conform_to_photo(layer: dict, z_near: np.ndarray, sky: np.ndarray,
+                     cam, margin: float = 1.06,
+                     photo: np.ndarray | None = None) -> dict:
+    """把视锥外的几何**压到照片表面之后**，并把落进天空的顶点剔掉。
+
+    为什么必须做这一层（实测）：只按"方位半径"挖洞是不够的 —— 照片的足迹不是
+    凸的，同一个方位上不同仰角的地面/山体半径差几十倍。coast 那张有 48% 是天空，
+    远景地形在照片的方位范围内就从 r=15m 开始铺，直接盖住了照片下半屏
+    （multiview 的 innerVoid 12%、void 18%）。
+
+    做法（两种情形分开，因为"错"的方式不同）：
+      * 落在**非天空**像素上：说明该方向照片已经给出了表面。地形要么在它后面，
+        要么就是穿模 —— 沿该像素的射线把顶点推到 z_near×1.06（投影不变，
+        所以原点视角看不到它，侧视时它正好贴着照片壳的下沿，不会留洞）。
+      * 落在**天空**像素上：那个方向本来就不该有地形（是天空），直接剔掉整片顶点。
+    """
+    from . import verify as vfy
+
+    P = np.asarray(layer["pos"], dtype=np.float64)
+    idx = np.asarray(layer["index"], dtype=np.int64).reshape(-1, 3)
+    scr, dist = vfy.project_cam(P, cam, cam.w, cam.h)
+    ui = np.clip(scr[:, 0].astype(np.int64), 0, cam.w - 1)
+    vi = np.clip(scr[:, 1].astype(np.int64), 0, cam.h - 1)
+    inside = ((scr[:, 0] >= 0) & (scr[:, 0] < cam.w)
+              & (scr[:, 1] >= 0) & (scr[:, 1] < cam.h) & (dist > 0.35))
+
+    drop = inside & sky[vi, ui]
+    ref = z_near[vi, ui].astype(np.float64)
+    push = inside & ~sky[vi, ui] & (dist < ref * margin) & (ref > 0.5)
+
+    keep = ~drop
+    if keep.all() and not push.any():
+        return layer
+
+    # 顶点重排（丢掉的顶点不参与索引）
+    remap = np.full(P.shape[0], -1, dtype=np.int64)
+    remap[keep] = np.arange(int(keep.sum()))
+    tri_ok = keep[idx[:, 0]] & keep[idx[:, 1]] & keep[idx[:, 2]]
+    new_idx = remap[idx[tri_ok]]
+
+    out = {"name": layer["name"],
+           "pos": P[keep].astype(np.float32),
+           "uv": np.asarray(layer["uv"])[keep].astype(np.float32),
+           "nrm": np.asarray(layer["nrm"])[keep].astype(np.float32),
+           "index": np.ascontiguousarray(new_idx.astype(np.uint32))}
+    if layer.get("color") is not None:
+        out["color"] = np.asarray(layer["color"])[keep].astype(np.float32)
+
+    # 被推后的顶点：位置沿各自射线后移，颜色改成**它背后那个照片像素**的颜色。
+    # 为什么改色：这些顶点侧移时会露出来，用全景色就是一块与照片不接的平板
+    # （实测 desert 走两步就看到一片灰紫平面）。取照片颜色后，它读起来就是
+    # "照片地面往外继续"，接缝也自然。
+    pk = push[keep]
+    if pk.any():
+        eye = np.array([0.0, cam.eye, 0.0])
+        d = out["pos"][pk] - eye
+        ln = np.linalg.norm(d, axis=1, keepdims=True)
+        target = (ref[keep][pk] * margin)[:, None]
+        out["pos"][pk] = (eye + d / np.maximum(ln, 1e-9) * target).astype(np.float32)
+        if photo is not None and out.get("color") is not None:
+            ui2 = ui[keep][pk]
+            vi2 = vi[keep][pk]
+            c = photo[vi2, ui2]
+            out["color"][pk, :3] = c
+            out["color"][pk, 3] = 1.0
+
+    out["culled"] = int((~keep).sum())
+    out["pushed"] = int(pk.sum())
+    return out

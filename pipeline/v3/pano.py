@@ -24,6 +24,8 @@ import os
 import numpy as np
 from scipy import ndimage
 
+from PIL import Image
+
 from . import common
 
 _PIPE = None
@@ -115,7 +117,10 @@ def _load_pipe(device: str = "cuda"):
         pipe = StableDiffusionXLInpaintPipeline.from_pretrained(
             "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
             torch_dtype=torch.float16, variant="fp16", local_files_only=True)
-        # 8GB 笔记本卡装不下 unet+双 text encoder 的 fp16 全量，用 CPU offload 换显存
+        # 8GB 笔记本卡装不下 unet+双 text encoder 的 fp16 全量，用 CPU offload 换显存。
+        # **只能用 model 级 offload**：sequential 档是一步一搬权重，实测把 20 步的
+        # 全景从 30s 拖到 15 分钟以上（GPU 显示 99% 但全在等 PCIe，很容易误判成"在算"）。
+        torch.cuda.empty_cache()
         pipe.enable_model_cpu_offload()
         pipe.set_progress_bar_config(disable=True)
         _PIPE = pipe
@@ -162,17 +167,62 @@ def inpaint(pano: np.ndarray, known: np.ndarray, prompt: str, steps: int = 20,
     return np.clip(res, 0, 1)
 
 
+def _cache_key(rgb: np.ndarray, cam: common.Camera3, prompt: str, cfg: dict) -> str:
+    """全景缓存键：只跟"输入照片 + 内参 + 提示词 + 采样参数"有关。
+
+    为什么要缓存：全景是整条链路最贵的一步（20 步 SDXL）。调几何参数
+    （cliff / skirt / ground_tol）时全景完全不变，重跑纯属浪费 —— 参数搜索时
+    这一步能把一轮从几十分钟压到几分钟。实测笔记本卡在省电档下一次全景
+    能拖到十分钟以上（GPU 显存 99% 但全在等 PCIe）。
+    """
+    import hashlib
+    h = hashlib.sha1()
+    h.update(np.ascontiguousarray((np.clip(rgb, 0, 1) * 255).astype(np.uint8)).tobytes())
+    h.update(("%.4f|%.4f|%.3f|%d|%d|%d|%s" % (
+        cam.hfov, cam.pitch, cam.eye, int(cfg.get("pano_w", 1024)),
+        int(cfg.get("pano_steps", 20)), int(cfg.get("seed", 0)), prompt)).encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
 def build(rgb: np.ndarray, cam: common.Camera3, cfg: dict) -> dict:
     pw = int(cfg.get("pano_w", 1024))
     ph = int(cfg.get("pano_h", 512))
     pano0, known = photo_to_equirect(rgb, cam, pw, ph)
     prompt = cfg.get("prompt") or _prompt_from_photo(rgb, cam)
-    if cfg.get("no_diffusion"):
-        full = pano0
+
+    src = cfg.get("pano_from")
+    cache_dir = cfg.get("cache_dir") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "cache", "v3")
+    key = _cache_key(rgb, cam, prompt, cfg)
+    cache_path = os.path.join(cache_dir, "pano_%s.jpg" % key)
+
+    def _load(path):
+        im = Image.open(path).convert("RGB")
+        if im.size != (pw, ph):
+            im = im.resize((pw, ph))
+        return np.asarray(im, dtype=np.float32) / 255.0
+
+    if src and os.path.exists(src):
+        full, cache_hit = _load(src), "explicit"
+    elif os.path.exists(cache_path):
+        full, cache_hit = _load(cache_path), "cache"
+    elif cfg.get("no_diffusion"):
+        full, cache_hit = pano0, "none"
     else:
         full = inpaint(pano0, known, prompt,
                        steps=int(cfg.get("pano_steps", 20)),
                        guidance=float(cfg.get("pano_cfg", 6.5)),
                        seed=int(cfg.get("seed", 0)))
+        cache_hit = "generated"
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            common.save_rgb(cache_path, full, quality=95)
+        except Exception:
+            pass
+
+    # 无论全景从哪来，**已知区都逐像素还原成原图**：
+    # 复用缓存/外部全景不能把"视锥内必须等于原图"这条硬要求弄丢。
+    full = np.where(known[..., None], pano0, full).astype(np.float32)
     return {"pano": full, "known": known, "prompt": prompt,
-            "known_frac": float(known.mean())}
+            "known_frac": float(known.mean()), "cache": cache_hit}

@@ -35,12 +35,49 @@ def _load(device: str = "cuda", long_side: int = 1540):
     return _PROC, _MODEL
 
 
+def unload() -> None:
+    """把深度模型从显存里放掉。
+
+    为什么需要：v3 一张图要过两个大模型（DA-V2-Large ≈1.3GB + SDXL unet ≈4.8GB）。
+    笔记本 8GB 卡上两者常驻会只剩几百兆，SDXL 的 CPU-offload 就会来回搬权重 ——
+    实测一张图的烘焙从 90s 拖到 **15 分钟以上**（GPU 99% 但全在等 PCIe）。
+    深度用完立刻放，扩散要用的显存才够。
+    """
+    global _MODEL, _PROC
+    _MODEL = None
+    _PROC = None
+    try:
+        import torch
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 def disparity(img_rgb: np.ndarray, device: str = "cuda", long_side: int = 1540) -> np.ndarray:
     """(H,W,3) sRGB 0..1 → (H,W) 视差（大 = 近），与输入同分辨率。"""
     import depth_gpu
     proc, model = _load(device, long_side)
     pil = Image.fromarray((np.clip(img_rgb, 0, 1) * 255 + 0.5).astype(np.uint8))
     return depth_gpu.estimate(pil, proc, model, device=device, long_side=long_side)
+
+
+def _two_anchor(disp: np.ndarray, cam: common.Camera3, horizon_far: float,
+                near_anchor_m: float = 2.0) -> tuple[np.ndarray, dict]:
+    """分位双锚点：最近的 1% 视差 ≈ 2m，最远的 2% ≈ 地平线先验。"""
+    import geom
+    r = disp[np.isfinite(disp)]
+    r = r[r > 1e-4]
+    r_near = float(np.percentile(r, 99.0))
+    r_far = float(np.percentile(r, 2.0))
+    r_near = max(r_near, r_far * 1.5 + 1e-3)
+    p = math.log(horizon_far / near_anchor_m) / math.log(r_near / max(r_far, 1e-6))
+    p = float(np.clip(p, 0.6, 2.6))
+    A = near_anchor_m * (r_near ** p)
+    far_m = 1.2 * horizon_far
+    z = geom.metric_depth(disp, A, 0.0, near=0.5, far=far_m, p=p, r0=None)
+    return z, {"mode": "two-anchor-percentile", "mode_used": "percentile-two-anchor(guard)",
+               "A": A, "p": p, "r_near": r_near, "r_far": r_far, "far": far_m,
+               "z_near": near_anchor_m, "z_far": horizon_far, "degenerate": False}
 
 
 def calibrate(disp: np.ndarray, cam: common.Camera3, far_prior: float = 900.0) -> dict:
@@ -59,6 +96,17 @@ def calibrate(disp: np.ndarray, cam: common.Camera3, far_prior: float = 900.0) -
         # 但必须留痕：p 打到边界就说明"这张图的地面先验不成立"。
         p_used = float(cal.get("p", 1.0))
         cal["p_clamped"] = bool(abs(p_used - 3.2) < 1e-6 or abs(p_used - 0.6) < 1e-6)
+
+        # ---- 合理性闸门：地面锚定有时会给出"连最近的像素都在 57m 外"的标定 ----
+        # 手持照片的底部几乎总有 2~10m 内的地面。实测 desert 那张被地面锚定
+        # 拉到 57~511m，几何整体退到远处：原点视角仍然像（颜色走 UV），
+        # 但一走两步就看到"眼前一片空旷的平板"（multiview 的 lowVoid 16%）。
+        z_near2 = float(np.percentile(z, 2))
+        if z_near2 > 10.0 and cal.get("mode_used") == "ground-anchored":
+            z, cal2 = _two_anchor(disp, cam2, far_prior)
+            cal2["guard"] = "ground-anchored 给出 z_near=%.1fm，退分位双锚点" % z_near2
+            cal2["p_clamped"] = False
+            return {"z": np.clip(z, 0.4, far_prior * 1.6), "cam": cam2, "cal": cal2}
         return {"z": np.clip(z, 0.4, far_prior * 1.6), "cam": cam2, "cal": cal}
     except Exception as e:                                  # 极端构图/退化图
         z = 2.0 + 240.0 * np.power(1.0 - np.clip(disp, 0, 1), 1.7)

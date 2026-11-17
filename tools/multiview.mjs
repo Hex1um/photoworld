@@ -78,6 +78,35 @@ const PLAN_V2 = (() => {
   return plan;
 })();
 
+/* v3 专用 32 机位：v3 的世界 = 照片区域 + 360° 扩散地形，所以**必须测转身**。
+   四组各 8 个（4 个位置 × 2 个朝向）：
+     F 前方（±20° 偏航）   ：照片保真度与视差
+     S 侧向（±80°）        ：薄壳边缘 / 视锥外的侧向拼接
+     B 背后（175°±）       ：扩散地形、地物与天空穹顶（v2 套餐完全没测这块）
+     U 抬/俯（±0.55 俯仰）  ：穹顶顶部与脚下地面
+   v2 那套 16 位 × 2 偏航全朝前，对 v3 等于漏掉了一半世界。 */
+const PLAN_V3 = (() => {
+  const pos = [[-5, 0], [-1.5, -3], [1.5, -3], [5, 0]];
+  const plan = [];
+  for (const [x, z] of pos) {
+    plan.push({ ring: 'F', x, z, yaw: -0.35, pitch: -0.05 });
+    plan.push({ ring: 'F', x, z, yaw: 0.35, pitch: -0.05 });
+  }
+  for (const [x, z] of pos) {
+    plan.push({ ring: 'S', x, z, yaw: 1.40, pitch: -0.05 });
+    plan.push({ ring: 'S', x, z, yaw: -1.40, pitch: -0.05 });
+  }
+  for (const [x, z] of pos) {
+    plan.push({ ring: 'B', x, z, yaw: Math.PI, pitch: -0.05 });
+    plan.push({ ring: 'B', x, z, yaw: Math.PI * 0.9, pitch: 0.04 });
+  }
+  for (const [x, z] of pos) {
+    plan.push({ ring: 'U', x, z, yaw: 0, pitch: 0.55 });
+    plan.push({ ring: 'U', x, z, yaw: Math.PI, pitch: -0.55 });
+  }
+  return plan;
+})();
+
 const RINGS_32 = (() => {
   const plan = [];
   for (let i = 0; i < 12; i++) plan.push({ ring: 'A', a: (i / 12) * Math.PI * 2, r: 10, pitch: -0.10, eye: null });
@@ -99,6 +128,9 @@ const SETTLE = parseInt(arg('settle', '260'), 10);   // 每视角稳定毫秒
 const W = parseInt(arg('w', '960'), 10);
 const H = parseInt(arg('h', '600'), 10);
 const LIMIT = parseInt(arg('limit', '0'), 10);
+/* 机位套餐：rings = 在线链路的三圈；v2 = 全朝前 32；v3 = 前后左右+抬俯 32。
+   默认按模式选，显式 --plan 覆盖。 */
+const PLAN_NAME = arg('plan', '');
 const EXTRA = arg('query', '');                      // 追加到 URL 的查询串（A/B 用）
 const EDGE = arg('edge', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe');
 /* 光栅后端：hw = D3D11 真 GPU（默认）；sw = SwiftShader 软件光栅。
@@ -481,8 +513,9 @@ try {
     const dbg = state.dbg ? JSON.parse(state.dbg) : null;
     if (dbg) rec.relief = dbg;
 
+    const planName = PLAN_NAME || (IS_GLB ? 'v2' : 'rings');
     const plan = (VIEWS === 32)
-      ? (IS_GLB ? PLAN_V2 : RINGS_32)
+      ? (planName === 'v3' ? PLAN_V3 : (IS_GLB ? PLAN_V2 : RINGS_32))
       : Array.from({ length: VIEWS }, (_, i) => ({
       ring: 'A', a: (i / VIEWS) * Math.PI * 2, r: RADIUS, pitch: PITCH, eye: null
     }));
@@ -498,8 +531,11 @@ try {
       await sleep(SETTLE);
       const shot = await send('Page.captureScreenshot', { format: 'png' });
       const buf = Buffer.from(shot.data, 'base64');
+      /* GLB 模式下 v3 的产物都叫 world.glb（每张图一个子目录），
+         只用 basename 会互相覆盖 —— 名字太通用时退回用父目录名。 */
+      const base0 = path.basename(rel).replace(/\.glb$/i, '');
       const tag = IS_GLB
-        ? (path.basename(path.dirname(rel)) + '_' + path.basename(path.dirname(path.dirname(rel))))
+        ? (base0 === 'world' ? path.basename(path.dirname(rel)) : base0)
         : path.basename(rel).replace(/\.[a-z0-9]+$/i, '');
       const file = path.join(OUTDIR, `${tag}_${v.ring}${String(i).padStart(2, '0')}.png`);
       fs.writeFileSync(file, buf);
