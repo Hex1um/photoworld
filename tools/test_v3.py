@@ -58,8 +58,10 @@ def main() -> int:
     check("GLB 可解析且含 5 层以上", len(g["layers"]) >= 5, str(names))
     check("存在 near 层（照片贴图）", "near" in names)
     check("存在 fill 层（前景背后的背景补丁）", "fill" in names)
-    check("存在 backdrop 层（照片天空壳 + 360 穹顶）", names.count("backdrop") >= 2,
-          "backdrop ×%d" % names.count("backdrop"))
+    # v3.0.2 起照片天空壳单独成层（skycap）：它只在出生点与原图对齐，
+    # 相机一动就会被前端淡掉；穹顶仍然是 backdrop。
+    check("存在 skycap 层（照片天空壳）", "skycap" in names)
+    check("存在 backdrop 层（360 穹顶）", "backdrop" in names)
     check("存在 far 层（扩散地形）", "far" in names)
 
     ex = g["extras"] or {}
@@ -97,7 +99,7 @@ def main() -> int:
         cam3 = common.Camera3(cam["w"], cam["h"], cam["hfov"], cam["vfov"], cam.get("pitch", 0.0))
         tex = np.asarray(Image.open(io.BytesIO(g["jpeg"])).convert("RGB"),
                          np.float32) / 255.0
-        core = [l for l in g["layers"] if l["name"] in ("near", "backdrop")]
+        core = [l for l in g["layers"] if l["name"] in ("near", "skycap", "backdrop")]
         r = verify.rasterize(core, tex, cam3, cam3.w, cam3.h)
         rep = verify.report(r, photo, cam3)
         check("原点视角 PSNR(原图区) >= %.0fdB" % args.min_core_psnr,

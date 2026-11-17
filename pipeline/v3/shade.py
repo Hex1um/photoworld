@@ -105,6 +105,74 @@ def seam_blend(far: dict, near_edge: np.ndarray, edge_color: np.ndarray,
     return far
 
 
+def floor_from_near(layers: list, bins: int = 720) -> np.ndarray:
+    """每个方位上"照片的表面最低到哪" —— 用它当足迹内的地板高度。
+
+    为什么需要地板：照片只给出**朝向相机的那一层**，脚下是一张壳。一起飞或者站到
+    侧面，壳的下方就是空的（用户说的"全白/空白"）。在足迹内铺一张比照片表面更低
+    的地板，仰视和侧视就有地面了；原点视角由 `conform_to_photo` 把它压到照片表面
+    之后，所以保真度不受影响。
+    """
+    near = next((l for l in layers if l.get("name") == "near"), None)
+    if near is None:
+        return np.full(bins, -0.6, dtype=np.float32)
+    P = near["pos"]
+    r = np.hypot(P[:, 0], P[:, 2])
+    az = np.arctan2(P[:, 0], -P[:, 2])
+    ok = (r > 1.0) & (r < 900.0)
+    if not ok.any():
+        return np.full(bins, -0.6, dtype=np.float32)
+    i = np.clip(((az[ok] + math.pi) / (2 * math.pi) * bins).astype(np.int64), 0, bins - 1)
+    # 取每个方位的 **20 分位**高度，而不是最小值：最小值会被"湖面最远点/山谷底"
+    # 拖到几十米以下，地板就成了一个巨大的坑（实测一起飞整屏是一片纯色深坑）。
+    from scipy.stats import binned_statistic
+    out = binned_statistic(i, P[ok, 1], statistic=lambda v: np.percentile(v, 20),
+                           bins=bins, range=(0, bins))[0].astype(np.float32)
+    has = np.isfinite(out)
+    if has.sum() >= 2:
+        idx = np.arange(bins)
+        xi = np.concatenate([idx[has], idx[has] + bins])
+        yi = np.concatenate([out[has], out[has]])
+        out = np.interp(idx, xi, yi).astype(np.float32)
+    else:
+        out[:] = -0.6
+    # 地板最深不超过 5m：再深就不是'照片下方的地面'而是人造大坑
+    return np.clip(out - 0.40, -5.0, -0.35).astype(np.float32)
+
+
+def match_to_photo(layer: dict, target_rgb: np.ndarray, strength: float = 0.75) -> dict:
+    """把外景色调的**亮度**拉到照片的地面色上（色相保留）。
+
+    现在的流程是"归一化到水平面=1.0"，那只保证相对明暗，不保证与原片一致：
+    实测外侧地面比照片地面亮/暗 10~20%，接缝处就是一条可见的边。
+    这里只按亮度做增益（乘性），不动色相 —— 色相来自全景，本来就该保留。
+    """
+    C = layer.get("color")
+    if C is None or C.shape[0] == 0:
+        return layer
+    nrm = layer.get("nrm")
+    if nrm is None:
+        return layer
+    up = nrm[:, 1] > 0.55
+    if up.sum() < 50:
+        return layer
+    cur = C[up, :3].mean(axis=0)
+    tgt = np.asarray(target_rgb, dtype=np.float32).reshape(3)
+    lum = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    cur_l = float(cur @ lum)
+    tgt_l = float(tgt @ lum)
+    if cur_l < 1e-3 or tgt_l < 1e-3:
+        return layer
+    gain = (tgt_l / cur_l) ** strength
+    gain = float(np.clip(gain, 0.55, 1.9))
+    out = dict(layer)
+    C2 = C.copy()
+    C2[:, :3] = np.clip(C2[:, :3] * gain, 0.0, 1.0)
+    out["color"] = C2
+    out["luma_gain"] = round(gain, 3)
+    return out
+
+
 def edge_from_near(layers: list, bins: int = 720, ground_y: float | None = None) -> tuple[np.ndarray, np.ndarray]:
     """从视锥内的 near 层读出"每个方位上照片覆盖到多远"。
 

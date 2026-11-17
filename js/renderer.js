@@ -608,7 +608,10 @@
              竖直拉长的崖壁穿出顶面，表现为一片黑红竖条（实测 150m 俯视）。
              超过 6m 就切成"只画顶面 + tile"的俯视模式 —— 这是显式的 LOD 切换，
              不是几何修补：单视图重建本来就没有从上看的样子。 */
-          if (world.showPlan) {
+          /* v3 资产在飞行时**继续画**这层：它的几何是真的三维表面（不是一个朝前的
+             薄膜），而且仰视时视锥内那块地面只存在于这一层里 —— 跳过就整屏只剩
+             清屏色（实测"一起飞就全白"）。v2 的薄壳仍然跳过。 */
+          if (world.showPlan && !world.planKeepsScene) {
             // 高空：跳过照片壳（顶面与 tile 已经铺满）
           } else {
             drawMesh(world, world.meshes.relief,
@@ -618,7 +621,8 @@
                   /* fog 从 0.26 降到 0.12：0.26 让站在原点看到的画面比原片"淡一层"
                      （山脊对比度被雾色压平）。近景本来就是照片本身，不需要雾去遮。 */
                   tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.16, mipBias: 0,
-                  backdrop: [0, 0], alphaMul: shellA(world),
+                  backdrop: [0, 0],
+                  alphaMul: shellA(world) * (1 - (world.shellHide || 0)),
                   /* 近景壳单独提一点天光：实测 fog 调到 0.12 后对比度对了，但整体
                      比原片暗（均值 0.494 对 0.582）。雾量再往上加已无变化 ——
                      差的不是雾，是光照。 */
@@ -628,6 +632,33 @@
         }
         gl.disable(gl.BLEND);
         gl.enable(gl.CULL_FACE);
+      }
+
+      /* v3 视锥外地形/地物：独立一层，不受照片壳淡出影响 */
+      if (world.meshes.terrain) {
+        drawMesh(world, world.meshes.terrain,
+          world.dbgLayers
+            ? { mode: 9, debugCol: [0.2, 0.9, 0.3] }
+            : { tex: world.tex.photo, mode: world.vertexColor ? 1 : 4,
+                fog: 0.16, mipBias: 0, backdrop: [0, 0] });
+      }
+
+      /* v3 的照片天空壳：世界固定（不做无视差平移），按"离出生点距离 + 是否飞行"淡出。
+         它只在出生点与原图逐像素对齐；相机一挪就是一张照片卡片浮在天空里。 */
+      if (world.meshes.skyCap) {
+        const a = (typeof world.skyCapAlpha === 'number') ? world.skyCapAlpha : 1;
+        if (a > 0.004) {
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+          gl.disable(gl.CULL_FACE);
+          drawMesh(world, world.meshes.skyCap, {
+            tex: world.tex.photo, mode: world.vertexColor ? 1 : 4,
+            fog: outerFog(world.backdropFog, 0.30), mipBias: 0,
+            backdrop: [0, 0], alphaMul: a
+          });
+          gl.disable(gl.BLEND);
+          gl.enable(gl.CULL_FACE);
+        }
       }
 
       /* 照片底行向下的裙边（v1.19.1）：几何上延续照片网格，UV 钳到最后一行。
@@ -691,7 +722,7 @@
       }
 
       // 远景层：无视差背景（跟随相机平移），避免"沙雕沙盘"感
-      if (world.meshes.backdrop && !world.showPlan) {
+      if (world.meshes.backdrop && (!world.showPlan || world.planKeepsScene)) {
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.disable(gl.CULL_FACE);

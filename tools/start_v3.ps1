@@ -23,7 +23,8 @@ param(
   [switch]$NoBrowser,
   [switch]$Visible,
   [int]$Port = 8199,
-  [string]$World = 'alpine',
+  # 留空 = 打开主页（画廊）；给名字才直接进某个世界
+  [string]$World = '',
   [string]$Photo = '',
   [switch]$NoDiffusion,
   [switch]$Quiet
@@ -189,6 +190,21 @@ if ($needStart) {
 }
 
 $target = ''
+if (-not $Photo -and -not $World) {
+  # 默认打开**主页**（画廊/展厅），不硬跳进某个世界
+  $url = "$StaticUrl/"
+  if ($NoBrowser) { Say "（-NoBrowser）请手动打开：$url" 'gray' }
+  else { Say "打开主页：$url" 'ok'; Start-Process $url }
+  if (-not $Quiet) {
+    Say ''
+    Say '提示：' 'gray'
+    Say '  · 直接进某个世界：start_v3.bat -World alpine|desert|coast|winter' 'gray'
+    Say '  · 烘焙自己的照片：start_v3.bat -Photo D://pics//a.jpg' 'gray'
+    Say '  · 关闭服务：桌面「PHOTOWORLD v3 - 停止.bat」' 'gray'
+    Start-Sleep -Milliseconds 900
+  }
+  exit 0
+}
 if ($Photo) {
   if (-not (Test-Path $Photo)) { Die "照片不存在：$Photo" }
   $name = [IO.Path]::GetFileNameWithoutExtension($Photo)

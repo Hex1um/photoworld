@@ -184,6 +184,63 @@ def _cache_key(rgb: np.ndarray, cam: common.Camera3, prompt: str, cfg: dict) -> 
     return h.hexdigest()[:16]
 
 
+
+def bg_plate(rgb: np.ndarray, fg: np.ndarray, prompt: str, cam: common.Camera3,
+             cfg: dict) -> np.ndarray:
+    """把前景抠掉、用扩散补出一张**背景板**（与照片同尺寸、同像素网格）。
+
+    为什么值得多跑一次扩散：`fill` 层是"侧移时露出来的那一层"。之前它取的是
+    "最近的非前景像素"的颜色 —— 前景背后就是一片糊色，侧看是拉伸的色带。
+    补出一张真正的背景图之后，那一层的颜色是有内容的：栏杆后面是路，树后面是坡。
+
+    几何不动（仍然用 push-pull 出来的 z_bg），只换颜色 —— 也就是用户说的
+    "先建模，再着色"。
+    """
+    import torch
+    from PIL import Image
+    from scipy import ndimage
+
+    cache_dir = cfg.get("cache_dir") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "cache", "v3")
+    key = _cache_key(rgb, cam, prompt + "|bg", cfg)
+    path = os.path.join(cache_dir, "bg_%s.jpg" % key)
+    if os.path.exists(path):
+        im = Image.open(path).convert("RGB")
+        if im.size != (rgb.shape[1], rgb.shape[0]):
+            im = im.resize((rgb.shape[1], rgb.shape[0]))
+        return np.asarray(im, dtype=np.float32) / 255.0
+
+    # 要重画的区域：前景外扩 9px 再羽化 —— 抠得太紧会在物体边缘留一圈原物体的颜色
+    paint = ndimage.binary_dilation(fg, np.ones((9, 9), bool)).astype(np.float32)
+    paint = ndimage.gaussian_filter(paint, 2.0)
+
+    pipe = _load_pipe()
+    h, w = rgb.shape[:2]
+    pw = int(cfg.get("bg_w", 1024))
+    ph = max(64, int(round(pw * h / float(w) / 8.0)) * 8)
+    img = Image.fromarray((np.clip(rgb, 0, 1) * 255 + 0.5).astype(np.uint8)).resize((pw, ph))
+    mask = Image.fromarray((np.clip(paint, 0, 1) * 255).astype(np.uint8)).resize((pw, ph))
+    gen = torch.Generator(device="cpu").manual_seed(int(cfg.get("seed", 0)))
+    out = pipe(prompt=prompt + ", clean empty background, no foreground objects, "
+                              "natural continuation of ground and sky",
+               negative_prompt="object, person, animal, text, watermark, blurry, duplicate",
+               image=img, mask_image=mask, height=ph, width=pw,
+               num_inference_steps=int(cfg.get("bg_steps", 18)),
+               guidance_scale=float(cfg.get("pano_cfg", 6.5)),
+               generator=gen).images[0]
+    plate = np.asarray(out.resize((w, h)), dtype=np.float32) / 255.0
+    # 前景之外的像素保持原图：只有"被挡住的那块"需要扩散，别的区域原图更可信
+    keep = paint < 0.5
+    plate[keep] = rgb[keep]
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        common.save_rgb(path, plate, quality=95)
+    except Exception:
+        pass
+    return plate
+
+
 def build(rgb: np.ndarray, cam: common.Camera3, cfg: dict) -> dict:
     pw = int(cfg.get("pano_w", 1024))
     ph = int(cfg.get("pano_h", 512))

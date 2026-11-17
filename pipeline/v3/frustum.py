@@ -321,7 +321,8 @@ def _grid_normals(P: np.ndarray, tri: np.ndarray, eye: np.ndarray) -> np.ndarray
 
 # --------------------------------------------------------------------------- 主入口
 
-def build(z: np.ndarray, rgb: np.ndarray, cam: common.Camera3, cfg: dict) -> dict:
+def build(z: np.ndarray, rgb: np.ndarray, cam: common.Camera3, cfg: dict,
+          bg_rgb: np.ndarray | None = None) -> dict:
     """视锥内 → 连续曲面 + 天空壳。返回 {"layers", "stats", "debug"}。"""
     step = int(cfg.get("step", 3))
     h, w = z.shape
@@ -367,7 +368,17 @@ def build(z: np.ndarray, rgb: np.ndarray, cam: common.Camera3, cfg: dict) -> dic
 
     # 背景层只铺"被前景遮住"的那一块：非前景区它与 near 共面，
     # 整片铺开会共面 z-fighting（v2 的 ISSUES #4 就是这么来的）。
+    # 有扩散背景板时，fill 层改用**顶点色**（不走贴图）：那块颜色必须来自背景板，
+    # 而整包 GLB 只有一张贴图，顶点色是唯一能带第二套颜色的通道（UV 指到白条）。
+    if bg_rgb is not None:
+        uv_bg = np.empty((h, w, 2), dtype=np.float32)
+        uv_bg[..., 0] = float(cfg.get("white_u", 0.5))
+        uv_bg[..., 1] = float(cfg.get("white_v", 0.9959))
+        col_bg = np.concatenate([bg_rgb, np.ones((h, w, 1), np.float32)], axis=-1)
+    else:
+        col_bg = None
     bg = grid_mesh(sub(pos_bg), sub(fg & ~sky), sub(uv_bg), sub(dirs), eye,
+                   color=None if col_bg is None else sub(col_bg),
                    cliff=float(cfg.get("cliff_bg", 6.0)),
                    skirt=float(cfg.get("skirt_bg", 0.15)))
     bg["name"] = "fill"
@@ -379,7 +390,10 @@ def build(z: np.ndarray, rgb: np.ndarray, cam: common.Camera3, cfg: dict) -> dic
     pos_sky = eye[None, None, :] + dirs * sky_r
     sky_layer = grid_mesh(sub(pos_sky), sub(sky), sub(uv_near), sub(dirs), eye,
                           cliff=1e9, skirt=0.0)
-    sky_layer["name"] = "backdrop"
+    # 名字必须与穹顶（backdrop）区分：照片天空壳只在**出生点**是对的，
+    # 相机一移动/一飞起来就是一张悬在空中的照片卡片（实测仰视时像漂浮的画框）。
+    # 单独成层之后前端可以按"离出生点的距离 / 是否飞行"把它淡掉。
+    sky_layer["name"] = "skycap"
     if sky_layer["index"].size:
         layers.append(sky_layer)
 

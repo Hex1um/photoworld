@@ -304,6 +304,10 @@ def launch(prefix="pwcdp-", port=None, w=1280, h=800, edge=None, headless=True,
                   "--disable-application-cache"]
     if no_proxy:
         flags.append("--no-proxy-server")
+    # 系统代理（本机的 Watt Toolkit 会开）会把 127.0.0.1 也当外部地址转走 →
+    # 浏览器报 ERR_CONNECTION_REFUSED，而命令行里 curl 是通的（很容易误判成
+    # "服务没起来"）。本地回环必须永远绕过代理。
+    flags.append("--proxy-bypass-list=<-loopback>;127.0.0.1;localhost")
     flags += _gpu_flags(gpu)
     flags += ["--hide-scrollbars", "--no-first-run", "--no-default-browser-check",
               "--window-size=%dx%d" % (w, h)]

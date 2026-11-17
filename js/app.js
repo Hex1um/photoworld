@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '3.0.1';
+  const VERSION = '3.0.2';
   /* F6（v2.15.12）：`__PW_BUILD__` 与 VERSION 必须一致，否则 index.html 的
      "过期缓存自检"会每次打开都强制整页重载一次并打 data-stale 标记。
      bump_cache.py 现在两者一起改，这条断言用来在控制台第一时间暴露漂移。 */
@@ -886,6 +886,9 @@
       }
       // 分层规则：名为 backdrop 的层做无视差远景；其余层合并成近景（真视差）
       const farLayers = triLayers.filter((l) => l.name === 'backdrop');
+      /* v3 的"照片天空壳"单独一层（skycap）：它只在出生点与原图对齐，相机一动就是
+         一张悬空的照片卡片。单独拿出来，才能按距离/飞行把它淡掉，而不是连穹顶一起淡。 */
+      const capLayers = triLayers.filter((l) => l.name === 'skycap');
       /* 俯视顶面（v2.6）：从点云生成的高度图，只在**视点高于地形最高点**时才画。
          它不能并进近景层 —— 近景是"朝前的壳"，顶面是一张水平的高度图，
          混在一起会让平视时的轮廓变糊。 */
@@ -903,12 +906,19 @@
          漏了它 → 同一份几何既进 nearMesh（mode 4 照片贴图）又进 topHoleMesh
          （mode 1 无贴图 + 白顶点色）→ 共面 z-fighting，mode 1 那份赢下深度测试时
          就是"侧视一块无纹理浅灰面"（ISSUES #4 的真正根因，不是 solid）。 */
+      /* v3 把"视锥外的地形/地物"单独成一层：
+         · 它有自己的生命（有起伏、顶点色），不该跟着照片壳一起淡出/剔除；
+         · 靠它才能在飞行时把照片壳淡掉之后，世界仍然是连续的地面。 */
+      const terrainLayers = triLayers.filter((l) => l.name === 'far' || l.name === 'prop');
       const nearLayers = triLayers.filter((l) => l.name !== 'backdrop'
+        && l.name !== 'skycap' && l.name !== 'far' && l.name !== 'prop'
         && l.name !== 'top' && l.name !== 'topHole'
         && l.name !== 'ground' && l.name !== 'solid');
       const groundMesh = groundLayers.length ? toMesh(mergeLayers(groundLayers)) : null;
       const topHoleMesh = topHoleLayers.length ? toMesh(mergeLayers(topHoleLayers)) : null;
       const farMesh = farLayers.length ? toMesh(mergeLayers(farLayers)) : null;
+      const capMesh = capLayers.length ? toMesh(mergeLayers(capLayers)) : null;
+      const terrainMesh = terrainLayers.length ? toMesh(mergeLayers(terrainLayers)) : null;
       const nearMesh = nearLayers.length ? toMesh(mergeLayers(nearLayers)) : null;
       const topMesh = topLayers.length ? toMesh(mergeLayers(topLayers)) : null;
       /* topMaxY 的统计已随 F18 一起删除（顶面是常驻绘制，高度阈值不存在了）。 */
@@ -960,13 +970,14 @@
            near / backdrop / solid / ground / top / topHole，
            逐层摘是唯一能给出确定结论的取证方式（指标对这些不敏感）。 */
         meshes: (() => {
-          const m = { relief: nearMesh, backdrop: farMesh, farRidge: null, nearRidge: null,
+          const m = { relief: nearMesh, backdrop: farMesh, skyCap: capMesh,
+            terrain: terrainMesh, farRidge: null, nearRidge: null,
             sky: null, ground: groundMesh, solid: solidMesh, rocks: null, grass: null,
             shrub: null, top: topMesh, topHole: topHoleMesh };
           const hide = (new URLSearchParams(location.search).get('hide') || '')
             .split(',').map((t) => t.trim()).filter(Boolean);
           const map = { near: 'relief', backdrop: 'backdrop', solid: 'solid',
-            ground: 'ground', top: 'top', topHole: 'topHole' };
+            ground: 'ground', top: 'top', topHole: 'topHole', skycap: 'skyCap' };
           for (const h of hide) {
             const k = map[h] || h;
             if (k in m) m[k] = null;
@@ -1040,6 +1051,9 @@
            背面剔除会把整层剔掉 —— 症状是"照片层完全不显示，只看到天空壳"，
            整屏发灰像蒙了一层雾（实测）。v3 一律双面绘制。 */
         w.reliefCull = false;
+        /* 飞行时不摘场景：v3 的几何是真三维表面，仰视时视锥内那块地面只存在于
+           near 层里，按 v2 的做法跳过就会"一起飞全白"。 */
+        w.planKeepsScene = true;
         setHudPipe('v3', 'v3 · 扩散地形');
       }
 
@@ -1309,7 +1323,25 @@
        进入/退出时**显式**摘掉/挂回地面裙边与延伸 tile —— 只靠渲染器里的
        `!world.showPlan` 判断实测没生效（那道 V 形台阶就是裙边），
        这里直接把 mesh 从世界上取下来，不依赖渲染器内部条件。 */
-    const planNow = !!player.state.flying;
+    /* v3：照片天空壳随"离出生点的水平距离"和"是否飞行"淡出（见 renderer 的 skyCap） */
+    if (world.meshes.skyCap) {
+      const d = Math.hypot(player.state.x, player.state.z);
+      const t = Math.min(1, Math.max(0, (d - 1.0) / 4.0));
+      world.skyCapAlpha = (1 - t) * (player.state.flying ? 0 : 1);
+    }
+    /* 飞行时把"照片壳"淡掉：它是从拍摄点投影出来的一层，从上方看就是一堆漂浮的
+       碎片 + 竖向拉丝。12m 起淡、20m 淡完；剩下的地形层是连续的地面。 */
+    if (world.meshes.terrain) {
+      // 用**绝对高度**而不是"离地高度"：heightAt 会把外层地形的起伏算进去，
+      // 在上坡时"离地 12m"其实已经飞了 20m，阈值形同虚设（实测没淡掉）。
+      const t = Math.min(1, Math.max(0, (player.state.y - 6.0) / 8.0));
+      world.shellHide = t * t * (3 - 2 * t);
+    }
+    /* v3 资产**不切俯视 LOD**：v2 那套"飞行就只画顶面 + tile"是因为它的世界是
+       一层朝前的薄壳，从上面看必然是一堆竖条。v3 有真三维地形，切过去反而把
+       near/far 全摘掉 —— 实测一起飞整屏只剩清屏色（"全白"）。
+       这里让 plan 恒为 false，飞行就只是把相机抬高。 */
+    const planNow = !!player.state.flying && !v3meta;
     if (planNow !== world.showPlan) {
       world.showPlan = planNow;
       if (planNow) {

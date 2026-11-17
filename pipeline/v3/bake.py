@@ -71,6 +71,21 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
           f"pitch={math.degrees(cam.pitch):+.2f}° z={np.percentile(z,2):.1f}~{np.percentile(z,98):.0f}m")
 
     t = time.time()
+    # 白条 UV 只跟照片高度有关（贴图底部固定 8px 白条），提前算好给 fill 层用
+    v_scale0 = rgb.shape[0] / float(rgb.shape[0] + common.WHITE_STRIP_PX)
+    cfg["white_v"] = (v_scale0 + 1.0) * 0.5
+    cfg["white_u"] = 0.5
+
+    # 背景板要在 frustum.build 之前算：fill 层要用它的颜色（几何仍用 push-pull 的深度）
+    bg_plate = None
+    if not cfg.get("no_diffusion") and cfg.get("bg_fill", True):
+        t_bg = time.time()
+        sky0 = frustum.sky_mask(rgb, z, cam)
+        fg0 = frustum.foreground_mask(z, sky0)
+        prompt0 = panomod._prompt_from_photo(rgb, cam)
+        bg_plate = panomod.bg_plate(rgb, fg0, prompt0, cam, cfg)
+        print(f"[2.5/6] 背景板（扩散）{time.time()-t_bg:.1f}s  前景 {fg0.mean()*100:.0f}%")
+
     fr = frustum.build(z, rgb, cam, {
         "step": int(cfg.get("step", 3)),
         "cliff": float(cfg.get("cliff", 1.8)),
@@ -81,7 +96,9 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
         "fg_near": float(cfg.get("fg_near", 70.0)),
         "skirt_bg": float(cfg.get("skirt_bg", 0.15)),
         "cliff_bg": float(cfg.get("cliff_bg", 6.0)),
-    })
+        "white_u": cfg.get("white_u", 0.5),
+        "white_v": cfg.get("white_v", 0.9959),
+    }, bg_rgb=bg_plate)
     print(f"[3/6] 视锥内 {time.time()-t:.1f}s  {fr['stats']}")
 
     # 深度用完了：先把 1.3GB 的 DA-V2-Large 放掉，扩散才有足够的显存
@@ -89,6 +106,9 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
         v3depth.unload()
 
     edge, _ = shade.edge_from_near(fr["layers"], bins=terrain.AZ_BINS)
+    floor_y = shade.floor_from_near(fr["layers"], bins=terrain.AZ_BINS)
+    # 地物原型：从照片的前景物体里量轮廓与配色（外面长的东西跟里面同一类）
+    protos = terrain.extract_prototypes(rgb, fr["debug"]["fg"], max_n=3)
     edge_col = shade.ground_edge_color(rgb, bins=terrain.AZ_BINS)
 
     pcfg = {"pano_w": cfg.get("pano_w", 1024), "pano_h": cfg.get("pano_h", 512),
@@ -111,11 +131,14 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
                                    long_side=int(cfg.get("view_size", 448)))
         field = terrain.polar_heightfield(cloud, pn["pano"], cam.eye, near_edge=edge)
         fov_half = cam.hfov * 0.5
-        far = terrain.heightfield_mesh(field, cam.eye, edge, (0.5, 0.5), fov_half=fov_half)
+        far = terrain.heightfield_mesh(field, cam.eye, edge, (0.5, 0.5),
+                                       fov_half=fov_half, floor_y=floor_y,
+                                       seed=int(cfg.get("seed", 0)),
+                                       amp_far=float(cfg.get("relief_amp", 7.0)))
         prop = terrain.props(pn["pano"], field, edge, cam.eye, (0.5, 0.5),
                             seed=int(cfg.get("seed", 0)),
                             density=float(cfg.get("prop_density", 2.0)),
-                            fov_half=fov_half)
+                            fov_half=fov_half, protos=protos)
         dome = terrain.sky_dome(pn["pano"], cam=cam)
         layers_far = [far] + ([prop] if prop else []) + [dome]
         print(f"[5/6] 地形/地物 {time.time()-t:.1f}s  点云 {cloud['pos'].shape[0]} "
@@ -139,6 +162,11 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
     # （实测：侧视里天空穹顶变成一个圆盘，边界肉眼可见）。
     layers_far = [shade.bake_lighting(l, light,
                                       strength=0.0 if l["name"] == "backdrop" else 0.85)
+                  for l in layers_far]
+    # 着色对齐视锥内：用照片**底缘地面色**当目标亮度，只做乘性亮度匹配（不动色相）。
+    # 只对地形/地物做；天空壳用全景自己的渐变。
+    ground_ref = rgb[int(rgb.shape[0] * 0.88):int(rgb.shape[0] * 0.99)].reshape(-1, 3).mean(axis=0)
+    layers_far = [shade.match_to_photo(l, ground_ref) if l["name"] in ("far", "prop") else l
                   for l in layers_far]
     layers_far = [shade.seam_blend(l, edge, edge_col, band=float(cfg.get("seam_band", 28.0)))
                   if l.get("name") == "far" else l for l in layers_far]
@@ -214,6 +242,7 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
         "frustum": fr["stats"],
         "pano": {"prompt": pn["prompt"], "known_frac": pn["known_frac"],
                  "diffusion": not cfg.get("no_diffusion", False)},
+        "prototypes": protos,
         "layers": [{"name": l["name"], "verts": int(l["pos"].shape[0]),
                     "tris": int(l["index"].size // 3)} for l in layers],
         "glb": info, "verify": rep, "light": light,
@@ -255,6 +284,10 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--jpeg", type=int, default=90, help="内嵌照片贴图的 JPEG 质量")
+    ap.add_argument("--no-bg-fill", action="store_true",
+                    help="不跑【前景抠除 + 扩散补背景板】（GPU 慢时用）")
+    ap.add_argument("--relief-amp", type=float, default=7.0,
+                    help="视锥外地形的低频起伏幅度（米，默认 7）")
     ap.add_argument("--pano-from", default=None,
                     help="复用一张已有全景（只重算几何，跳过扩散；A/B 用）")
     ap.add_argument("--cliff", type=float, default=1.8, help="断崖判据（越小切得越狠）")
@@ -274,6 +307,7 @@ def main() -> int:
     cfg = {"step": args.step, "no_diffusion": args.no_diffusion, "prompt": args.prompt,
            "jpeg": args.jpeg, "cliff": args.cliff, "prop_density": args.prop_density,
            "pano_from": args.pano_from,
+           "bg_fill": not args.no_bg_fill, "relief_amp": args.relief_amp,
            "pano_w": args.pano_w, "pano_h": args.pano_w // 2,
            "pano_steps": args.pano_steps, "views": args.views,
            "device": args.device, "seed": args.seed}
@@ -281,6 +315,19 @@ def main() -> int:
     for f in files:
         name = os.path.splitext(os.path.basename(f))[0]
         out = args.out if len(files) == 1 else os.path.join(args.out, name)
+        # 单图模式 "--out 目录" 直接写该目录；如果里面已经有**另一张图**的产物，
+        # 会被静默覆盖（实测踩过：连跑三张不同照片都写到同一个 world.glb，
+        # 后面所有验证看的都是旧资产）。这里至少吵一声。
+        prev = os.path.join(out, "world.json")
+        if os.path.exists(prev):
+            try:
+                old = json.load(open(prev, encoding="utf-8")).get("input", "")
+                newrel = os.path.relpath(f, _ROOT)
+                if old and old != newrel:
+                    print("  [警告] %s 里已有另一张图（%s）的产物，将被覆盖；"
+                          "多图请用 --out <父目录>" % (out, old))
+            except Exception:
+                pass
         try:
             reports.append(bake_one(f, out, cfg))
         except Exception as e:

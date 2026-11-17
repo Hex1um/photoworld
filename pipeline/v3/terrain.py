@@ -172,35 +172,100 @@ def polar_heightfield(cloud: dict, pano: np.ndarray, eye: float,
     dirs[..., 0] *= np.cos(elev)
     dirs[..., 2] *= np.cos(elev)
     col = sample_pano(pano, dirs)
+    # 按方位做中值平滑：每个极坐标格子独立采样全景，就会出现"一列一个色"的竖条纹
+    # （掠射角下尤其明显，实测侧视整片地面是竖条）。同一圈方位上的地面色本来就该
+    # 连续，中值滤波（不吃两侧的树/建筑尖峰）能把条纹压掉又不糊掉大色块。
+    col = ndimage.median_filter(col, size=(7, 1, 1), mode="wrap").astype(np.float32)
     return {"H": H, "r": r_grid, "color": col}
+
+
+
+def add_relief(H: np.ndarray, r_grid: np.ndarray, seed: int = 0,
+               amp_far: float = 14.0, amp_mid: float = 5.0,
+               flat_r: float = 10.0, full_r: float = 70.0,
+               details: list | None = None) -> np.ndarray:
+    """给极坐标高度场加**低频起伏**，让视锥外读起来是"地形"而不是一块平板。
+
+    为什么必须加（用户反馈 + 参考图）：现在的视锥外高度场来自"扩散全景 → 深度"，
+    大面积平地/水面时几乎没有信号，于是整个世界外面是一张水平板 —— 一起飞就是
+    一整屏纯色（"全白"），侧看也没有远近层次。参考图里那种雪原丘陵，本质是
+    **低频 fBm + 柔和明暗**，这跟真实高度场可以叠加。
+
+    约束：
+      * 近处（<flat_r）振幅≈0 —— 脚下要平，玩家在上面走（heightAt 还是用 near 层）；
+      * 远处（>full_r）到 amp_far，形成起伏的天际线；
+      * 起伏只加在 y 上，不影响"照片区域内必须被 near 层压住"这件事（外层本来
+        就被 conform_to_photo 推到照片表面之后）。
+    """
+    rng = np.random.default_rng(seed)
+    # 用几组不同方向的平面波叠加代替严格 fBm：无边界的周期性伪影更少，代价是
+    # 不是自相似的，但视觉上足够"丘陵"。
+    waves = []
+    # 波长 130 / 62 / 27 / 12 / 6m：最细那档负责"近处也有起伏"，
+    # 否则 20m 高度往下看就是一张平板（实测整屏纯色）。
+    for (freq, amp, _s) in ((0.0075, 1.00, 0), (0.016, 0.62, 1),
+                            (0.037, 0.34, 2), (0.085, 0.20, 3),
+                            (0.17, 0.10, 4)):
+        th = float(rng.uniform(0, 2 * math.pi))
+        ph = float(rng.uniform(0, 2 * math.pi))
+        waves.append((math.cos(th), math.sin(th), freq, amp, ph))
+
+    A = ((np.arange(H.shape[0]) + 0.5) / H.shape[0] - 0.5) * 2 * math.pi
+    AA, RR = np.meshgrid(A, r_grid, indexing="ij")
+    X = RR * np.sin(AA)
+    Z = -RR * np.cos(AA)
+
+    n = np.zeros_like(H, dtype=np.float32)
+    for (kx, kz, freq, amp, ph) in waves:
+        n += amp * np.sin((X * kx + Z * kz) * freq * 2 * math.pi + ph)
+    n /= sum(w[3] for w in waves)
+
+    # 幅度随半径增长：近处平（可走），中景起伏，远景起伏更大
+    ramp = np.clip((RR - flat_r) / max(1.0, (full_r - flat_r)), 0.0, 1.0)
+    ramp = ramp * ramp * (3 - 2 * ramp)
+    amp = amp_mid + (amp_far - amp_mid) * np.clip((RR - full_r) / 260.0, 0.0, 1.0)
+    H2 = (H + n * ramp * amp).astype(np.float32)
+    return H2
 
 
 def heightfield_mesh(field: dict, eye: float, near_edge: np.ndarray | None,
                      uv_white: tuple[float, float],
-                     fov_half: float = math.pi / 3) -> dict:
+                     fov_half: float = math.pi / 3,
+                     floor_y: np.ndarray | None = None,
+                     seed: int = 0, amp_far: float = 7.0) -> dict:
     """极坐标高度场 → 三角网格（顶点色走白条 UV）。"""
     H, r_grid, col = field["H"], field["r"], field["color"]
     A = ((np.arange(AZ_BINS) + 0.5) / AZ_BINS - 0.5) * 2 * math.pi
     AA, RR = np.meshgrid(A, r_grid, indexing="ij")
     X = RR * np.sin(AA)
     Z = -RR * np.cos(AA)
-    P = np.stack([X, H - 0.2, Z], axis=-1).reshape(-1, 3).astype(np.float32)
 
-    # 视锥内（照片覆盖的范围）**不铺地形**。
-    # 试过在这里填一张 y=-0.2 的地板来消掉侧视露底，结果原点视角崩了：
-    # 深度在近处常被高估（湖面给 100m），那个像素的真实表面落到 y=-3，
-    # 地板（-0.4）反而更近，把湖面整片盖住 —— PSNR 50.5 → 10.1dB。
-    # 所以这里只能挖洞；"侧视露底"靠 near 层自己的裙边（沿射线向后挤出厚度）去补。
+    # 视锥内（照片足迹）铺一张地板：一起飞、一侧身，脚下都有地面。
+    # 地板高度取该方位上照片表面的低位（p20）再减 0.4m，所以它永远在照片表面之下；
+    # 原点视角由 conform_to_photo 把它压到照片背后，保真度不变。
     valid = np.ones((AZ_BINS, R_BINS), dtype=bool)
-    if near_edge is not None:
+    if near_edge is not None and floor_y is not None:
         for i in range(AZ_BINS):
             if abs(A[i]) > fov_half * 1.06:
                 continue
             e = near_edge[i]
-            if np.isfinite(e):
-                # 留 3m 重叠带避免边界处出现一条缝
-                valid[i, r_grid < e + 3.0] = False
+            if not np.isfinite(e):
+                continue
+            fy = float(floor_y[i])
+            inner = r_grid < e
+            H[i, inner] = fy
+            band = (r_grid >= e) & (r_grid < e + 18.0)
+            t = ((r_grid[band] - e) / 18.0).astype(np.float32)
+            H[i, band] = fy * (1.0 - t) + H[i, band] * t
     H = np.where(np.isfinite(H), H, np.nan).astype(np.float32)
+
+    # 低频起伏：不加就是一块平板（一起飞整屏纯色）。
+    # 注意必须在**地板填充之后**做，否则足迹内仍然是平的。
+    H = add_relief(H, r_grid, seed=int(seed), amp_far=float(amp_far))
+
+    # 顶点必须在 H 定稿之后再取 —— 之前这里写在地板/起伏之前，
+    # 结果"地板和起伏都算了但没进几何"，一起飞还是整屏纯色（实测踩了一轮）。
+    P = np.stack([X, H - 0.2, Z], axis=-1).reshape(-1, 3).astype(np.float32)
 
     a = np.arange(AZ_BINS)[:, None]
     b = (a + 1) % AZ_BINS
@@ -241,11 +306,112 @@ def _normals(P: np.ndarray, tri: np.ndarray, eye: float) -> np.ndarray:
     return n.astype(np.float32)
 
 
+# --------------------------------------------------------------------------- 地物原型
+
+def extract_prototypes(rgb: np.ndarray, fg: np.ndarray, max_n: int = 3,
+                       rows: int = 8) -> list[dict]:
+    """从照片的**前景物体**里提取"地物原型"：轮廓宽度剖面 + 上下两段配色。
+
+    为什么要这么做（用户原话：视锥外的地物要模拟视锥内的地物）：
+    之前外面撒的是统一的圆锥树，跟照片里到底是什么无关 —— 沙漠里长针叶林、
+    雪原上长热带树都可能发生。这里直接从照片里量：
+      * `profile[k]`：把它按高度切成 8 段，每段占该物体最宽处的比例 → 形状；
+      * `color_top/bottom`：上段/下段的中位色 → 配色（树冠/树干、岩石/苔藓）。
+    外面按这些原型成比例地复制，颜色也来自照片，于是"外面长的东西跟里面是同一类"。
+    """
+    from scipy import ndimage as _nd
+
+    lab, n = _nd.label(fg)
+    if n == 0:
+        return []
+    sizes = _nd.sum(fg, lab, range(1, n + 1))
+    order = np.argsort(sizes)[::-1][:max_n]
+    h_img, w_img = fg.shape
+    out = []
+    for oi in order:
+        idx = int(oi) + 1
+        if sizes[oi] < 0.004 * fg.size:
+            continue
+        ys, xs = np.nonzero(lab == idx)
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        if (y1 - y0) < 8 or (x1 - x0) < 6:
+            continue
+        m = (lab[y0:y1, x0:x1] == idx)
+        hh, ww = m.shape
+        prof = np.zeros(rows, dtype=np.float32)
+        for k in range(rows):
+            a = int(hh * k / rows)
+            b = max(a + 1, int(hh * (k + 1) / rows))
+            row = m[a:b]
+            prof[k] = float(row.sum()) / max(1, row.shape[1])   # 该段平均覆盖率
+        if prof.max() < 0.05:
+            continue
+        prof = prof / prof.max()
+        crop = rgb[y0:y1, x0:x1]
+        sel = m
+        top = crop[: max(1, hh // 3)][sel[: max(1, hh // 3)]]
+        bot = crop[-max(1, hh // 3):][sel[-max(1, hh // 3):]]
+        c_top = np.median(top, axis=0) if top.size else crop[sel].mean(axis=0)
+        c_bot = np.median(bot, axis=0) if bot.size else crop[sel].mean(axis=0)
+        out.append({
+            "aspect": float(hh) / max(1.0, float(ww)),   # 高宽比：决定"细高"还是"矮胖"
+            "profile": [round(float(v), 3) for v in prof],
+            "color_top": [round(float(v), 3) for v in np.clip(c_top, 0, 1)],
+            "color_bottom": [round(float(v), 3) for v in np.clip(c_bot, 0, 1)],
+            "px": int(hh),
+        })
+    return out
+
+
+def _profiled_body(x: float, y: float, z: float, w_rad: float, hgt: float,
+                   prof: list, c_top: np.ndarray, c_bot: np.ndarray,
+                   rng, sides: int = 7) -> tuple:
+    """按轮廓剖面挤出的一根"柱体"：每层半径跟着剖面的宽度走。
+
+    比圆锥多花的代价很小（7 边 × 8 层 ≈ 100 三角），但轮廓像照片里的东西：
+    上窄下宽、有分叉感的树，而不是一个整齐的锥子。
+    """
+    rows = len(prof)
+    ang = np.linspace(0, 2 * math.pi, sides, endpoint=False) + rng.uniform(0, 1)
+    verts, cols = [], []
+    for k in range(rows):
+        t = (k + 0.5) / rows                        # 0 = 底部
+        rad = max(0.04, float(prof[k])) * w_rad
+        yy = y + hgt * t
+        ring = np.stack([x + rad * np.cos(ang), np.full(sides, yy),
+                         z + rad * np.sin(ang)], axis=1)
+        verts.append(ring)
+        c = c_bot * (1.0 - t) + c_top * t
+        cols.append(np.tile(np.concatenate([c, [1.0]]).astype(np.float32), (sides, 1)))
+    top = np.array([[x, y + hgt, z]])
+    verts.append(top)
+    cols.append(np.tile(np.concatenate([c_top, [1.0]]).astype(np.float32), (1, 1)))
+    P = np.concatenate(verts).astype(np.float32)
+    C = np.concatenate(cols).astype(np.float32)
+
+    F = []
+    for k in range(rows - 1):
+        a0 = k * sides
+        b0 = (k + 1) * sides
+        for s in range(sides):
+            s2 = (s + 1) % sides
+            F.append([a0 + s, a0 + s2, b0 + s2])
+            F.append([a0 + s, b0 + s2, b0 + s])
+    last = (rows - 1) * sides
+    apex = rows * sides
+    for s in range(sides):
+        F.append([last + s, last + (s + 1) % sides, apex])
+    # 不封底：地物都站在地面上，底面永远看不到（封底会产生退化三角形）
+    return P, np.array(F, dtype=np.uint32), C
+
+
 # --------------------------------------------------------------------------- 地物
 
 def props(pano: np.ndarray, field: dict, near_edge: np.ndarray | None, eye: float,
           uv_white: tuple[float, float], seed: int = 0,
-          density: float = 1.0, fov_half: float = math.pi / 3) -> dict | None:
+          density: float = 1.0, fov_half: float = math.pi / 3,
+          protos: list | None = None) -> dict | None:
     """按方位撒树/石：颜色取自全景，位置落在高度场上。
 
     不做实例分割：视锥外没有真值，实例化只增加成本；这里要的是
@@ -291,13 +457,25 @@ def props(pano: np.ndarray, field: dict, near_edge: np.ndarray | None, eye: floa
             # 树高随距离略增（远处要能看见），近处不超过 12m
             hgt = float(np.clip(rng.uniform(3.0, 7.5) * (1.0 + rr / 400.0), 2.5, 11.0))
             rad = hgt * float(rng.uniform(0.16, 0.26))
-            c = np.clip(col[i, j] * np.array([0.85, 0.95, 0.85], np.float32), 0, 1)
-            v, f, cc = _cone(px, y, pz, rad, hgt, c, rng)
+            if protos:
+                pr = protos[int(rng.integers(0, len(protos)))]
+                aspect = float(np.clip(pr["aspect"], 0.6, 6.0))
+                prof = pr["profile"]
+                hh = hgt * float(rng.uniform(0.8, 1.25))
+                ww = max(0.35, hh / aspect) * 0.5
+                v, f, cc = _profiled_body(
+                    px, y, pz, ww, hh, prof,
+                    np.asarray(pr["color_top"], np.float32),
+                    np.asarray(pr["color_bottom"], np.float32), rng)
+            else:
+                c = np.clip(col[i, j] * np.array([0.85, 0.95, 0.85], np.float32), 0, 1)
+                v, f, cc = _cone(px, y, pz, rad, hgt, c, rng)
             verts.append(v); cols.append(cc); tris.append(f + base)
             base += v.shape[0]
             if rng.random() < 0.12:                     # 少量石块
+                rc = np.clip(col[i, j] * 0.8, 0, 1)     # 有原型时 c 不存在，单独取色
                 v2, f2, c2 = _rock(px + rng.normal(0, 1.4), y, pz + rng.normal(0, 1.4),
-                                   rng.uniform(0.4, 1.1), c * 0.8, rng)
+                                   rng.uniform(0.4, 1.1), rc, rng)
                 verts.append(v2); cols.append(c2); tris.append(f2 + base)
                 base += v2.shape[0]
 
@@ -360,6 +538,15 @@ def sky_dome(pano: np.ndarray, radius: float = 920.0, az_bins: int = 192,
     dirs = np.stack([np.sin(AA) * np.cos(LL), np.sin(LL), -np.cos(AA) * np.cos(LL)], axis=-1)
     P = (dirs * radius + np.array([0.0, 0.0, 0.0])).reshape(-1, 3).astype(np.float32)
     col = sample_pano(pano, dirs)
+
+    # 去掉"方位向的亮斑"：扩散出来的全景里，太阳附近是一大团亮区，直接贴到穹顶上
+    # 就是**视线中心那个大圆圈**（用户一眼就指出来了）。做法：每个纬度带取方位中值
+    # 作为该带的基色，再用**限幅后**的相对偏差做微弱的方位变化。
+    # 天空本来就该是"竖直渐变 + 一点点色相偏移"，不该有一坨亮斑。
+    band = np.median(col, axis=0, keepdims=True)          # (1, lat, 3)
+    dev = np.clip(col / np.maximum(band, 1e-3) - 1.0, -0.10, 0.10) * 0.45
+    col = np.clip(band * (1.0 + dev), 0.0, 1.0).astype(np.float32)
+
     C = np.concatenate([col.reshape(-1, 3), np.ones((P.shape[0], 1), np.float32)], axis=1)
 
     a = np.arange(az_bins)[:, None]
