@@ -169,7 +169,9 @@ def _dist(pos: np.ndarray, eye: np.ndarray) -> np.ndarray:
 def grid_mesh(pos: np.ndarray, valid: np.ndarray, uv: np.ndarray,
               dirs: np.ndarray, eye: np.ndarray, color: np.ndarray | None = None,
               cliff: float = 1.8, skirt: float = 0.30,
-              skirt_mask: np.ndarray | None = None) -> dict:
+              skirt_mask: np.ndarray | None = None,
+              safe_mask: np.ndarray | None = None,
+              safe_uv: np.ndarray | None = None) -> dict:
     """规则像素网格 → 无洞、带厚度的曲面（断崖用双四边形，见模块文档）。"""
     h, w = valid.shape
     eye = np.asarray(eye, dtype=np.float32)
@@ -195,6 +197,7 @@ def grid_mesh(pos: np.ndarray, valid: np.ndarray, uv: np.ndarray,
 
     flat_cells = ok4 & (ratio <= cliff)
     split_cells = ok4 & (ratio > cliff)
+    edge_fixed = 0
 
     tri = np.concatenate([
         np.stack([a[flat_cells], b[flat_cells], c[flat_cells]], axis=1),
@@ -207,7 +210,16 @@ def grid_mesh(pos: np.ndarray, valid: np.ndarray, uv: np.ndarray,
         ys = np.stack([ci, ci, ci + 1, ci + 1], axis=1)
         xs = np.stack([cj, cj + 1, cj + 1, cj], axis=1)
         cdir = dirs[ys, xs]
-        cuv = uv[ys, xs]
+        cuv = uv[ys, xs].copy()
+        # P0-2：断崖格四角若落在天空/无深度像素上，逐角插值会把天空色拖到
+        # 山脊轮廓（1px 青边）。只把**被污染的那一个角**的 UV 换成最近的前景
+        # 内部像素；不整格替换（整格取最近角会把 PSNR 从 48.2 打到 29.5dB）。
+        edge_fixed = 0
+        if safe_mask is not None and safe_uv is not None:
+            bad = ~safe_mask[ys, xs]
+            edge_fixed = int(bad.sum())
+            if edge_fixed:
+                cuv[bad] = safe_uv[ys[bad], xs[bad]]
         zn = dmin[split_cells][:, None, None]
         zf = dmax[split_cells][:, None, None]
         # 逐角保留各自的 UV。试过"整格取最近角的颜色"来消山脊上的青边，
@@ -295,7 +307,7 @@ def grid_mesh(pos: np.ndarray, valid: np.ndarray, uv: np.ndarray,
     return {"pos": P.astype(np.float32), "nrm": nrm, "uv": UV.astype(np.float32),
             "color": None if C is None else C.astype(np.float32),
             "index": np.ascontiguousarray(tri.astype(np.uint32)),
-            "split_cells": int(split_cells.sum())}
+            "split_cells": int(split_cells.sum()), "edge_fixed": edge_fixed}
 
 
 def _grid_normals(P: np.ndarray, tri: np.ndarray, eye: np.ndarray) -> np.ndarray:
@@ -341,6 +353,14 @@ def build(z: np.ndarray, rgb: np.ndarray, cam: common.Camera3, cfg: dict,
     # 背景层压在前景上（实测 near+fill 从 48.5dB 掉到 30.6dB）。
     z_bg = np.maximum(z_bg, z_snap * 1.02).astype(np.float32)
     src = nearest_source(valid_bg)
+    # P0-2：前景内部（腐蚀 1px）作为断崖角的安全取色源。
+    # 只有"完全落在前景内部"的像素才允许把自己的 UV 用在断崖角上；
+    # 边缘 1px（可能混入天空色）改用最近内部像素的 UV。
+    core = (~sky) & np.isfinite(z_snap)
+    if int(cfg.get("edge_erode", 1)) > 0:
+        core = ndimage.binary_erosion(core, iterations=int(cfg.get("edge_erode", 1)))
+    src_core = nearest_source(core)
+    uv_core = uv_photo.reshape(-1, 2)[src_core].reshape(h, w, 2)
 
     def sub(a: np.ndarray) -> np.ndarray:
         return a[::step, ::step]
@@ -361,7 +381,8 @@ def build(z: np.ndarray, rgb: np.ndarray, cam: common.Camera3, cfg: dict,
     layers = []
     near = grid_mesh(sub(pos), sub(~sky), sub(uv_near), sub(dirs), eye,
                      cliff=float(cfg.get("cliff", 1.8)),
-                     skirt=float(cfg.get("skirt", 0.30)))
+                     skirt=float(cfg.get("skirt", 0.30)),
+                     safe_mask=sub(core), safe_uv=sub(uv_core))
     near["name"] = "near"
     if near["index"].size:
         layers.append(near)
@@ -406,6 +427,7 @@ def build(z: np.ndarray, rgb: np.ndarray, cam: common.Camera3, cfg: dict,
         "verts": int(sum(l["pos"].shape[0] for l in layers)),
         "tris": int(sum(l["index"].size // 3 for l in layers)),
         "step": step,
+        "edge_fixed": int(near.get("edge_fixed", 0)),
     }
     return {"layers": layers, "stats": stats,
             "debug": {"sky": sky, "fg": fg, "z_snap": z_snap, "z_bg": z_bg,

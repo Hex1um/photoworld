@@ -79,6 +79,37 @@ def photo_to_equirect(rgb: np.ndarray, cam: common.Camera3,
     return pano, inside
 
 
+def align_horizon(pano: np.ndarray, known: np.ndarray,
+                  target_row: float | None = None, max_shift_frac: float = 0.04,
+                  strength: float = 1.0, feather_frac: float = 0.03) -> tuple[np.ndarray, np.ndarray]:
+    """P1-2：把扩散出来的地平线拉回全景的真实地平线（等距柱状图 lat=0 → 中间行）。
+
+    做法不是重画，而是**逐列纵向平移生成区**：在目标行 ±max_shift 内找垂直亮度
+    梯度最大的行当作生成地平线，算出位移；已知区权重 0（逐像素还原的硬要求
+    不变），离已知区越远权重越大，避免接缝处出现新断层。
+    """
+    h, w = pano.shape[:2]
+    target = float(h) * 0.5 if target_row is None else float(target_row)
+    max_shift = max(2, int(round(h * max_shift_frac)))
+    lum = np.asarray(pano, np.float32) @ np.array([0.299, 0.587, 0.114], np.float32)
+    sm = ndimage.gaussian_filter1d(lum, 2.0, axis=0)
+    grad = np.abs(np.diff(sm, axis=0))
+    lo, hi = max(0, int(target) - max_shift), min(h - 2, int(target) + max_shift)
+    if hi <= lo:
+        return pano, np.zeros(w, np.float32)
+    peak = lo + np.argmax(grad[lo:hi + 1], axis=0)
+    shift = np.clip(target - peak, -max_shift, max_shift) * float(strength)
+
+    dist = ndimage.distance_transform_edt(~known)
+    wgt = np.clip(dist / max(1.0, h * feather_frac), 0.0, 1.0)[..., None]
+    ys = np.arange(h, dtype=np.int32)[:, None]
+    src_y = np.clip(ys - np.rint(shift[None, :]).astype(np.int32), 0, h - 1)
+    src_y3 = np.repeat(src_y[:, :, None], pano.shape[2], axis=2)
+    warped = np.take_along_axis(pano, src_y3, axis=0)
+    out = pano * (1.0 - wgt) + warped * wgt
+    return np.clip(out, 0, 1).astype(np.float32), shift.astype(np.float32)
+
+
 def _prompt_from_photo(rgb: np.ndarray, cam: common.Camera3) -> str:
     """从照片统计推提示词。不写死题材：这套管线要吃任意风景/室内照。"""
     h = rgb.shape[0]
@@ -278,8 +309,18 @@ def build(rgb: np.ndarray, cam: common.Camera3, cfg: dict) -> dict:
         except Exception:
             pass
 
+    # P1-2：扩散模型自己决定地平线高度，和照片/等距柱状图的真实地平线（中间行）
+    # 未必一致，接缝处会出现高度台阶。只在生成区逐列做小幅纵向对齐，已知区权重 0。
+    hshift = np.zeros(pw, dtype=np.float32)
+    if cfg.get("horizon_align", True) and cache_hit not in ("none",):
+        full, hshift = align_horizon(
+            full, known,
+            strength=float(cfg.get("horizon_strength", 1.0)),
+            max_shift_frac=float(cfg.get("horizon_max_shift", 0.04)))
+
     # 无论全景从哪来，**已知区都逐像素还原成原图**：
     # 复用缓存/外部全景不能把"视锥内必须等于原图"这条硬要求弄丢。
     full = np.where(known[..., None], pano0, full).astype(np.float32)
     return {"pano": full, "known": known, "prompt": prompt,
-            "known_frac": float(known.mean()), "cache": cache_hit}
+            "known_frac": float(known.mean()), "cache": cache_hit,
+            "horizon_shift_med": float(np.median(np.abs(hshift))) if hshift.size else 0.0}

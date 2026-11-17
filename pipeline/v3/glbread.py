@@ -32,8 +32,13 @@ def load(path: str) -> dict:
         v = js["bufferViews"][a["bufferView"]]
         start = v.get("byteOffset", 0) + a.get("byteOffset", 0)
         n = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}[a["type"]]
-        ct = {5126: np.float32, 5125: np.uint32, 5123: np.uint16}[a["componentType"]]
+        ct = {5126: np.float32, 5125: np.uint32, 5123: np.uint16,
+              5122: np.int16, 5121: np.uint8}[a["componentType"]]
         arr = np.frombuffer(bin_, dtype=ct, count=a["count"] * n, offset=start)
+        if a.get("normalized"):
+            # glTF 规范化整数：POSITION/NORMAL=INT16→[-1,1]，UV=UINT16、COLOR=UINT8→[0,1]
+            arr = arr.astype(np.float64) / {
+                5122: 32767.0, 5123: 65535.0, 5121: 255.0}[a["componentType"]]
         return arr.reshape(-1, n) if n > 1 else arr
 
     layers = []

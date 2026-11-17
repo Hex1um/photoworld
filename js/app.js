@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '3.0.2';
+  const VERSION = '3.0.3';
   /* F6（v2.15.12）：`__PW_BUILD__` 与 VERSION 必须一致，否则 index.html 的
      "过期缓存自检"会每次打开都强制整页重载一次并打 data-stale 标记。
      bump_cache.py 现在两者一起改，这条断言用来在控制台第一时间暴露漂移。 */
@@ -632,6 +632,7 @@
       if (document.body) {
         document.body.dataset.ready = '1';
         document.body.dataset.mode = world.mode;
+        document.body.dataset.pipe = 'v2';
         document.body.dataset.expo = (world.exposure || 0).toFixed(3);
         if (objInfo) document.body.dataset.objects = objInfo.labels.slice(0, 8).join(',');
         if (sem) {
@@ -1033,6 +1034,7 @@
         player.state.pitch = asset.camera.pitch;
       }
       if (v3meta) {
+        if (document.body) document.body.dataset.pipe = 'v3';
         if (v3meta.bbox) {
           /* 包围盒要**外扩 8m**：v3 的世界全部在相机前方（z ≤ -1），
              而玩家出生在 z=0 —— 不扩的话出生点就算"在壳外 0.96m"，
@@ -1864,7 +1866,24 @@
       if (sameOrigin) {
         const nm = q.get('name') || src.split('/').pop().replace(/\.[a-z0-9]+$/i, '');
         imgStarted = true;
-        setTimeout(() => enterWorld({ id: 'corpus:' + nm, name: nm, sub: '语料 · 批量质检', src: src }), 120);
+        /* P0-1：?pipe=v3 让 ?img= 走离线 v3 GLB，而不是服务端 v2 六层资产。
+           约定路径 out/v3/worlds/<name>/world.glb（与 tools/v3_sweep.py / start_v3.bat
+           的烘焙目录一致）。没有预烘资产时自动回退在线 v2，绝不把页面卡死。 */
+        if (q.get('pipe') === 'v3') {
+          const v3glb = 'out/v3/worlds/' + encodeURIComponent(nm) + '/world.glb';
+          fetch(v3glb, { method: 'HEAD' }).then((r) => {
+            if (r.ok) enterAsset(v3glb);
+            else {
+              console.warn('?pipe=v3 找不到 ' + v3glb + '，回退 v2 在线路径');
+              enterWorld({ id: 'corpus:' + nm, name: nm, sub: '语料 · 批量质检', src: src });
+            }
+          }).catch(() => {
+            console.warn('?pipe=v3 探测失败，回退 v2 在线路径');
+            enterWorld({ id: 'corpus:' + nm, name: nm, sub: '语料 · 批量质检', src: src });
+          });
+        } else {
+          setTimeout(() => enterWorld({ id: 'corpus:' + nm, name: nm, sub: '语料 · 批量质检', src: src }), 120);
+        }
       } else if (src) {
         console.warn('?img= 只接受同源相对路径，已忽略：' + src);
       }
