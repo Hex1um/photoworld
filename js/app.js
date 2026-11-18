@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '3.1.1';
+  const VERSION = '3.1.2';
   /* F6（v2.15.12）：`__PW_BUILD__` 与 VERSION 必须一致，否则 index.html 的
      "过期缓存自检"会每次打开都强制整页重载一次并打 data-stale 标记。
      bump_cache.py 现在两者一起改，这条断言用来在控制台第一时间暴露漂移。 */
@@ -1375,9 +1375,11 @@
          走到 10m 外淡完，飞行 8~14m 淡完 —— 之后再留着它只会露出"位移曲面被拉伸"
          的行拉丝（单视图重建的固有问题）。淡出之后看到的是同一片地方的全景地形，
          不是另一个世界，也不是空白。 */
+      /* 淡出窗口要和飞行上限对齐：上限 12m，如果 14m 才淡完，玩家停在上限时永远是
+         半透明叠加（照片壳与地形叠成"双影"）。这里 6m 起淡、12m 淡完。 */
       const dShell = Math.hypot(player.state.x, player.state.z);
       const tD = Math.min(1, Math.max(0, (dShell - 3.0) / 7.0));
-      const tH = Math.min(1, Math.max(0, (player.state.y - 8.0) / 6.0));
+      const tH = Math.min(1, Math.max(0, (player.state.y - 6.0) / 6.0));
       const t = Math.max(tD, tH);
       world.shellHide = t * t * (3 - 2 * t);
     }

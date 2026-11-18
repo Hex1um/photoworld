@@ -579,9 +579,11 @@ def sky_dome(pano: np.ndarray, radius: float = 920.0, az_bins: int = 192,
     # 就是**视线中心那个大圆圈**（用户一眼就指出来了）。做法：每个纬度带取方位中值
     # 作为该带的基色，再用**限幅后**的相对偏差做微弱的方位变化。
     # 天空本来就该是"竖直渐变 + 一点点色相偏移"，不该有一坨亮斑。
+    # 纯**竖直渐变**：只保留每个纬度带的方位中值，方位偏差一律不要。
+    # 上一版还留了 ±4.5% 的方位偏差，实测那一点点残余在山脊上方就是一团可见的亮斑
+    # （用户反复指出的"视线中心大圆圈"）。天空按定义就只该随仰角变化。
     band = np.median(col, axis=0, keepdims=True)          # (1, lat, 3)
-    dev = np.clip(col / np.maximum(band, 1e-3) - 1.0, -0.10, 0.10) * 0.45
-    col = np.clip(band * (1.0 + dev), 0.0, 1.0).astype(np.float32)
+    col = np.clip(np.broadcast_to(band, col.shape), 0.0, 1.0).astype(np.float32)
 
     C = np.concatenate([col.reshape(-1, 3), np.ones((P.shape[0], 1), np.float32)], axis=1)
 

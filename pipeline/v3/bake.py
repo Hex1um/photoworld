@@ -89,9 +89,10 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
     fr = frustum.build(z, rgb, cam, {
         "step": int(cfg.get("step", 3)),
         "cliff": float(cfg.get("cliff", 1.8)),
-        # 裙边加厚到 0.9：沿射线的挤出是投影不变的，加厚只影响侧/背视的"实体感"，
-        # 不影响原点视角（实测 0.30 → 0.9 时 psnr_core 不变）。
-        "skirt": float(cfg.get("skirt", 0.90)),
+        # 裙边回到 0.35：加厚（0.9）确实让侧看更"实"，但裙边是用边界像素的 UV 挤出来的，
+        # 俯视时那一圈会变成**竖条拉丝**（投影纹理只会夹到照片边缘色）。0.35 足够挡住
+        # 壳的背面，又不至于在俯视图里拉出一整片条纹。
+        "skirt": float(cfg.get("skirt", 0.35)),
         # 下面三个默认值就是 v3 的推荐值；参数搜索（tools/v3_sweep.py）会覆盖它们
         "ground_tol": float(cfg.get("ground_tol", 0.40)),
         "sky_grad": float(cfg.get("sky_grad", 0.045)),
