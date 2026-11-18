@@ -212,6 +212,16 @@
       const bobTarget = speed > 0.4 ? Math.sin(state.phase) * 0.045 * Math.min(speed / 4.5, 1.4) : 0;
       state.bob = lerp(state.bob, bobTarget, 1 - Math.exp(-12 * dt));
 
+      /* v3：把水平活动范围锁在出生点周围（单视图重建只在拍摄点附近成立） */
+      if (world && typeof world.moveRadius === 'number') {
+        const r = Math.hypot(state.x, state.z);
+        if (r > world.moveRadius) {
+          const k = world.moveRadius / r;
+          state.x *= k; state.z *= k;
+          state.vx = 0; state.vz = 0;
+        }
+      }
+
       const groundY = world.heightAt(state.x, state.z);
       const eyeH = (state.eyeOverride === null || state.eyeOverride === undefined) ? EYE : state.eyeOverride;
       const floorY = groundY + eyeH;

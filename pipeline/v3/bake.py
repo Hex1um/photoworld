@@ -92,7 +92,9 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
         # 裙边回到 0.35：加厚（0.9）确实让侧看更"实"，但裙边是用边界像素的 UV 挤出来的，
         # 俯视时那一圈会变成**竖条拉丝**（投影纹理只会夹到照片边缘色）。0.35 足够挡住
         # 壳的背面，又不至于在俯视图里拉出一整片条纹。
-        "skirt": float(cfg.get("skirt", 0.35)),
+        # 裙边收到 0.06：它沿射线挤出、UV 取边界像素，转身 180° 时那圈侧壁正对着
+        # 相机 → 一片竖条拉丝（对比图"转身 180°"那格）。0.06 只够挡住壳的边缘。
+        "skirt": float(cfg.get("skirt", 0.06)),
         # 下面三个默认值就是 v3 的推荐值；参数搜索（tools/v3_sweep.py）会覆盖它们
         "ground_tol": float(cfg.get("ground_tol", 0.40)),
         "sky_grad": float(cfg.get("sky_grad", 0.045)),
@@ -118,7 +120,12 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
             "pano_steps": cfg.get("pano_steps", 20), "seed": cfg.get("seed", 0),
             "no_diffusion": cfg.get("no_diffusion", False),
             "prompt": cfg.get("prompt"), "pano_from": cfg.get("pano_from"),
-            "cache_dir": cfg.get("cache_dir")}
+            "cache_dir": cfg.get("cache_dir"),
+            # 全景生成方式必须一起传下去：漏了它 build() 会走默认的单次 inpaint
+            # （实测就是"传了 --pano-mode views 却打印 generated"）。
+            "pano_w": int(cfg.get("pano_w", 1024)), "pano_h": int(cfg.get("pano_h", 512)),
+            "pano_mode": cfg.get("pano_mode"), "pano_views": cfg.get("pano_views", 6),
+            "pano_cfg": cfg.get("pano_cfg", 5.2)}
     # 逐视角高度偏差由 diffusion 分支里的 point_cloud(reconcile) 算出；
     # 必须在分支前给默认值，否则 report 里的 terrain.view_bias 恒为空。
     view_bias: dict = {}
@@ -301,6 +308,12 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--jpeg", type=int, default=90, help="内嵌照片贴图的 JPEG 质量")
+    # views（多视角分段）暂时是**实验开关**：本机缓存的只有 SDXL-**inpaint** 管线，
+    # 它的 __call__ 不接受 strength，mask 全白时等于纯文生图 —— 视角图跟参考图无关，
+    # 拼回来就是满屏竖条（实测）。要真正用它，得再下一份 img2img 管线权重。
+    ap.add_argument("--pano-mode", choices=["eq", "views"], default="eq",
+                    help="全景生成方式：eq=一次 inpaint（默认）；views=多视角分段（实验）")
+    ap.add_argument("--pano-views", type=int, default=6, help="多视角分段的数量")
     ap.add_argument("--no-bg-fill", action="store_true",
                     help="不跑【前景抠除 + 扩散补背景板】（GPU 慢时用）")
     ap.add_argument("--relief-amp", type=float, default=7.0,
@@ -331,6 +344,8 @@ def main() -> int:
            "jpeg": args.jpeg, "cliff": args.cliff, "prop_density": args.prop_density,
            "pano_from": args.pano_from,
            "bg_fill": not args.no_bg_fill, "relief_amp": args.relief_amp,
+           "pano_mode": args.pano_mode, "pano_views": args.pano_views,
+           # 等距柱状图固定 2:1，高度由宽度推出来
            "pano_w": args.pano_w, "pano_h": args.pano_w // 2,
            "pano_steps": args.pano_steps, "views": args.views,
            "device": args.device, "seed": args.seed,

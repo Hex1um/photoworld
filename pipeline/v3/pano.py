@@ -343,6 +343,17 @@ def build(rgb: np.ndarray, cam: common.Camera3, cfg: dict) -> dict:
         full, cache_hit = _load(cache_path), "cache"
     elif cfg.get("no_diffusion"):
         full, cache_hit = pano0, "none"
+    elif cfg.get("pano_mode") == "views":
+        # 多视角分段外推（见 pano_views.py 的注释）：每个视角单独生成，再羽化拼接。
+        # 视觉上比"一次 inpaint 整张等距柱状图"好一大截，代价是 N 倍推理时间。
+        from . import pano_views
+        full = pano_views.build_multiview(pano0, cam, pano0, known, prompt, cfg)
+        cache_hit = "views"
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            common.save_rgb(cache_path, full, quality=95)
+        except Exception:
+            pass
     else:
         full = inpaint(pano0, known, prompt,
                        steps=int(cfg.get("pano_steps", 26)),

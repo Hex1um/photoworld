@@ -669,8 +669,13 @@
         gl.enable(gl.CULL_FACE);
       }
 
-      /* v3 视锥外地形/地物：独立一层，不受照片壳淡出影响 */
-      if (world.meshes.terrain) {
+      /* v3 视锥外地形/地物：独立一层，不受照片壳淡出影响。
+         **站在地面附近时不画**：地形是"按方向采全景"的大平面，贴着相机的掠射角
+         会化成一坨（对比图里"低头看地/转身"两格）。站着时让全景天空球 + 照片壳
+         负责画面，起飞之后（>3.5m）再交给地形。 */
+      const standing = (typeof world.eyeY === 'number' && typeof world.groundY === 'number'
+                        && world.eyeY < world.groundY + 3.5);
+      if (world.meshes.terrain && !standing) {
         /* 双面绘制：地形是极坐标网格，绕序只有一个方向；从上方/背后看，
            背面被剔除就会碎成一块一块的"浮岛"（实测飞起来就是这个症状）。 */
         gl.disable(gl.CULL_FACE);

@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '3.2.2';
+  const VERSION = '3.2.7';
   /* F6（v2.15.12）：`__PW_BUILD__` 与 VERSION 必须一致，否则 index.html 的
      "过期缓存自检"会每次打开都强制整页重载一次并打 data-stale 标记。
      bump_cache.py 现在两者一起改，这条断言用来在控制台第一时间暴露漂移。 */
@@ -1063,6 +1063,10 @@
         w.planKeepsScene = true;
         /* 飞行上限：单视图重建的头顶没有几何，飞太高只会看到壳的破口 */
         w.flyMaxRel = 12;
+        /* 活动半径：单视图重建只在拍摄点附近成立。走开 5m 之后无论怎么渲染都不对
+           （对比图第 3/4/5 格全是化的）——所以干脆把"走"限制成小范围环视，
+           真正的观察手段是**抬头/转身/起飞**。 */
+        w.moveRadius = 1.5;
         /* 投影纹理参数：拍照时的相机位姿（GLB 坐标），着色器据此把世界坐标反解成 UV。
            照片在贴图里占 v ∈ [0, vScale]，下面 8px 是顶点色层用的白条。 */
         /* 地形细节：把扩散全景当贴图按方向采样（见 glutil 的 mode 7）。
@@ -1278,6 +1282,8 @@
       startLoop();
       if (document.body) document.body.dataset.ready = '1';
       if (document.body) document.body.dataset.mode = 'asset';
+      /* 站立高度（给渲染器判断"是否在地面附近"用） */
+      w.groundY = groundY;
       if (document.body) document.body.dataset.ground = groundY.toFixed(2);
     } catch (e) {
       console.error(e);
@@ -1407,6 +1413,8 @@
     }
     /* 飞行时把"照片壳"淡掉：它是从拍摄点投影出来的一层，从上方看就是一堆漂浮的
        碎片 + 竖向拉丝。12m 起淡、20m 淡完；剩下的地形层是连续的地面。 */
+    /* 当前眼高交给渲染器：地面高度附近不画地形（见 renderer 里的说明） */
+    world.eyeY = player.state.y;
     if (world.meshes.terrain) {
       // 用**绝对高度**而不是"离地高度"：heightAt 会把外层地形的起伏算进去，
       // 在上坡时"离地 12m"其实已经飞了 20m，阈值形同虚设（实测没淡掉）。
@@ -1420,7 +1428,9 @@
       /* 水平窗口收紧到 1.5→4.5m：站在出生点旁边 5m 时壳还半透明的话，
          看到的是"位移曲面被斜着看"的一片糊（对比图第 3/4/5 格）。
          淡完之后用同一张全景铺的地形，观感与照片基本一致（第 6~9 格）。 */
-      const tD = Math.min(1, Math.max(0, (dShell - 1.5) / 3.0));
+      /* 活动范围锁在出生点 1.5m 内（见 player 的 world.moveRadius），
+         所以壳几乎不会因为距离而淡出；这里只保留飞行淡出。 */
+      const tD = Math.min(1, Math.max(0, (dShell - 2.0) / 6.0));
       const tH = Math.min(1, Math.max(0, (player.state.y - 6.0) / 6.0));
       const t = Math.max(tD, tH);
       world.shellHide = t * t * (3 - 2 * t);
