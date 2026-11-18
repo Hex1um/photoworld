@@ -42,13 +42,55 @@ def _sample(pano: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
                      for c in range(3)], axis=-1).astype(np.float32)
 
 
+
+_PIPE_I2I = None
+
+
+def _load_img2img(cfg: dict):
+    """优先用 SDXL **img2img** 管线：它接受 strength，能让"参考图"真正起作用。
+
+    为什么必须有它（实测）：inpaint 管线在遮罩外没有上下文时等于纯文生图，
+    未知区 96% 的全景只能靠它编 —— 出来是竖条。img2img 不一样：strength 控制
+    "保留多少原图"，我们就能拿上一视角的结果当底、只做 45% 的改写，接缝与结构
+    都连贯。没有这份权重时回退到 inpaint（效果会差，但不会崩）。
+    """
+    global _PIPE_I2I
+    if _PIPE_I2I is not None:
+        return _PIPE_I2I
+    import torch
+    from diffusers import StableDiffusionXLImg2ImgPipeline
+    try:
+        pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            torch_dtype=torch.float16, variant="fp16", local_files_only=True,
+            use_safetensors=True)
+        torch.cuda.empty_cache()
+        pipe.enable_model_cpu_offload()
+        try:
+            pipe.enable_vae_slicing()
+        except Exception:
+            pass
+        _PIPE_I2I = (pipe, "img2img")
+        print("    （用 SDXL img2img 管线）")
+        return _PIPE_I2I
+    except Exception as e:
+        print("    （没有 img2img 权重，回退 inpaint：%s）" % e)
+        _PIPE_I2I = (_p_pipe(), "inpaint")
+        return _PIPE_I2I
+
+
+def _p_pipe():
+    from . import pano as _p
+    return _p._load_pipe()
+
+
 def build_multiview(rgb: np.ndarray, cam, pano0: np.ndarray, known: np.ndarray,
                     prompt: str, cfg: dict) -> np.ndarray:
     import torch
 
     from . import pano as _p
 
-    pipe = _p._load_pipe()
+    pipe, kind = _load_img2img(cfg)
     h, w = pano0.shape[:2]
     n_views = int(cfg.get("pano_views", 6))
     vw = int(cfg.get("view_w", 896))
@@ -82,19 +124,38 @@ def build_multiview(rgb: np.ndarray, cam, pano0: np.ndarray, known: np.ndarray,
         u, v = _dir_to_uv(dirs, w, h)
         img_view = np.clip(_sample(full, u, v), 0, 1).astype(np.float32)
         gen = torch.Generator(device="cpu").manual_seed(seed + idx)
-        out = pipe(prompt=prompt,
-                   negative_prompt="text, watermark, blurry, distorted, seam, mirrored, duplicate",
-                   image=Image.fromarray((img_view * 255 + 0.5).astype(np.uint8)),
-                   mask_image=Image.fromarray(np.where(need, 255, 0).astype(np.uint8)),
-                   height=vh, width=vw, num_inference_steps=steps,
-                   guidance_scale=cfg_scale, strength=1.0,
-                   generator=gen).images[0]
+        img_pil = Image.fromarray((img_view * 255 + 0.5).astype(np.uint8))
+        neg = "text, watermark, blurry, distorted, seam, mirrored, duplicate"
+        if kind == "img2img":
+            # strength 越低越像原图；未知区多一些就多改一点
+            st = float(np.clip(0.62 - 0.25 * kfrac, 0.34, 0.62))
+            out = pipe(prompt=prompt, negative_prompt=neg, image=img_pil,
+                       height=vh, width=vw,
+                       num_inference_steps=max(12, int(steps * st)),
+                       guidance_scale=cfg_scale, strength=st,
+                       generator=gen).images[0]
+        else:
+            out = pipe(prompt=prompt, negative_prompt=neg, image=img_pil,
+                       mask_image=Image.fromarray(np.where(need, 255, 0).astype(np.uint8)),
+                       height=vh, width=vw, num_inference_steps=steps,
+                       guidance_scale=cfg_scale, strength=1.0,
+                       generator=gen).images[0]
         view = np.asarray(out, dtype=np.float32) / 255.0
-        # 只写"新生成"的像素：已有内容（尤其是照片）一律不动
-        full[vv[need], uu[need]] = view[need]
-        covered[vv[need], uu[need]] = True
-        print("    视角 %d/%d yaw=%.0f° 已知 %.0f%% 新生成 %.0f%%"
-              % (idx + 1, n_views, math.degrees(yaw), kfrac * 100, frac * 100))
+        # 余弦羽化：视角中心权重 1，边缘 0，相邻视角自然过渡；
+        # 已经"确定的照片像素"永远不被覆盖。
+        cx = math.cos(yaw)
+        wgt = (np.clip(dirs[..., 2] * (-cx) + dirs[..., 0] * math.sin(yaw), 0.0, 1.0) ** 1.2)
+        wgt = wgt * (~known[vv, uu])
+        acc = np.zeros((h, w, 3), dtype=np.float32)
+        wsum = np.zeros((h, w, 1), dtype=np.float32)
+        np.add.at(acc, (vv.ravel(), uu.ravel()), (view * wgt[..., None]).reshape(-1, 3))
+        np.add.at(wsum, (vv.ravel(), uu.ravel()), wgt.reshape(-1, 1))
+        sel = wsum[..., 0] > 1e-4
+        blendw = np.clip(wsum / (wsum + 1.0), 0.0, 1.0)
+        full = np.where(sel[..., None], full * (1 - blendw) + acc / np.maximum(wsum, 1e-5) * blendw, full)
+        covered |= (wsum[..., 0] > 1e-4)
+        print("    视角 %d/%d yaw=%.0f° 已知 %.0f%% mode=%s"
+              % (idx + 1, n_views, math.degrees(yaw), kfrac * 100, kind))
 
     # 收尾：未生成区域做一次低强度统一，抹掉视角接缝
     try:

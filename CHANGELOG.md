@@ -92,6 +92,36 @@ A/B/C(32)、PLAN_V2/V3(32)、空洞/拉丝/块数指标、判据取最差机位�
 19 套 Python 回归通过（3 套因本机缺 torch / 17MB GLB 资产未跑，与代码无关）。
 缓存串 20 处 v3.0.4→v3.0.5。
 
+## [3.3.5] - 2026-11-18  · 修好桌面启动器（本机没装系统 Python）+ 接 img2img 外推
+
+### 桌面快捷方式启动不了的真正原因
+
+`tools/start_v3.ps1` 只用 `Get-Command python/py/python3` 找解释器，但这台机器
+**根本没有系统 Python**，PATH 上也没有 —— Python 只有 WorkBuddy 托管的那一份
+（`%USERPROFILE%\.workbuddy\binaries\python\versions\3.13.12\python.exe`）。
+所以双击永远停在 `[ERR] Python not found`，而我一直在终端里用托管 Python 跑，没察觉。
+
+修法：
+
+* `Find-Python` 按顺序找：`$env:PHOTOWORLD_PY` → PATH 上的 python/python3/py →
+  `%USERPROFILE%\.workbuddy\binaries\python\versions\*`（取最新）→ 常见安装位置；
+* 顺手把 `$args` 改名 `$argv`（`$args` 是脚本的自动变量，覆盖它容易踩坑）；
+* 桌面 `.bat` 加 `chcp 65001`，中文不再显示成乱码。
+
+实测（与双击等价）：`Using repo: ... → [OK] 静态站已在运行 → http://127.0.0.1:8199/?pipe=v3`。
+
+### 分段外推接上 img2img
+
+`pano_views.build_multiview` 现在优先用 `StableDiffusionXLImg2ImgPipeline`
+（有 strength 语义，参考图才真正起作用），没有权重时自动回退 inpaint。
+每个视角按 `strength = 0.62 - 0.25 × 已知占比` 改写，再按余弦羽化加权合并，
+照片像素永远不被覆盖。
+
+### 顺带
+
+`tools/hf_fetch.py`：直连下载大文件（绕过 hf_hub 的 HEAD 头校验 —— 本机代理会把
+`X-Repo-Commit` 头吃掉，5GB 的 UNet 因此下不动；小文件侥幸能过）。
+
 ## [3.3.4] - 2026-11-18  · 性能模式 + 一圈"伪影清零"，剩下的只是细节不足
 
 ### 0. 性能：电源方案从「平衡」切到「高性能」
