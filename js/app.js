@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '3.1.4';
+  const VERSION = '3.1.8';
   /* F6（v2.15.12）：`__PW_BUILD__` 与 VERSION 必须一致，否则 index.html 的
      "过期缓存自检"会每次打开都强制整页重载一次并打 data-stale 标记。
      bump_cache.py 现在两者一起改，这条断言用来在控制台第一时间暴露漂移。 */
@@ -1058,6 +1058,8 @@
            直径接近画面一半 —— 用户反复指的"视线中心大圆圈"其实是它，
            不是穹顶、也不是天空壳（v3 的天空内容来自全景，本来就不需要这层光晕）。 */
         w.sunPower = 0;
+        /* 暗角对天空很敏感（见 renderer 里的注释）：v3 收到 0.10 */
+        w.vignette = 0.10;
         w.planKeepsScene = true;
         /* 飞行上限：单视图重建的头顶没有几何，飞太高只会看到壳的破口 */
         w.flyMaxRel = 12;
@@ -1071,6 +1073,26 @@
           if (panoUrl !== url) {
             const im = new Image();
             im.onload = () => {
+              /* 顺手把程序化天空的上下色取自全景本身：v3 改用程序化天空之后，
+                 天空色如果还来自"照片分析"就会和地形/全景不是一个色调
+                 （抬头是一块中性灰，低头是暖色湖面）。这里取全景的顶行与地平线行。 */
+              try {
+                const cv = document.createElement('canvas');
+                cv.width = 4; cv.height = 8;
+                const cx = cv.getContext('2d');
+                cx.drawImage(im, 0, 0, 4, 8);
+                const px = cx.getImageData(0, 0, 4, 8).data;
+                const at = (row) => {
+                  let r = 0, g = 0, b = 0;
+                  for (let i = 0; i < 4; i++) {
+                    const o = (row * 4 + i) * 4;
+                    r += px[o]; g += px[o + 1]; b += px[o + 2];
+                  }
+                  return [r / 4 / 255, g / 4 / 255, b / 4 / 255];
+                };
+                w.skyTop = at(0);
+                w.skyHorizon = at(4);
+              } catch (e) { /* 跨域画布会抛，忽略 */ }
               try {
                 // U 方向必须 REPEAT（360° 环绕），V 方向 CLAMP（天顶/天底）
                 w.tex.pano = PW.GL.createTexture(gl, im, {
@@ -1083,6 +1105,14 @@
             im.src = panoUrl;
           }
         }
+        /* 不再绘制"照片天空壳"：它在出生点与原图一致，但抬头看时它的边缘
+           相对穹顶就是一圈可见的**大圆盘**（对比图第 2 格）。v3 的天空统一交给
+           穹顶（纯竖直渐变 + 全景方位中值），整片天空不再有边界。 */
+        /* 天空统一交给程序化 sky pass（竖直渐变，逐像素、不可能有边界）。
+           穹顶那 7.5k 顶点是"按纬度取全景中值"来的，只要全景里有一点方位变化，
+           抬头看就是一圈圆盘；程序化渐变没有这个问题，也少一次绘制。 */
+        if (capMesh) w.meshes.skyCap = null;
+        w.meshes.backdrop = null;
         if (asset.camera) {
           const c3 = asset.camera;
           const wu = (v3meta.white_uv && v3meta.white_uv[1]) || 1.0;
@@ -1382,7 +1412,10 @@
       /* 淡出窗口要和飞行上限对齐：上限 12m，如果 14m 才淡完，玩家停在上限时永远是
          半透明叠加（照片壳与地形叠成"双影"）。这里 6m 起淡、12m 淡完。 */
       const dShell = Math.hypot(player.state.x, player.state.z);
-      const tD = Math.min(1, Math.max(0, (dShell - 3.0) / 7.0));
+      /* 水平窗口收紧到 1.5→4.5m：站在出生点旁边 5m 时壳还半透明的话，
+         看到的是"位移曲面被斜着看"的一片糊（对比图第 3/4/5 格）。
+         淡完之后用同一张全景铺的地形，观感与照片基本一致（第 6~9 格）。 */
+      const tD = Math.min(1, Math.max(0, (dShell - 1.5) / 3.0));
       const tH = Math.min(1, Math.max(0, (player.state.y - 6.0) / 6.0));
       const t = Math.max(tD, tH);
       world.shellHide = t * t * (3 - 2 * t);

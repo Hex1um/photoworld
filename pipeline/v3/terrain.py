@@ -304,6 +304,14 @@ def heightfield_mesh(field: dict, eye: float, near_edge: np.ndarray | None,
     # 注意必须在**地板填充之后**做，否则足迹内仍然是平的。
     H = add_relief(H, r_grid, seed=int(seed), amp_far=float(amp_far))
 
+    # **近场削平**：玩家走动范围（r<40m）内把高度限制在地面附近 ±1.5m，
+    # 40→100m 平滑过渡到真实起伏。为什么：近场的高度场是"深度估出来的"，
+    # 误差在几米量级，贴身看就是一块块翘起的板子和拉丝（对比图第 3/4/5 格）；
+    # 削平之后近场读起来是"地面 + 全景贴图"，稳定得多。
+    near_w = 1.0 - np.clip((r_grid - 40.0) / 60.0, 0.0, 1.0)
+    near_w = (near_w * near_w * (3.0 - 2.0 * near_w))[None, :]
+    H = (H * (1.0 - near_w) + np.clip(H, -1.5, 1.5) * near_w).astype(np.float32)
+
     # 顶点必须在 H 定稿之后再取 —— 之前这里写在地板/起伏之前，
     # 结果"地板和起伏都算了但没进几何"，一起飞还是整屏纯色（实测踩了一轮）。
     P = np.stack([X, H - 0.2, Z], axis=-1).reshape(-1, 3).astype(np.float32)

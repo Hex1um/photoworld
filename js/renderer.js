@@ -880,7 +880,13 @@
         uScene: 0, uRes: [w, h], uTime: opts.time || 0,
         uFade: opts.fade === undefined ? 1 : opts.fade,
         uExposure: world.exposure || 1.0,
-        uVignette: opts.vignette === undefined ? 0.42 : opts.vignette,
+        /* 暗角：v3 资产默认调低（0.42 → world.vignette）。
+           暗角的亮度在中心有一大片"平台区"（smoothstep 饱和段），在**均匀的天空**上
+           这段平台边界就是一圈可见的大圆盘 —— 用户反复说的"视线中心大圆圈"。
+           有山有水时它读作自然压角，所以只对 v3 收着用。 */
+        uVignette: opts.vignette === undefined
+          ? (typeof world.vignette === 'number' ? world.vignette : 0.42)
+          : opts.vignette,
         uGrain: 0.006, uAberr: 0, uAA: 1
       });
 
