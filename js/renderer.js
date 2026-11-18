@@ -186,7 +186,15 @@
         uGroundTint: world.groundTint || [0.3, 0.3, 0.3],
         uAlphaTest: opt.alphaTest || 0.3,
         uAlphaMul: opt.alphaMul === undefined ? 1 : opt.alphaMul,
-        uExposure: opt.exposure === undefined ? 1 : opt.exposure
+        uExposure: opt.exposure === undefined ? 1 : opt.exposure,
+        /* 投影纹理参数（v3.1）。注意这里是**白名单**：不在这里列出的 uniform
+           根本传不进着色器（第一次接投影纹理时就是这么"改完没反应"的）。
+           顶点色层的 UV 落在贴图白条上（vUV.y >= uVMax），片元着色器会自动跳过投影。 */
+        uProjOn: (world.projCam && world.projCam.on) ? 1 : 0,
+        uProjEye: world.projCam ? world.projCam.eye : [0, 1.7, 0],
+        uProjTan: world.projCam ? [world.projCam.tanH, world.projCam.tanV] : [1, 1],
+        uProjPitch: world.projCam ? world.projCam.pitch : 0,
+        uVMax: world.projCam ? world.projCam.vMax : 1.0
       });
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, opt.tex || null);
@@ -611,9 +619,20 @@
           /* v3 资产在飞行时**继续画**这层：它的几何是真的三维表面（不是一个朝前的
              薄膜），而且仰视时视锥内那块地面只存在于这一层里 —— 跳过就整屏只剩
              清屏色（实测"一起飞就全白"）。v2 的薄壳仍然跳过。 */
+          const aShell = shellA(world) * (1 - (world.shellHide || 0));
           if (world.showPlan && !world.planKeepsScene) {
             // 高空：跳过照片壳（顶面与 tile 已经铺满）
+          } else if (aShell < 0.004) {
+            // 完全淡出：连绘制都省了（省一次 50 万三角的 draw）
           } else {
+            /* 半透明必须真的开混合：着色器里 alpha 只影响混合，不参与深度写入。
+               之前只改 alphaMul 不开 BLEND，片元照样按不透明覆盖 ——
+               于是"按距离淡出照片壳"看起来完全没生效（实测卡了三轮）。 */
+            const blending = aShell < 0.996;
+            if (blending) {
+              gl.enable(gl.BLEND);
+              gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+            }
             drawMesh(world, world.meshes.relief,
               world.dbgLayers
                 ? { mode: 9, debugCol: [0.95, 0.2, 0.2] }
@@ -623,11 +642,18 @@
                   tex: world.tex.photo, mode: world.vertexColor ? 1 : 4, fog: 0.16, mipBias: 0,
                   backdrop: [0, 0],
                   alphaMul: shellA(world) * (1 - (world.shellHide || 0)),
+                  /* v3：投影纹理（把照片当成从拍摄点打出的幻灯，见 glutil 顶点着色器） */
+                  uProjOn: (world.projCam && world.projCam.on) ? 1 : 0,
+                  uProjEye: world.projCam ? world.projCam.eye : [0, 1.7, 0],
+                  uProjTan: world.projCam ? [world.projCam.tanH, world.projCam.tanV] : [1, 1],
+                  uProjPitch: world.projCam ? world.projCam.pitch : 0,
+                  uVMax: world.projCam ? world.projCam.vMax : 1.0,
                   /* 近景壳单独提一点天光：实测 fog 调到 0.12 后对比度对了，但整体
                      比原片暗（均值 0.494 对 0.582）。雾量再往上加已无变化 ——
                      差的不是雾，是光照。 */
                   skyAmb: (world.ambient || [1, 1, 1]).map((v) => v * 1.18)
                 });
+            if (blending) gl.disable(gl.BLEND);
           }
         }
         gl.disable(gl.BLEND);

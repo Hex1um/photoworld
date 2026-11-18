@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '3.0.7';
+  const VERSION = '3.1.0';
   /* F6（v2.15.12）：`__PW_BUILD__` 与 VERSION 必须一致，否则 index.html 的
      "过期缓存自检"会每次打开都强制整页重载一次并打 data-stale 标记。
      bump_cache.py 现在两者一起改，这条断言用来在控制台第一时间暴露漂移。 */
@@ -1057,6 +1057,20 @@
         w.planKeepsScene = true;
         /* 飞行上限：单视图重建的头顶没有几何，飞太高只会看到壳的破口 */
         w.flyMaxRel = 12;
+        /* 投影纹理参数：拍照时的相机位姿（GLB 坐标），着色器据此把世界坐标反解成 UV。
+           照片在贴图里占 v ∈ [0, vScale]，下面 8px 是顶点色层用的白条。 */
+        if (asset.camera) {
+          const c3 = asset.camera;
+          const wu = (v3meta.white_uv && v3meta.white_uv[1]) || 1.0;
+          w.projCam = {
+            on: 1,
+            eye: [0, (typeof c3.eye_height === 'number' ? c3.eye_height : 1.7), 0],
+            tanH: Math.tan(c3.hfov * 0.5),
+            tanV: Math.tan(c3.vfov * 0.5),
+            pitch: c3.pitch || 0,
+            vMax: Math.max(0.5, 2 * wu - 1) - 0.002
+          };
+        }
         setHudPipe('v3', 'v3 · 扩散地形');
       }
 
@@ -1337,9 +1351,15 @@
     if (world.meshes.terrain) {
       // 用**绝对高度**而不是"离地高度"：heightAt 会把外层地形的起伏算进去，
       // 在上坡时"离地 12m"其实已经飞了 20m，阈值形同虚设（实测没淡掉）。
-      /* 不再按高度淡出照片壳：用户要的是"起飞和地面看到同一个世界"。
-         飞行上限已在 player 里压到离地 12m，壳不会再变成悬空的投影卡片。 */
-      world.shellHide = 0;
+      /* 照片壳的可见范围：出生点附近 3m 内是 1（与原图逐像素一致），
+         走到 10m 外淡完，飞行 8~14m 淡完 —— 之后再留着它只会露出"位移曲面被拉伸"
+         的行拉丝（单视图重建的固有问题）。淡出之后看到的是同一片地方的全景地形，
+         不是另一个世界，也不是空白。 */
+      const dShell = Math.hypot(player.state.x, player.state.z);
+      const tD = Math.min(1, Math.max(0, (dShell - 3.0) / 7.0));
+      const tH = Math.min(1, Math.max(0, (player.state.y - 8.0) / 6.0));
+      const t = Math.max(tD, tH);
+      world.shellHide = t * t * (3 - 2 * t);
     }
     /* v3 资产**不切俯视 LOD**：v2 那套"飞行就只画顶面 + tile"是因为它的世界是
        一层朝前的薄壳，从上面看必然是一堆竖条。v3 有真三维地形，切过去反而把

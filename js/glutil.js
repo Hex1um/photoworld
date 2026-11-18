@@ -12,6 +12,13 @@ in vec2 aEdge;      // x: 视锥侧向融雾  y: 底边融入地面色
 uniform mat4 uVP;
 uniform vec3 uEye;
 uniform vec2 uBackdrop;   // 远景跟随相机的水平位移（近景不跟随，保证走动真实）
+/* 投影纹理（v3.1）：把照片贴图当成"从拍摄点打出去的幻灯"，按**世界坐标**反解 UV。
+   几何被拉伸/被从别的角度看时，采到的仍然是照片里那一块，不会出现拉丝。 */
+uniform float uProjOn;
+uniform vec3 uProjEye;    // 拍摄时的相机位置（GLB 坐标）
+uniform vec2 uProjTan;    // (tanH, tanV)
+uniform float uProjPitch;
+out vec3 vUVp;            // (x/z, y/z, z) —— z<=0 表示在拍摄点背后
 out vec3 vN;
 out vec2 vUV;
 out vec4 vC;
@@ -29,6 +36,15 @@ void main() {
   vC = aColor;
   vEdge = aEdge;
   vDist = length(wp - uEye);
+  if (uProjOn > 0.5) {
+    vec3 d = aPos - uProjEye;
+    float c = cos(uProjPitch), s2 = sin(uProjPitch);
+    vec3 dc = vec3(d.x, d.y * c + d.z * s2, -d.y * s2 + d.z * c);
+    float z = -dc.z;
+    vUVp = vec3(dc.x / (z * uProjTan.x), dc.y / (z * uProjTan.y), z);
+  } else {
+    vUVp = vec3(0.0, 0.0, -1.0);
+  }
 }`;
 
   const FS_MAIN = `#version 300 es
@@ -59,6 +75,9 @@ uniform vec3 uDebugCol;
    单层壳在矩形外被侧视/背视时只会摊成一堆放射状尖刺（C 圈实测），
    而那里本来就该由程序化地面 + 世界幕接管。默认 1，不影响任何原有绘制。 */
 uniform float uAlphaMul;
+in vec3 vUVp;
+uniform float uProjOn;
+uniform float uVMax;      // 照片在贴图里占的 v 上界（下面是白条）
 out vec4 fragColor;
 
 vec3 srgb2lin(vec3 c) {
@@ -129,8 +148,24 @@ void main() {
     albedo = mix(albedo, uGroundTint, k * 0.82);
     col = albedo * (uSkyAmb * fill + uSunColor * ndl * 1.02 + 0.02);
   } else if (mode == 4) {
-    // 预烘焙光照（远山 / 近岭 / 深度表面）：贴图 × 顶点色
-    col = srgb2lin(texture(uTex, vUV, uMipBias).rgb) * vC.rgb;
+    // 预烘焙光照（远山 / 近岭 / 深度表面）：贴图 × 顶点色。
+    // v3：改用**投影纹理** —— UV 由世界坐标反解，几何再被拉伸也不会拉丝。
+    // 顶点色层（UV 落在白条上，vUV.y > uVMax）不参与投影，否则会把照片里的
+    // 前景采样到"背景层"上。
+    vec2 uvUse = vUV;
+    if (uProjOn > 0.5 && vUV.y < uVMax) {
+      /* 拍摄点背面的几何：照片里根本没有它的信息 —— 直接不画。
+         退回"按顶点 UV 采样"会把这些面拉成一片长条（这就是侧看/回头看时的拉丝）。
+         不画之后露出的是背后的地形，也就是"同一个世界的另一面"。 */
+      if (vUVp.z <= 0.05) discard;
+      vec2 q = vec2(0.5 + 0.5 * vUVp.x, 0.5 - 0.5 * vUVp.y);
+      /* 投到照片框外的几何：照片里**根本没有**它的颜色。夹到边缘会把边缘像素
+         拉成一条条长丝（实测整片侧视都是拉丝），所以这里直接丢弃 ——
+         剩下的空位由背后的地形补上，也就是"同一个世界的另一面"。 */
+      if (q.x < -0.02 || q.x > 1.02 || q.y < -0.02 || q.y > uVMax + 0.02) discard;
+      uvUse = vec2(clamp(q.x, 0.002, 0.998), clamp(q.y, 0.002, uVMax));
+    }
+    col = srgb2lin(texture(uTex, uvUse, uMipBias).rgb) * vC.rgb;
     // 视锥边缘与画面底缘把照片纹理融进环境色，消掉「插在水面上的卡片」
     // 那种四周硬切边；不做这一步，任何放宽渐隐的尝试都会露出拉伸条纹。
     // 上半屏融天光、下半屏融地面色，否则深色场景侧边会出现一条浅灰「雾墙」
