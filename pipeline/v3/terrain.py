@@ -212,6 +212,11 @@ def polar_heightfield(cloud: dict, pano: np.ndarray, eye: float,
     # （掠射角下尤其明显，实测侧视整片地面是竖条）。同一圈方位上的地面色本来就该
     # 连续，中值滤波（不吃两侧的树/建筑尖峰）能把条纹压掉又不糊掉大色块。
     col = ndimage.median_filter(col, size=(7, 1, 1), mode="wrap").astype(np.float32)
+    # 高度场也做一次 3×3 中值：深度偶尔会在某个格子里给出离群值，
+    # 单格尖峰在俯视/侧视里就是一块突兀的白色楔形。
+    Hf = np.where(np.isfinite(H), H, np.nan)
+    med = ndimage.median_filter(np.nan_to_num(Hf, nan=0.0), size=(3, 3), mode="nearest")
+    H = np.where(np.isfinite(Hf), med * 0.5 + Hf * 0.5, med).astype(np.float32)
     return {"H": H, "r": r_grid, "color": col}
 
 
@@ -678,7 +683,16 @@ def conform_to_photo(layer: dict, z_near: np.ndarray, sky: np.ndarray,
         d = out["pos"][pk] - eye
         ln = np.linalg.norm(d, axis=1, keepdims=True)
         target = (ref[keep][pk] * margin)[:, None]
-        out["pos"][pk] = (eye + d / np.maximum(ln, 1e-9) * target).astype(np.float32)
+        # **边界羽化**：照片足迹的边上，强行推到"照片表面之后"会和外面的地形
+        # 对不上，出现一圈白色楔形台阶（俯视/侧视都能看到）。这里让推力在
+        # 靠近照片边框的 8% 范围内线性衰减到 0，接缝就变成一段缓坡。
+        u_pk = scr[keep][pk][:, 0] / max(1.0, cam.w - 1.0)
+        v_pk = scr[keep][pk][:, 1] / max(1.0, cam.h - 1.0)
+        edge = np.minimum(np.minimum(u_pk, 1.0 - u_pk),
+                          np.minimum(v_pk, 1.0 - v_pk))
+        wgt = np.clip(edge / 0.08, 0.0, 1.0)[:, None]
+        pushed = eye + d / np.maximum(ln, 1e-9) * target
+        out["pos"][pk] = (out["pos"][pk] * (1.0 - wgt) + pushed * wgt).astype(np.float32)
         if photo is not None and out.get("color") is not None:
             ui2 = ui[keep][pk]
             vi2 = vi[keep][pk]
