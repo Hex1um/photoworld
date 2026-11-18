@@ -159,6 +159,70 @@ def _load_pipe(device: str = "cuda"):
 
 
 
+
+def mirror_world(pano0: np.ndarray, known: np.ndarray, polish=None,
+                 strength: float = 0.22) -> np.ndarray:
+    """镜像世界：把照片的已知区**交替镜像**铺满整圈，接缝处做交叉淡化。
+
+    为什么走这条路（实测两轮）：扩散外推未知区 96% 时，无论怎么分段，SD 都在
+    "编"——结果是一片竖条和色块，比镜像差得多。镜像的好处是**结构与色调天生连续**：
+    树线接着树线、岸接着岸，只是左右对称。再让 SD 以低强度（0.22）整体精修一遍，
+    把对称感与接缝压掉，就得到一个"看起来像同一个地方"的 360° 环境。
+    """
+    h, w = pano0.shape[:2]
+    rows = np.nonzero(known.any(axis=1))[0]
+    if rows.size == 0:
+        return pano0.copy()
+    top, bot = int(rows.min()), int(rows.max())
+    band = pano0[top:bot + 1]                     # 照片在等距图里占的那条带
+    bh, bw = band.shape[:2]
+    kcols = np.nonzero(known[top:bot + 1].any(axis=0))[0]
+    x0, x1 = int(kcols.min()), int(kcols.max())
+    src = band[:, x0:x1 + 1]                      # 已知列
+    sw = src.shape[1]
+
+    # 横向：交替镜像铺满（周期 2·sw），过渡处 12% 交叉淡化
+    xs = np.arange(w)
+    pos = xs % (2 * sw)
+    mir = np.where(pos < sw, pos, 2 * sw - 1 - pos)
+    out_band = src[:, mir]
+    # 竖直：**绝不拉伸**。照片那条带放在它原本的仰角位置上，
+    # 上下用"镜像反射"续（保持比例），最后淡到天光/地面色。
+    # 之前是把那条带拉伸到整张高度 —— 40° 拉到 180°，所有东西都被拉成"冰柱"
+    # （实测就是满屏竖条），这是这一轮最关键的修正。
+    out = out_band.astype(np.float32).copy()
+    # 带在整张图里的目标行区间：保持它在照片里的相对高度
+    span_top = top
+    span_bot = bot
+    canvas = np.zeros((h, w, 3), dtype=np.float32)
+    canvas[span_top:span_bot + 1] = out_band
+    # 上方：以 span_top 为镜面反复反射
+    for y in range(span_top - 1, -1, -1):
+        src = min(2 * span_top - y, span_bot)
+        canvas[y] = canvas[src]
+    # 下方：以 span_bot 为镜面反射
+    for y in range(span_bot + 1, h):
+        src = max(2 * span_bot - y, span_top)
+        canvas[y] = canvas[src]
+    # 极区淡到天光/地面
+    sky = canvas[max(0, span_top - 2)].mean(axis=0)
+    gnd = canvas[min(h - 1, span_bot + 2)].mean(axis=0)
+    nz = max(4, int(h * 0.16))
+    for i in range(nz):
+        t = (i / nz) ** 0.8
+        canvas[i] = canvas[i] * t + sky * (1 - t)
+        canvas[h - 1 - i] = canvas[h - 1 - i] * t + gnd * (1 - t)
+    out = canvas
+    out[known] = pano0[known]                     # 照片区域严格还原
+    if polish is not None and strength > 0:
+        try:
+            out = polish(out, strength)
+        except Exception as e:
+            print("    （镜像全景精修跳过：%s）" % e)
+    out[known] = pano0[known]
+    return out
+
+
 def mirror_fill(pano: np.ndarray, known: np.ndarray) -> np.ndarray:
     """用"镜像平铺"给未知区一个**带结构**的初值，再交给扩散去精修。
 
@@ -197,7 +261,7 @@ def mirror_fill(pano: np.ndarray, known: np.ndarray) -> np.ndarray:
 
 
 def inpaint(pano: np.ndarray, known: np.ndarray, prompt: str, steps: int = 20,
-            guidance: float = 6.5, seed: int = 0) -> np.ndarray:
+            guidance: float = 6.5, seed: int = 0, strength: float = 1.0) -> np.ndarray:
     """已知区保留、其余交给 SDXL 补全。返回补全后的全景。"""
     import torch
     from PIL import Image
@@ -208,8 +272,12 @@ def inpaint(pano: np.ndarray, known: np.ndarray, prompt: str, steps: int = 20,
     mask = np.where(known, 0, 255).astype(np.uint8)
     # 已知区外扩 2% 作为羽化带，避免硬边
     feather = ndimage.gaussian_filter((~known).astype(np.float32), 2.0)
-    mask_img = Image.fromarray(np.clip(np.maximum(mask / 255.0, feather) * 255, 0, 255)
-                              .astype(np.uint8))
+    if bool((mask == 0).all()):
+        # 没有"必须重画"的区域 = 整体低强度精修（镜像世界的收尾就靠这个）
+        mask_img = Image.fromarray(np.zeros((h, w), dtype=np.uint8))
+    else:
+        mask_img = Image.fromarray(np.clip(np.maximum(mask / 255.0, feather) * 255, 0, 255)
+                                  .astype(np.uint8))
     img = Image.fromarray((np.clip(pano, 0, 1) * 255 + 0.5).astype(np.uint8))
     # 注意：这里的 pano 已经是 mirror_fill 过的**带结构初值**，所以 SD 是在
     # "像样的底图"上做局部重绘，而不是从一片空白里编。
@@ -217,7 +285,7 @@ def inpaint(pano: np.ndarray, known: np.ndarray, prompt: str, steps: int = 20,
     out = pipe(prompt=prompt, negative_prompt="text, watermark, blurry, distorted, seam",
                image=img, mask_image=mask_img, height=h, width=w,
                num_inference_steps=steps, guidance_scale=guidance,
-               generator=gen).images[0]
+               strength=float(strength), generator=gen).images[0]
     gen_arr = np.asarray(out, dtype=np.float32) / 255.0
 
     # 已知区逐像素还原成原图（视锥内必须是原图，不能是"重画过的原图"）
@@ -331,8 +399,12 @@ def build(rgb: np.ndarray, cam: common.Camera3, cfg: dict) -> dict:
             im = im.resize((pw, ph))
         return np.asarray(im, dtype=np.float32) / 255.0
 
-    # 扩散前先给未知区一个带结构的初值（镜像平铺），见 mirror_fill 的注释
-    if not (src and os.path.exists(src)) and not os.path.exists(cache_path) \
+    # 扩散前给未知区一个带结构的初值（镜像平铺）。
+    # 注意：**大分辨率下这会帮倒忙** —— 模型会把"镜像出来的横向重复带"理解成
+    # 一座拱门/穹顶（实测 1536 宽时天空里长出一整块棕色岩壁）。所以默认在
+    # 宽度 >= 1280 时关掉它，只在低分辨率下用。
+    use_init = (not cfg.get("no_pano_mirror_init", False)) and int(cfg.get("pano_w", 1024)) < 1280
+    if use_init and not (src and os.path.exists(src)) and not os.path.exists(cache_path) \
             and not cfg.get("no_diffusion"):
         pano0 = mirror_fill(pano0, known)
         pano0 = np.where(known[..., None], pano0, pano0).astype(np.float32)
@@ -343,6 +415,23 @@ def build(rgb: np.ndarray, cam: common.Camera3, cfg: dict) -> dict:
         full, cache_hit = _load(cache_path), "cache"
     elif cfg.get("no_diffusion"):
         full, cache_hit = pano0, "none"
+    elif cfg.get("pano_mode") == "mirror" and False:
+        # 已否决：把照片那条带上下镜像铺满，结果是万花筒（天空也被镜像），
+        # 比扩散外推还差。保留代码只为记录尝试过。
+        # 镜像世界 + 低强度精修（默认）：确定性强、结构连续，不靠模型"编"
+        def _polish(img: np.ndarray, strength: float) -> np.ndarray:
+            return inpaint(img, np.zeros(img.shape[:2], dtype=bool),
+                           prompt, steps=max(12, int(cfg.get("pano_steps", 24) * strength)),
+                           guidance=float(cfg.get("pano_cfg", 5.2)),
+                           seed=int(cfg.get("seed", 0)), strength=strength)
+        full = mirror_world(pano0, known, polish=_polish,
+                            strength=float(cfg.get("mirror_polish", 0.22)))
+        cache_hit = "mirror"
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            common.save_rgb(cache_path, full, quality=95)
+        except Exception:
+            pass
     elif cfg.get("pano_mode") == "views":
         # 多视角分段外推（见 pano_views.py 的注释）：每个视角单独生成，再羽化拼接。
         # 视觉上比"一次 inpaint 整张等距柱状图"好一大截，代价是 N 倍推理时间。

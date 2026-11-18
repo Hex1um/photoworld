@@ -631,7 +631,7 @@
           const aShell = shellA(world) * (1 - (world.shellHide || 0));
           if (world.showPlan && !world.planKeepsScene) {
             // 高空：跳过照片壳（顶面与 tile 已经铺满）
-          } else if (aShell < 0.004) {
+          } else if (aShell < 0.004 || world.hideShellLookDown) {
             // 完全淡出：连绘制都省了（省一次 50 万三角的 draw）
           } else {
             /* 半透明必须真的开混合：着色器里 alpha 只影响混合，不参与深度写入。

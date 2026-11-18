@@ -264,7 +264,13 @@ void main() {
   if (uSkyOn > 0.5) {
     float su = atan(dir.x, -dir.z) * 0.15915494 + 0.5;
     float sv = 0.5 - asin(clamp(dir.y, -1.0, 1.0)) * 0.31830989;
-    fragColor = vec4(texture(uSkyTex, vec2(su, sv)).rgb, 1.0);
+    vec3 sc = texture(uSkyTex, vec2(su, sv)).rgb;
+    /* 地平线以下**不采全景**：等距柱状图的天底是照片底行沿极轴拉伸出来的，
+       低头时那片会被放大成"木纹沙地"（对比图"低头看地"那格）。
+       地平线以下统一融进雾色，读起来就是"地面被雾接走"。 */
+    float below = clamp(-dir.y * 6.0, 0.0, 1.0);
+    sc = mix(sc, uBottom, smoothstep(0.0, 0.55, below));
+    fragColor = vec4(sc, 1.0);
     return;
   }
 

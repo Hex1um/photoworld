@@ -311,8 +311,9 @@ def main() -> int:
     # views（多视角分段）暂时是**实验开关**：本机缓存的只有 SDXL-**inpaint** 管线，
     # 它的 __call__ 不接受 strength，mask 全白时等于纯文生图 —— 视角图跟参考图无关，
     # 拼回来就是满屏竖条（实测）。要真正用它，得再下一份 img2img 管线权重。
-    ap.add_argument("--pano-mode", choices=["eq", "views"], default="eq",
-                    help="全景生成方式：eq=一次 inpaint（默认）；views=多视角分段（实验）")
+    ap.add_argument("--pano-mode", choices=["eq", "views", "mirror"], default="eq",
+                    help="全景生成方式：eq=一次 inpaint + 镜像结构初值（默认，实测最好）；"
+                         "mirror=纯镜像世界（会变成万花筒，已否决）；views=多视角分段（实验）")
     ap.add_argument("--pano-views", type=int, default=6, help="多视角分段的数量")
     ap.add_argument("--no-bg-fill", action="store_true",
                     help="不跑【前景抠除 + 扩散补背景板】（GPU 慢时用）")

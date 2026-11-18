@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '3.2.7';
+  const VERSION = '3.3.4';
   /* F6（v2.15.12）：`__PW_BUILD__` 与 VERSION 必须一致，否则 index.html 的
      "过期缓存自检"会每次打开都强制整页重载一次并打 data-stale 标记。
      bump_cache.py 现在两者一起改，这条断言用来在控制台第一时间暴露漂移。 */
@@ -1410,6 +1410,9 @@
       const d = Math.hypot(player.state.x, player.state.z);
       const t = Math.min(1, Math.max(0, (d - 1.0) / 4.0));
       world.skyCapAlpha = (1 - t) * (player.state.flying ? 0 : 1);
+    /* 陡俯视时照片壳没有意义：它的"底面"是拍摄时看不到的那一侧，俯视会露出一片
+       被拉长的斜面（对比图"低头看地"那格）。俯角超过 ~20° 就只留全景天空球。 */
+    world.hideShellLookDown = (!player.state.flying && player.state.pitch < -0.35);
     }
     /* 飞行时把"照片壳"淡掉：它是从拍摄点投影出来的一层，从上方看就是一堆漂浮的
        碎片 + 竖向拉丝。12m 起淡、20m 淡完；剩下的地形层是连续的地面。 */

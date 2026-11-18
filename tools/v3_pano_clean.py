@@ -22,8 +22,8 @@ from PIL import Image
 from scipy import ndimage
 
 
-def clean(path: str, sky_frac: float = 0.52, sigma_frac: float = 0.09,
-          strength: float = 0.85) -> None:
+def clean(path: str, sky_frac: float = 0.34, sigma_frac: float = 0.09,
+          strength: float = 0.85, pole_frac: float = 0.22) -> None:
     im = Image.open(path).convert("RGB")
     w, h = im.size
     a = np.asarray(im, dtype=np.float32) / 255.0
@@ -40,6 +40,13 @@ def clean(path: str, sky_frac: float = 0.52, sigma_frac: float = 0.09,
     top = max(4, int(sky_rows * 0.35))
     out[:top] = ndimage.gaussian_filter(out[:top], sigma=(3.0, 6.0, 0.0),
                                         mode=("nearest", "wrap", "nearest"))
+    # 极区（天顶/天底）压成"逐行均值"：抬头/低头时那片是镜像拉伸出来的条纹，
+    # 谁也不需要看清天底长什么样，压平反而干净。
+    npole = max(2, int(h * pole_frac))
+    for y in list(range(0, npole)) + list(range(h - npole, h)):
+        row = out[y].mean(axis=0, keepdims=True)
+        t = 1.0 - abs(y - (0 if y < h / 2 else h - 1)) / float(npole)
+        out[y] = out[y] * (1 - t) + row * t
     Image.fromarray((out * 255 + 0.5).astype(np.uint8)).save(path, quality=95)
     print("已清理天空低频谱：%s（天空行 %d/%d）" % (path, sky_rows, h))
 
