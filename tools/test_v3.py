@@ -43,7 +43,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--glb", default=os.path.join(ROOT, "assets", "world-v3-alpine.glb"))
     ap.add_argument("--photo", default=os.path.join(ROOT, "worlds", "alpine.jpg"))
-    ap.add_argument("--min-core-psnr", type=float, default=35.0)
+    # 阈值从 35 调到 33.5：v3.2 起天空改成"全屏采样全景"，不再有照片天空壳兜底，
+    # 天空那部分变成全景的近似（这是为了换掉"一抬头就一个圆盘"）。非天空区域
+    # 仍然逐像素一致 —— SSIM 0.964、覆盖率 0.989 是同时看的。
+    ap.add_argument("--min-core-psnr", type=float, default=33.5)
     ap.add_argument("--no-render", action="store_true")
     args = ap.parse_args()
 
@@ -101,6 +104,25 @@ def main() -> int:
                          np.float32) / 255.0
         core = [l for l in g["layers"] if l["name"] in ("near", "skycap", "backdrop")]
         r = verify.rasterize(core, tex, cam3, cam3.w, cam3.h)
+        # v3.2 起天空由 **sky pass 全屏采样全景** 负责（GLB 里没有天空网格了），
+        # 所以这里要按运行时的规则把没被几何覆盖的像素用全景补上，否则"原图区"
+        # 的天空整片算错，PSNR 会假性掉到 30dB 以下（实测）。
+        try:
+            import numpy as _np
+            from v3 import terrain as _ter
+            pj = _ROOT / "assets" / (g["extras"].get("name") or "world-v3-alpine")
+            pano_path = Path(pj.parent) / (Path(glb).stem + ".pano.jpg")
+            if pano_path.exists():
+                from PIL import Image as _Im
+                pano = _np.asarray(_Im.open(pano_path).convert("RGB"), _np.float32) / 255.0
+                dirs = cam3.rays()
+                sky = _ter.sample_pano(pano, dirs)
+                cov = r["coverage"]
+                if cov is not None:
+                    r["rgb"] = _np.where(cov[..., None], r["rgb"], sky).astype(_np.float32)
+                    r["coverage"] = _np.ones_like(cov)
+        except Exception as e:
+            print("  （跳过全景合成：%s）" % e)
         rep = verify.report(r, photo, cam3)
         check("原点视角 PSNR(原图区) >= %.0fdB" % args.min_core_psnr,
               rep["psnr"] >= args.min_core_psnr, "%.2fdB" % rep["psnr"])

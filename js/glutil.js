@@ -142,6 +142,15 @@ void main() {
     vec3 V = normalize(uEye - vWorld);
     float fres = pow(1.0 - clamp(dot(n, V), 0.0, 1.0), 4.5);
     col = mix(col, uSkyAmb * 1.05 + uFogColor * 0.30, fres * 0.30 * (1.0 - k));
+  } else if (mode == 8) {
+    /* 天空球：直接把全景按方向贴到穹顶几何上（跟随相机，所以是无限远的天空）。
+       比"每纬度一个纯色"强得多：有云、有天光过渡，而且天然无缝、不会出现圆盘。 */
+    vec3 d = normalize(vWorld - uEye);
+    float su = atan(d.x, -d.z) * 0.15915494 + 0.5;
+    float sv = 0.5 - asin(clamp(d.y, -1.0, 1.0)) * 0.31830989;
+    vec3 sc = srgb2lin(texture(uTex, vec2(su, sv), uMipBias).rgb);
+    fragColor = vec4(sc * uExposure, 1.0);
+    return;
   } else if (mode == 7) {
     /* v3 视锥外地形：按"从拍摄点看过去的方向"采样 360 全景贴图。
        之前地形只有顶点色（低频），侧看/俯看就是一片纯色；换成按方向采全景之后，
@@ -240,12 +249,24 @@ uniform vec3 uBottom;
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
 uniform float uSunPower;
+uniform sampler2D uSkyTex;
+uniform float uSkyOn;
 out vec4 fragColor;
 
 void main() {
   vec4 p = uInvVP * vec4(vNdc, 1.0, 1.0);
   vec3 dir = normalize(p.xyz / p.w - uEye);
   float h = dir.y;
+
+  /* v3：天空直接取全景（全屏四边形，**没有几何边界**，所以不可能出现
+     "视线中心一个圆盘"）。之前用 920m 的穹顶网格是罪魁：网格一旦有洞/色差，
+     那圈边界就是圆的；全屏四边形没有边。 */
+  if (uSkyOn > 0.5) {
+    float su = atan(dir.x, -dir.z) * 0.15915494 + 0.5;
+    float sv = 0.5 - asin(clamp(dir.y, -1.0, 1.0)) * 0.31830989;
+    fragColor = vec4(texture(uSkyTex, vec2(su, sv)).rgb, 1.0);
+    return;
+  }
 
   vec3 col = mix(uHorizon, uTop, pow(clamp(h, 0.0, 1.0), 0.55));
   col = mix(col, uBottom, pow(clamp(-h, 0.0, 1.0), 0.5));

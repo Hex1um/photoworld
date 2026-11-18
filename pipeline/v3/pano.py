@@ -158,6 +158,44 @@ def _load_pipe(device: str = "cuda"):
     return _PIPE
 
 
+
+def mirror_fill(pano: np.ndarray, known: np.ndarray) -> np.ndarray:
+    """用"镜像平铺"给未知区一个**带结构**的初值，再交给扩散去精修。
+
+    为什么必须这么做（实测）：直接对等距柱状图做 inpaint，未知区占 96%，
+    SD 只能凭提示词瞎画 —— 出来的是一大团竖直拉丝 + 天空正中一个灰白**大圆盘**
+    （用户反复指出的那个圆圈，其实就画在全景里）。把已知内容**镜像平铺**到未知区之后：
+      * 树线接树线、水岸接水岸，结构是连续的；
+      * SD 变成"低强度精修"（strength 0.45），而不是从噪声凭空生成。
+    """
+    h, w = pano.shape[:2]
+    out = pano.copy()
+    # 1) 每行：把该行的已知列镜像重复铺满整行（周期 2L，接缝处天然对称）
+    for y in range(h):
+        cols = np.nonzero(known[y])[0]
+        if cols.size < 8:
+            continue
+        x0, x1 = int(cols.min()), int(cols.max())
+        span = pano[y, x0:x1 + 1]
+        L = span.shape[0]
+        if L < 4:
+            continue
+        pos = np.arange(w) % (2 * L)
+        src = np.where(pos < L, pos, 2 * L - 1 - pos)
+        out[y] = span[src]
+    # 2) 完全没有已知行的天顶/天底：取最近的有效行
+    rows = np.nonzero(known.any(axis=1))[0]
+    if rows.size:
+        top, bot = int(rows.min()), int(rows.max())
+        if top > 0:
+            out[:top] = out[top]
+        if bot < h - 1:
+            out[bot + 1:] = out[bot]
+    # 已知区严格还原（镜像不能动到照片本身）
+    out[known] = pano[known]
+    return out.astype(np.float32)
+
+
 def inpaint(pano: np.ndarray, known: np.ndarray, prompt: str, steps: int = 20,
             guidance: float = 6.5, seed: int = 0) -> np.ndarray:
     """已知区保留、其余交给 SDXL 补全。返回补全后的全景。"""
@@ -173,6 +211,8 @@ def inpaint(pano: np.ndarray, known: np.ndarray, prompt: str, steps: int = 20,
     mask_img = Image.fromarray(np.clip(np.maximum(mask / 255.0, feather) * 255, 0, 255)
                               .astype(np.uint8))
     img = Image.fromarray((np.clip(pano, 0, 1) * 255 + 0.5).astype(np.uint8))
+    # 注意：这里的 pano 已经是 mirror_fill 过的**带结构初值**，所以 SD 是在
+    # "像样的底图"上做局部重绘，而不是从一片空白里编。
     gen = torch.Generator(device="cpu").manual_seed(seed)
     out = pipe(prompt=prompt, negative_prompt="text, watermark, blurry, distorted, seam",
                image=img, mask_image=mask_img, height=h, width=w,
@@ -291,6 +331,12 @@ def build(rgb: np.ndarray, cam: common.Camera3, cfg: dict) -> dict:
             im = im.resize((pw, ph))
         return np.asarray(im, dtype=np.float32) / 255.0
 
+    # 扩散前先给未知区一个带结构的初值（镜像平铺），见 mirror_fill 的注释
+    if not (src and os.path.exists(src)) and not os.path.exists(cache_path) \
+            and not cfg.get("no_diffusion"):
+        pano0 = mirror_fill(pano0, known)
+        pano0 = np.where(known[..., None], pano0, pano0).astype(np.float32)
+
     if src and os.path.exists(src):
         full, cache_hit = _load(src), "explicit"
     elif os.path.exists(cache_path):
@@ -299,8 +345,8 @@ def build(rgb: np.ndarray, cam: common.Camera3, cfg: dict) -> dict:
         full, cache_hit = pano0, "none"
     else:
         full = inpaint(pano0, known, prompt,
-                       steps=int(cfg.get("pano_steps", 20)),
-                       guidance=float(cfg.get("pano_cfg", 6.5)),
+                       steps=int(cfg.get("pano_steps", 26)),
+                       guidance=float(cfg.get("pano_cfg", 5.2)),
                        seed=int(cfg.get("seed", 0)))
         cache_hit = "generated"
         try:

@@ -142,6 +142,7 @@
       gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
       gl.enableVertexAttribArray(loc);
       gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+      const skyTex = (world.skyDome === 'pano' && world.tex && world.tex.pano) || null;
       PWGL.setUniforms(gl, p, {
         uInvVP: invVP,
         uEye: eye,
@@ -150,8 +151,16 @@
         uBottom: world.fogColor,
         uSunDir: world.sunDir,
         uSunColor: world.sunColor,
-        uSunPower: world.sunPower
+        uSunPower: world.sunPower,
+        uSkyTex: 0,
+        uSkyOn: skyTex ? 1 : 0
       });
+      if (skyTex) {
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, skyTex);
+        const sl = gl.getUniformLocation(p.prog, 'uSkyTex');
+        if (sl) gl.uniform1i(sl, 0);
+      }
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       gl.depthMask(true);
       gl.enable(gl.DEPTH_TEST);
@@ -756,7 +765,15 @@
       }
 
       // 远景层：无视差背景（跟随相机平移），避免"沙雕沙盘"感
-      if (world.meshes.backdrop && (!world.showPlan || world.planKeepsScene)) {
+      /* v3：穹顶用全景当天空球（mode 8，按方向采样，跟随相机） */
+      if (world.meshes.backdrop && world.skyDome === 'pano' && world.tex.pano) {
+        gl.disable(gl.CULL_FACE);
+        drawMesh(world, world.meshes.backdrop, {
+          tex: world.tex.pano, mode: 8, fog: 0.0, mipBias: 0.2,
+          backdrop: [camera.eye[0], camera.eye[2]]
+        });
+        gl.enable(gl.CULL_FACE);
+      } else if (world.meshes.backdrop && (!world.showPlan || world.planKeepsScene)) {
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.disable(gl.CULL_FACE);

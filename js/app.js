@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '3.1.8';
+  const VERSION = '3.2.2';
   /* F6（v2.15.12）：`__PW_BUILD__` 与 VERSION 必须一致，否则 index.html 的
      "过期缓存自检"会每次打开都强制整页重载一次并打 data-stale 标记。
      bump_cache.py 现在两者一起改，这条断言用来在控制台第一时间暴露漂移。 */
@@ -1112,6 +1112,11 @@
            穹顶那 7.5k 顶点是"按纬度取全景中值"来的，只要全景里有一点方位变化，
            抬头看就是一圈圆盘；程序化渐变没有这个问题，也少一次绘制。 */
         if (capMesh) w.meshes.skyCap = null;
+        /* 穹顶**不删**：改成用全景贴图当天空球（mode 8）。之前删掉它是因为
+           顶点色的穹顶会出一圈圆盘；用贴图 + 方向采样就没有这个问题，
+           而且天空终于有云和天光了（原来抬头是一片死灰）。 */
+        /* 天空由 sky pass 全屏采样全景，**不再画穹顶几何**（网格边界 = 那个圆盘） */
+        w.skyDome = 'pano';
         w.meshes.backdrop = null;
         if (asset.camera) {
           const c3 = asset.camera;
