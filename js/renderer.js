@@ -668,8 +668,12 @@
         drawMesh(world, world.meshes.terrain,
           world.dbgLayers
             ? { mode: 9, debugCol: [0.2, 0.9, 0.3] }
-            : { tex: world.tex.photo, mode: world.vertexColor ? 1 : 4,
-                fog: 0.16, mipBias: 0, backdrop: [0, 0] });
+            : (world.tex.pano
+              /* 有全景贴图：地形按"从拍摄点看过去的方向"采样（mode 7），
+                 树线/岸线是逐像素的；没有就退回顶点色。 */
+              ? { tex: world.tex.pano, mode: 7, fog: 0.20, mipBias: 0, backdrop: [0, 0] }
+              : { tex: world.tex.photo, mode: world.vertexColor ? 1 : 4,
+                  fog: 0.16, mipBias: 0, backdrop: [0, 0] }));
         gl.enable(gl.CULL_FACE);
       }
 

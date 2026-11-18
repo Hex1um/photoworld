@@ -78,6 +78,7 @@ uniform float uAlphaMul;
 in vec3 vUVp;
 uniform float uProjOn;
 uniform float uVMax;      // 照片在贴图里占的 v 上界（下面是白条）
+uniform vec3 uProjEye;    // 拍摄点位置：mode 7 按"从这个点看出去的方向"采全景
 out vec4 fragColor;
 
 vec3 srgb2lin(vec3 c) {
@@ -141,6 +142,18 @@ void main() {
     vec3 V = normalize(uEye - vWorld);
     float fres = pow(1.0 - clamp(dot(n, V), 0.0, 1.0), 4.5);
     col = mix(col, uSkyAmb * 1.05 + uFogColor * 0.30, fres * 0.30 * (1.0 - k));
+  } else if (mode == 7) {
+    /* v3 视锥外地形：按"从拍摄点看过去的方向"采样 360 全景贴图。
+       之前地形只有顶点色（低频），侧看/俯看就是一片纯色；换成按方向采全景之后，
+       树线、岸线、云影这些细节是**逐像素**的，不需要加几何。
+       uTex 在这一趟绑定的是全景图（不是照片贴图），所以不需要第二个采样器。 */
+    vec3 d = normalize(vWorld - uProjEye);
+    float pu = atan(d.x, -d.z) * 0.15915494 + 0.5;
+    float pv = 0.5 - asin(clamp(d.y, -1.0, 1.0)) * 0.31830989;
+    vec3 alb = srgb2lin(texture(uTex, vec2(pu, pv), uMipBias).rgb);
+    // 顶点色只做很弱的偏色/暗部调制（它已经被 match_to_photo 对齐过亮度）
+    vec3 tint = mix(vec3(1.0), clamp(vC.rgb * 1.7, 0.0, 1.6), 0.32);
+    col = alb * tint * (uSkyAmb * fill * 0.35 + 0.72);
   } else if (mode == 5) {
     // 反投影地面：照片前景直接铺在地形上，远处收敛到地面基色
     vec3 albedo = srgb2lin(texture(uTex, vUV, uMipBias).rgb) * vC.rgb;

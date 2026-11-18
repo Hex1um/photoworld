@@ -6,7 +6,7 @@
 
   /* 版本号单一来源：index.html 的顶栏徽标与页脚都由这里写入，
      测试脚本读 body[data-version]，避免两处手改不同步。 */
-  const VERSION = '3.1.0';
+  const VERSION = '3.1.1';
   /* F6（v2.15.12）：`__PW_BUILD__` 与 VERSION 必须一致，否则 index.html 的
      "过期缓存自检"会每次打开都强制整页重载一次并打 data-stale 标记。
      bump_cache.py 现在两者一起改，这条断言用来在控制台第一时间暴露漂移。 */
@@ -1059,6 +1059,26 @@
         w.flyMaxRel = 12;
         /* 投影纹理参数：拍照时的相机位姿（GLB 坐标），着色器据此把世界坐标反解成 UV。
            照片在贴图里占 v ∈ [0, vScale]，下面 8px 是顶点色层用的白条。 */
+        /* 地形细节：把扩散全景当贴图按方向采样（见 glutil 的 mode 7）。
+           约定与 GLB 同目录、同名：world-v3-x.glb → world-v3-x.pano.jpg。
+           没有这张图就静默退回顶点色，不影响进入世界。 */
+        if (url) {
+          const panoUrl = String(url).replace(/\.glb($|\?)/i, '.pano.jpg$1');
+          if (panoUrl !== url) {
+            const im = new Image();
+            im.onload = () => {
+              try {
+                // U 方向必须 REPEAT（360° 环绕），V 方向 CLAMP（天顶/天底）
+                w.tex.pano = PW.GL.createTexture(gl, im, {
+                  wrap: 'repeat', clampV: true, aniso: 4, flipY: false
+                });
+                w.panoUrl = panoUrl;
+              } catch (e) { console.warn('全景贴图创建失败：', e && e.message); }
+            };
+            im.onerror = () => console.warn('没有全景贴图（' + panoUrl + '），地形用顶点色');
+            im.src = panoUrl;
+          }
+        }
         if (asset.camera) {
           const c3 = asset.camera;
           const wu = (v3meta.white_uv && v3meta.white_uv[1]) || 1.0;
