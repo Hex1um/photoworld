@@ -70,6 +70,10 @@ def load_photo(path: str, max_side: int = 1600) -> tuple[Image.Image, np.ndarray
     arr = np.asarray(img, dtype=np.float32) / 255.0
     meta["source_size"] = [src_w, src_h]
     meta["used_size"] = list(img.size)
+    # v3.0.5 修：load_photo 用原图尺寸算好了 hfov，但旧代码只把来源字符串返回，
+    # main 的 else 分支引用未赋值的局部 hfov → 默认调用必崩 UnboundLocalError。
+    # 把弧度值放进既有 meta（不改四元组签名，避免破坏 test_backend_fixes 等调用方）。
+    meta["hfov_rad"] = hfov
     return img, arr, src, {"fov_source": src, **meta}
 
 
@@ -115,7 +119,9 @@ def main() -> int:
         # `hfov_from_image` 的物理焦距分支用 sensor_w = w*per_unit/fpx，
         # 这里的 w 是被缩到 max_side 之后的宽度 → FOV 系统性偏小；
         # 而且会把 load_photo 用原图尺寸算好的结果覆盖掉。直接用它的返回值。
-        hfov = hfov if hfov else math.radians(60.0)
+        # v3.0.5 修：旧代码写 `hfov = hfov if hfov else ...`，但 hfov 只在 if 分支
+        # 赋值 → 默认（--fov=0）调用必崩。数值由 load_photo 放进 meta["hfov_rad"]。
+        hfov = meta.get("hfov_rad") or math.radians(60.0)
     vfov = vfov_of(hfov, img.size[0], img.size[1])
     cam = geom.Camera(hfov=hfov, vfov=vfov, w=img.size[0], h=img.size[1])
     # T5（v1.22）：俯仰角由地面带拟合残差反解（旧实现恒 0，注释却声称会反解）。

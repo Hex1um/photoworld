@@ -1,10 +1,16 @@
 @echo off
-rem PHOTOWORLD v3 launcher. ASCII only on purpose: cmd chokes on UTF-8 batch files.
-rem v3 rebuilds offline (pipeline/v3/bake.py -> world.glb), so this only needs the
-rem static server. All logic + messages live in tools\start_v3.ps1 (UTF-8 with BOM).
+rem PHOTOWORLD v3 launcher. ASCII only on purpose: cmd chokes on UTF-8 batch.
+rem Logic lives in tools\start.py (Python, zero third-party deps).
 setlocal
-set "PS=powershell"
-where pwsh >nul 2>nul && set "PS=pwsh"
-"%PS%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\start_v3.ps1" %*
+set "PY="
+where python >nul 2>nul && set "PY=python"
+if not defined PY (where py >nul 2>nul && set "PY=py -3")
+if not defined PY (where python3 >nul 2>nul && set "PY=python3")
+if not defined PY (
+  echo [ERR] Python not found. Install Python 3.10+ and add it to PATH.
+  pause
+  exit /b 1
+)
+%PY% "%~dp0tools\start.py" %*
 if errorlevel 1 pause
 endlocal

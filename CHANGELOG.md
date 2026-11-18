@@ -3,6 +3,127 @@
 本文件记录面向使用者的功能性变更：修了什么症状、根因是什么、影响多少、怎么验证。
 按重要性排序，格式 `## [版本] - 日期`。
 
+## [3.0.6] - 2026-11-18  · 一键启动从根上重写；multiview 工具链 Python 化
+
+**一键启动脚本与启动命令此前不可用，本版从根上修复，并实测到浏览器真正渲染出世界。**
+
+**根因与影响：**
+
+1. **旧启动器会被 PowerShell 执行策略直接拦掉**：`start_v2.bat` / `start_v3.bat`
+   实际是把所有逻辑放在 `tools/start_*.ps1`。只要机器策略禁止脚本（本机实测
+   "禁止运行脚本"错误），双击 `.bat` 传 `-ExecutionPolicy Bypass` 之外的一切入口
+   （例如直接在 PowerShell 里敲命令）都起不来。
+2. **v2 启动器因可选重依赖缺失而整个失败**：它会强制探测
+   `fastapi/uvicorn/torch/transformers`，缺一个就报错退出。但静态站与 v3 资产链路
+   根本不需要这些；本机 Python311 恰好全缺，于是 `start_v2.bat` 必然失败，连带
+   静态站也起不来。
+3. **文档与脚本给出了不存在的资产 URL**：README 与 `start_v3.ps1` 指向
+   `assets/world-v3-alpine.glb`（仓库里根本没有，只有 v2 的 `world-alpine.glb`），
+   照着打开只会得到 404。`-World alpine` 沿这条路径找三处候选全落空，直接报错。
+4. **环境变量大小写重复项让 Start-Process 崩溃**：本机同时存在 `HTTPS_PROXY` 与
+   `https_proxy`，PS 5.1 的 `Start-Process -RedirectStandardOutput` 拼字典时抛
+   "已添加项"，服务起不来且症状晦涩。
+
+**修法：** 新增零第三方依赖的 `tools/start.py` 作为唯一逻辑来源，四个 `.bat` 与两个
+`.ps1` 全部改为薄包装转调它（旧调用方零改动）：
+
+- 不依赖 PowerShell 执行策略，双击 `.bat` 或直接
+  `python tools/start.py --world alpine` 都可用；
+- v2 GPU 服务改为**可选**：缺依赖只警告并跳过，页面仍能用在线链路 / v3 资产；
+- 世界资产按 `v3 预烘 → v3 烘焙 → v2 内置 GLB` 顺序挑**确实存在**的文件，
+  全都没有才回退 `?w=` 在线链路，不再送用户去 404；
+- 后台服务用 `DETACHED_PROCESS` 启动并设 `NO_PROXY` 含回环，关掉启动窗口不被回收、
+  本地请求不走代理；`--stop` 按 PID 精确关闭，不误杀其他 python；
+- 默认端口 v3=8199、v2 静态站=8099 / GPU=8100，可用 `--port` / `--api-port` 改。
+
+**实测**：`.bat` 等价入口起服务后，生成的 URL `.../?glb=assets/world-alpine.glb&instant=1`
+返回 HTTP 200、GLB 头为 `glTF`，无头浏览器 `ready=1 / mode=asset / world=true`，
+零页面错误；`--stop` 后 8199/8100 端口释放。
+
+**multiview 工具链 Python 化（延续"尽量用 Python"）：** `tools/multiview.mjs`
+（原 659 行）的逻辑迁到 `tools/multiview.py`：浏览器链路复用 `tools/cdp.py`，清晰度
+六项复用 `tools/clarity.py`，PNG 解码用 Pillow（缺失时回退标准库 zlib）。机位套餐
+A/B/C(32)、PLAN_V2/V3(32)、空洞/拉丝/块数指标、判据取最差机位聚合、基线 A/B
+逐项对齐。`.mjs` 保留为薄包装，`node tools/multiview.mjs ...` 参数/输出/退出码不变。
+
+**验证**：新增 `tools/test_multiview_parity.py` 20 项断言，含用 JS 原版算法对 8 组
+合成输入（纯色/带参考底色/全黑/横带/竖带/纹理/渐变/天空陆地）逐指标比对，
+全部一致；`test_score_params.py` 的 3 处源码断言改指向 .py 权威来源。
+20 套 Python 测试通过（另 3 套因本机缺 torch / 17MB v3 GLB 跳过，非代码缺陷），
+全仓 JS/MJS `node --check` 通过，compileall 通过，20 处 `?v=` 全部 3.0.6。
+
+## [3.0.5] - 2026-11-17  · 修两个必崩回归与四处"假成功"验收陷阱
+
+本版全部是 bug 修复，无功能增删。**两个核心流程此前会直接崩溃**，另有四处工具在
+失败时伪装成成功——尤其基准测试会给出 PSNR 99dB 的假满分，足以误导验收判断。
+
+**P0 · 两条主流程必崩（均系上一次修复插队引入的回归）：**
+
+1. **`pipeline/reconstruct.py` 默认调用必崩**：不带 `--fov` 运行（文档第一条命令）
+   在 `[1/5]` 读图后抛 `UnboundLocalError: hfov`。根因是 v2.15.8 把 `hfov` 改到
+   `load_photo` 内部用原图尺寸计算，却只返回来源字符串；main 的 else 分支写了
+   `hfov = hfov if hfov else 60°`，引用了从未赋值的局部变量。修法：`load_photo`
+   把算好的弧度值放进 `meta["hfov_rad"]`（不改四元组返回签名，避免破坏
+   `test_backend_fixes` 等调用方），main 直接读取。实测默认调用现能正确输出
+   `hfov=69.4°` 并进入深度估计。
+2. **`pipeline/v3/bake.py` v3 烘焙必崩**：任何 `python pipeline/v3/bake.py <photo>`
+   在视锥内步骤抛 `UnboundLocalError: uv_photo`。根因是 P0-2 断崖角安全取色修复
+   把 `uv_core` 的计算插到了 `uv_photo` 网格定义之前。修法：把网格定义上移，
+   与 `uv_core` / `uv_src` 共用同一份 UV，结果不变。
+
+**P1 · 四处失败被伪装成成功（验收陷阱）：**
+
+3. **`tools/bench_glb.py` 假满分**：静态服务（8099）没启动时，工具对 Chrome
+   错误页截两张图，得出 **PSNR 99.0dB / 全视角 stripe 一致** 的"完美"报告并写入
+   `reports/bench_glb.json`。真值与重建拍的是同一张错误页，满分纯属假象。
+   修法：`open_page` 超时后校验 `dataset.ready`，未就绪直接抛错退出，不再产出报告。
+4. **`tools/shot.py`**：服务未启动仍把错误页存成截图并返回 0；
+5. **`tools/probe.py`**：错误页上 `dataset` 为空，多数表达式仍求值成功并返回 0，
+   看起来像探测通过。两者现均在从未就绪时明确报错、返回非 0（保留 `ready="0"`
+   这一合法中间态的语义）。
+6. **`tools/smoke.py --only <无匹配>`**：过滤后 0 个用例却打印"0/0 通过"并返回 0。
+   现返回 2 并列出可用的用例名。
+
+**P2 · 诊断信息丢失：** v3 烘焙报告里 `terrain.view_bias`（8 视角地形高度偏差，
+由 `reconcile_view_bias` 算出）被统一着色段一处 `view_bias = {}` 误置重置，导致
+无论怎么算报告里恒为空。已将默认值初始化移到分支前、删除误置行。
+
+验证：新增 `tools/test_v305_fixes.py`（13 项 AST + 源码断言，回退任一修复即 fail）；
+19 套 Python 回归通过（3 套因本机缺 torch / 17MB GLB 资产未跑，与代码无关）。
+缓存串 20 处 v3.0.4→v3.0.5。
+
+## [3.0.4] - 2026-11-17  · 工具链进一步 Python 化（A/B 截图 / 真值基准 / 轨迹渲染 / GitHub 采集）
+
+延续 v2.15.4/5 的「尽量用 Python」路线，把最后四个依赖重复 CDP 启动样板或纯数据处理的
+工具脚本改写为 Python 权威实现。症状：想用 Python 跑质检链路仍要装 Node，且
+`abshots` / `bench_glb` / `render_traj` 各自复制了一份「spawn Edge → 轮询
+CDP → WebSocket → taskkill」样板，改一处公共行为要动三个文件。
+
+- **`tools/abshots.py`**（A/B 多机位截图台）：改用共用 `tools/cdp.py`，去掉自带
+  的浏览器启动/CDP 握手代码。`--hw` / `--mode glb` / `--views` 等参数与输出
+  （逐图 mode/耗时/错误 + `_summary.json`）保持不变。
+- **`tools/bench_glb.py`**（GLB 真值基准）：JPEG 解码从 `jpeg-js` 换成 Pillow，
+  PSNR 与六项像素指标（voidFrac/innerVoid/lowVoid/darkFrac/stripe/detail）
+  公式逐字对齐 JS 原版；输入视角/新视角 PSNR 报告结构不变。
+- **`scripts/render_traj.py`**（合成轨迹渲染）：位姿生成（同一 LCG 种子公式）与
+  trsArray 变换矩阵移植到 Python，`traj_XXXX/frames/*.jpg + poses.json` 产物结构不变。
+- **`tools/harvest_github.py`**（GitHub 图集采集）：`curl` + Pillow 替代 Node
+  `https` + `jpeg-js`，天空启发式（顶部 12% 亮度方差 + 上下亮度差）逐字对齐，
+  manifest 结构与去重/并发计数不变。
+
+四个旧 `.mjs` 改为薄包装转调 Python（依次试 python/python3），旧的
+`node tools/xxx.mjs` 调用方零改动，退出码/输出透传。缓存串 20 处 v3.0.3→v3.0.4，
+`version.json` / `js/app.js` VERSION / `__PW_BUILD__` 同步。
+新增 `tools/test_pythonization_parity.py`（13 项）锁纯计算函数；并用原始 `.mjs`
+算法体做了逐位数值比对：`makePoses`(12 帧)、`trsArray`、`viewMetrics`(6 项)、
+`psnr` 与 JS 输出完全一致。原有 12 套 Python 回归全绿（`test_v3` 需 17MB GLB 资产，
+单独验证）。
+
+**保留为 JS 的边界**：`multiview.mjs`（同步 import 浏览器侧 `clarity.mjs` 镜像）、
+`eval.mjs` / `train_live_params.mjs` / `test_fixes.mjs` / `test_inference_cache.mjs`
+（用 `node:vm` 执行浏览器源码）、`diag_*.js`（注入表达式）—— 这些需要 JS 引擎，
+转 Python 等于重写被测对象，不属本次范围。
+
 ## [3.0.2] - 2026-11-17  · P0/P1：v3 接入主路径 + 断崖边缘抠除 + GLB/地平线/多视角一致性
 
 按"单步可验证、可回滚"逐项落地上一轮分析里的 P0/P1。没有改默认视场/标定，也没有用

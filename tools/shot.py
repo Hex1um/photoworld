@@ -31,6 +31,7 @@ def main() -> int:
 
         t0 = time.monotonic()
         state = "{}"
+        st = {}
         while (time.monotonic() - t0) * 1000 < wait * 1000:
             state = c.ev(
                 "JSON.stringify(Object.assign({}, document.body.dataset, "
@@ -43,6 +44,11 @@ def main() -> int:
                 break
             time.sleep(0.5)
         print("state=" + state)
+        # v3.0.5 修：页面从未就绪（服务未启动 / 错误页）时不能截图返回成功，
+        # 否则会把 Chrome 错误页存成截图、误导验收。保留 ready="0" 的合法语义。
+        if st.get("ready") not in ("1", "0", 1, 0):
+            print("页面在 %ss 内未就绪（url=%s），拒绝截图" % (wait, url), file=sys.stderr)
+            return 1
 
         time.sleep(0.6)
         c.screenshot(out)

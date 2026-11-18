@@ -118,6 +118,9 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
             "no_diffusion": cfg.get("no_diffusion", False),
             "prompt": cfg.get("prompt"), "pano_from": cfg.get("pano_from"),
             "cache_dir": cfg.get("cache_dir")}
+    # 逐视角高度偏差由 diffusion 分支里的 point_cloud(reconcile) 算出；
+    # 必须在分支前给默认值，否则 report 里的 terrain.view_bias 恒为空。
+    view_bias: dict = {}
     if cfg.get("no_diffusion"):
         print("[4/6] 视锥外：跳过扩散（--no-diffusion），全景=原图填入的已知区")
         pn = panomod.build(rgb, cam, pcfg)
@@ -166,7 +169,6 @@ def bake_one(path: str, out_dir: str, cfg: dict) -> dict:
 
     # ---- 统一着色 ----
     light = shade.sun_from_pano(pn["pano"])
-    view_bias = {}
     # 天空壳只做很轻的明暗（天空本身不该有地形那种坡面明暗）
     # 天空壳完全不烘焙光照：它是"远处本身"，再打光只会让天空出现球面明暗
     # （实测：侧视里天空穹顶变成一个圆盘，边界肉眼可见）。

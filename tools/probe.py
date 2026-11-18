@@ -61,6 +61,12 @@ def main() -> int:
                 break
             time.sleep(0.5)
         print("dataset=" + json.dumps(state, ensure_ascii=False))
+        # v3.0.5 修：页面从未就绪（服务未启动 / 错误页）时不能再执行表达式并返回
+        # 成功——错误页上 dataset 为空、多数表达式仍能求到值，会伪装成探测成功。
+        # 保留 ready="0" 的合法语义（应用侧中途状态）。
+        if state.get("ready") not in ("1", "0", 1, 0):
+            print("页面在 %ss 内未就绪（url=%s），拒绝探测" % (wait, url), file=sys.stderr)
+            return 1
         time.sleep(settle / 1000.0)
 
         r = c.eval_raw(expr)
