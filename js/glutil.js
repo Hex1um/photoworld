@@ -150,7 +150,12 @@ void main() {
     vec3 d = normalize(vWorld - uProjEye);
     float pu = atan(d.x, -d.z) * 0.15915494 + 0.5;
     float pv = 0.5 - asin(clamp(d.y, -1.0, 1.0)) * 0.31830989;
-    vec3 alb = srgb2lin(texture(uTex, vec2(pu, pv), uMipBias).rgb);
+    /* 掠射角的 mip 偏置：地形是沿半径铺的，视线越接近与地面平行，同一个像素在
+       全景上跨过的方位范围越大（树带被沿径向拉开成竖条）。按入射角给 mip 加偏置，
+       让远/斜的表面取更糊的一级，视觉上就是"自然地融进远处"，而不是一根根拉丝。 */
+    float graze = 1.0 - clamp(abs(dot(normalize(vN), d)), 0.0, 1.0);
+    float bias = uMipBias + smoothstep(0.30, 0.97, graze) * 3.0;
+    vec3 alb = srgb2lin(texture(uTex, vec2(pu, pv), bias).rgb);
     // 顶点色只做很弱的偏色/暗部调制（它已经被 match_to_photo 对齐过亮度）
     vec3 tint = mix(vec3(1.0), clamp(vC.rgb * 1.7, 0.0, 1.6), 0.32);
     col = alb * tint * (uSkyAmb * fill * 0.35 + 0.72);
