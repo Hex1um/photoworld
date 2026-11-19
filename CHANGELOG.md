@@ -92,6 +92,25 @@ A/B/C(32)、PLAN_V2/V3(32)、空洞/拉丝/块数指标、判据取最差机位�
 19 套 Python 回归通过（3 套因本机缺 torch / 17MB GLB 资产未跑，与代码无关）。
 缓存串 20 处 v3.0.4→v3.0.5。
 
+## [3.3.7] - 2026-11-19  · 全景外推模型的本机可行性评估（结论：只有 Diffusion360 可行）
+
+把"换一个更懂 360 的模型"这条路彻底调研了一遍，结论写进 `docs/acc_pano_models.md`：
+
+* **PanFusion 26.3GB / UniPano 32.6GB / PanoDiff 36GB / MVDiffusion 24GB+** ——
+  本机只有 8GB 显存，全部出局（数据取自 2025 的全景生成综述方法对比表与 PanFusion 官方文档）。
+* **Diffusion360 3.5GB / 4s** —— 唯一可行，而且它自带"单图 → 360"管线
+  （`Image2360PanoramaImagePipeline`），正是我们的场景。权重在 HF，镜像可达。
+
+依赖实测（`pip install --dry-run`）：`xformers 0.0.36` / `triton-windows 3.9.0.post30` /
+`py360convert 1.0.4` 都有 wheel；真正的阻塞是仓库钉死 **`numpy==1.23.5` + `diffusers==0.26`**，
+而本机是 Python 3.13 + numpy 2.5 + diffusers 0.43 —— 1.23 在 3.13 上没有 wheel。
+
+所以要做就得给它一个**独立的 3.11 环境**（uv 装 3.11 → venv → torch-cu128 + 老 diffusers），
+约 **2 小时**（装环境 40min / 权重 15min / 接管线 40min / 调 1~2 轮 30min）。
+
+预期收益要放平：它是 SD2 时代的 512×1024 + Real-ESRGAN，**强在结构（环形一致、接缝）**，
+弱在细节；想"转身也像原照片"仍然做不到——那是多图/视频重建（3DGS 一类）的领域。
+
 ## [3.3.6] - 2026-11-19  · 引入 SDXL img2img（已下载）+ 分段外推的真实结论
 
 ### 权重
