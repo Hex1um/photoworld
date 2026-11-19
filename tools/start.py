@@ -266,6 +266,24 @@ def main() -> int:
             return 1
         say("静态站就绪（PID=%d）：%s" % (static_pid, static_url), "ok")
 
+    # ---- 1b) v4 重建服务（本机计算；失败只警告，不影响看世界）----
+    v4_url = "http://127.0.0.1:8200"
+    if not http_ok(v4_url + "/api/v4/status?job=probe", 1.0):
+        try:
+            v4_pid = start_background(
+                [sys.executable, str(ROOT / "tools" / "serve_api.py"),
+                 "--port", "8200", "--static", str(ROOT)],
+                ROOT, "v4_api.log", args.visible,
+            )
+            if wait_http(v4_url + "/api/v4/status?job=probe", v4_pid, 8):
+                say("v4 重建服务就绪（PID=%d）：%s" % (v4_pid, v4_url), "ok")
+            else:
+                say("v4 重建服务没起来（多图重建不可用，看世界不受影响）。", "warn")
+        except Exception as e:
+            say("v4 重建服务启动失败：%s（多图重建不可用）" % e, "warn")
+    else:
+        say("v4 重建服务已在运行（复用）：%s" % v4_url, "ok")
+
     # ---- 2) v2 GPU 服务（可选；缺依赖只警告，不拖垮静态站）----
     api_pid = 0
     if args.v2:

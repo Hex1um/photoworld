@@ -143,6 +143,27 @@ def to_world(pts: np.ndarray, cols: np.ndarray, cells: int = 220,
                  (xmin - cx, xmax - cx, zmin - cz, zmax - cz), float(has.mean()))
 
 
+
+def _fit_viewer(pos: np.ndarray, target_span: float = 40.0):
+    """把任意尺度的重建结果缩放/平移到查看器的习惯尺度。
+
+    SfM 的尺度是任意单位（可能 0.5，也可能 200），而查看器的默认相机按"世界跨度
+    几十个单位、眼高 1.6"来摆。不归一化的话，人眼会站在网格里面或离得极远，
+    表现为"一片空白"（实测就是这么翻车的）。这里统一缩到水平跨度 ~40 单位、
+    底部贴 y=0、水平居中。
+    """
+    mn, mx = pos.min(0), pos.max(0)
+    span = max(float(mx[0] - mn[0]), float(mx[2] - mn[2]), 1e-6)
+    s = target_span / span
+    out = (pos - np.array([(mn[0] + mx[0]) / 2, mn[1], (mn[2] + mx[2]) / 2])) * s
+    # 关键：查看器默认相机站在原点、眼高 1.6、朝 -z 看。重建出来的是"一小块场景"，
+    # 如果居中原点，人就站在模型**内部**（背面被剔除 → 一片空白，实测两次翻车）。
+    # 所以把这块场景整体挪到相机前方，地面压到脚下：
+    out[:, 2] -= target_span * 0.55
+    out[:, 1] -= 1.6
+    return out.astype(np.float32), float(s)
+
+
 def to_glb(world: World, path: str, name: str = "world-v4") -> dict:
     """写成 GLB：一层 vertex-colored 三角网格 + 1×1 白贴图。"""
     import io
@@ -153,17 +174,18 @@ def to_glb(world: World, path: str, name: str = "world-v4") -> dict:
     buf = io.BytesIO()
     Image.new("RGB", (8, 8), (255, 255, 255)).save(buf, format="JPEG", quality=90)
     # 顶点色层的 UV 指向贴图中心：贴图是纯白，所以颜色完全由 COLOR_0 决定
-    uv = np.tile(np.array([[0.5, 0.5]], np.float32), (len(world.pos), 1))
-    layer = {"name": "terrain", "pos": world.pos, "nrm": world.nrm, "uv": uv,
+    pos, _s = _fit_viewer(world.pos)
+    uv = np.tile(np.array([[0.5, 0.5]], np.float32), (len(pos), 1))
+    layer = {"name": "terrain", "pos": pos, "nrm": world.nrm, "uv": uv,
              "color": world.col, "index": world.idx}
     extras = {
         "pipeline": "v4",
         # json 不接受 numpy 标量：extras 会被 GLB 写出器直接 json.dumps
         "v4": {"extent": [float(v) for v in world.extent], "fill": float(world.fill),
                "source": "multi-view SfM + heightfield"},
-        "bbox": [float(world.pos[:, 0].min()), float(world.pos[:, 1].min()),
-                 float(world.pos[:, 2].min()), float(world.pos[:, 0].max()),
-                 float(world.pos[:, 1].max()), float(world.pos[:, 2].max())],
+        "bbox": [float(pos[:, 0].min()), float(pos[:, 1].min()),
+                 float(pos[:, 2].min()), float(pos[:, 0].max()),
+                 float(pos[:, 1].max()), float(pos[:, 2].max())],
         "camera": {"hfov": 1.0472, "vfov": 0.6981, "w": 1024, "h": 640,
                    "pitch": 0.0, "eye_height": 1.6},
         "sun": [0.45, 0.78, 0.44], "amb": [0.55, 0.58, 0.62],

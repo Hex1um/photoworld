@@ -35,3 +35,5 @@ third_party/
 
 # v4 的合成测试集与产物
 /testdata/synth1/
+uploads/
+logs/*.log

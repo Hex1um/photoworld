@@ -35,6 +35,10 @@ def main() -> int:
                     help="f = ratio * max(w,h)；手机广角常见 1.1~1.25")
     ap.add_argument("--cells", type=int, default=200, help="高度场分辨率")
     ap.add_argument("--voxel", type=float, default=0.02, help="体素降采样尺寸（SfM 单位）")
+    # 默认用 heightfield：它在"素材一般"时更稳（tsdf 在稀疏输入上会出大块黑面）。
+    # 素材好（稠密、位姿准）时用 --mesh tsdf 才有垂直面。
+    ap.add_argument("--mesh", choices=["heightfield", "tsdf"], default="heightfield",
+                    help="世界表示：heightfield=高度场（默认，稳）；tsdf=体素融合+marching cubes（有垂直面，需好素材）")
     args = ap.parse_args()
 
     from v4 import fuse, ingest, qc, sfm
@@ -69,7 +73,20 @@ def main() -> int:
         print("      稀疏点太少（%d），无法成世界" % (0 if res.pts is None else len(res.pts)))
         return 1
 
-    print("[3/3] 拼世界…")
+    print("[3/3] 拼世界（%s）…" % args.mesh)
+    if args.mesh == "tsdf":
+        from v4 import tsdf as v4tsdf
+        mesh = v4tsdf.fuse_tsdf(frames, res, cells=args.cells)
+        if mesh is None:
+            print("      体素融合没产出网格（深度/位姿不一致），回退到高度场")
+            args.mesh = "heightfield"
+        else:
+            glb = os.path.join(args.out, "world-v4.glb")
+            info = v4tsdf.to_glb(mesh, glb)
+            print("      %s  顶点 %d  三角 %d  用时 %.1fs"
+                  % (glb, len(mesh.pos), len(mesh.idx), time.monotonic() - t0))
+            return 0
+
     pts, cols = fuse.voxel_downsample(res.pts, res.colors, args.voxel)
     world = fuse.to_world(pts, cols, cells=args.cells)
     rep2 = qc.summarize(res, len(frames), fill=world.fill)
