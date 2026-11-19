@@ -92,6 +92,47 @@ A/B/C(32)、PLAN_V2/V3(32)、空洞/拉丝/块数指标、判据取最差机位�
 19 套 Python 回归通过（3 套因本机缺 torch / 17MB GLB 资产未跑，与代码无关）。
 缓存串 20 处 v3.0.4→v3.0.5。
 
+## [3.3.8] - 2026-11-19  · Diffusion360 跑通了（18 秒/张，8GB 够），但画质不换默认
+
+按评估结论把唯一可行的候选落地了，全过程记在 `docs/acc_diff360.md`，产物
+`shots/diff360_alpine.png`。
+
+### 环境（独立 venv，不影响主环境）
+
+* `uv python install 3.11` → **Python 3.11.18**（主环境 3.13 装不了它的 numpy 1.23）
+* `.venvs/diff360`：torch **2.11.0+cu128** / diffusers **0.26.0** / numpy 1.23.5 /
+  transformers 4.41.2 / hub 0.23.5（hub 必须 <0.26，否则 diffusers 0.26 导入即炸）
+* 权重 7GB（sd-base + sd-i2p + sr-base），hf-mirror 下载，峰值 22MB/s
+* `.venvs/` 与 `third_party/` 已加入 `.gitignore`
+
+### 为在 8GB/Windows 上跑，改了三处（都写进文档）
+
+1. **SR 改按需加载**：basicsr 1.4.2 在 torchvision 0.26 上导入即崩
+   （`functional_tensor` 已被删），`enable_sr=False` 时整段跳过，代价是输出只有 512×1024；
+2. **关掉 CPU offload**：`enable_model_cpu_offload()` + 手动 encode_prompt 会把 token
+   留在 CPU，报 device mismatch；8GB 上整块放得下，直接 `.to('cuda')`；
+3. **torch 必须锁 2.11**：装 realesrgan 会把它升到 2.15 + torchvision 0.29，反而更糟。
+
+### 实测
+
+```
+加载 9s / 推理 18s（24 步，512² → 1024×512）/ 峰值约 5.5GB
+```
+
+### 画质对比 —— 这就是不换默认的原因
+
+| 维度 | 现有 eq（SDXL） | Diffusion360（SD2.1） |
+|---|---|---|
+| 照片区保真 | ✅ 逐像素一致 | ❌ 中心区被重画（Half Dome 变成另一座山） |
+| 侧向结构 | ⚠️ 糊 | ✅ 连贯，**没有竖条** |
+| 接缝 | 无 | ⚠️ 3~4 条竖直亮缝 |
+| 天空 | 干净渐变 | ❌ 一条巨大极光状亮弧 |
+| 天底 | 雾色 | ❌ 一圈"木地板" |
+| 风格 | 照片 | 绘画感 |
+
+出厂仍 `--pano-mode eq`。要继续用它，第一步必须**按 60°/40° 重算 mask 并把输入
+先投影到等距柱状**（现在用的是官方 90° 示例 mask，所以照片区被重画），预计再 1~2 小时。
+
 ## [3.3.7] - 2026-11-19  · 全景外推模型的本机可行性评估（结论：只有 Diffusion360 可行）
 
 把"换一个更懂 360 的模型"这条路彻底调研了一遍，结论写进 `docs/acc_pano_models.md`：
