@@ -92,6 +92,39 @@ A/B/C(32)、PLAN_V2/V3(32)、空洞/拉丝/块数指标、判据取最差机位�
 19 套 Python 回归通过（3 套因本机缺 torch / 17MB GLB 资产未跑，与代码无关）。
 缓存串 20 处 v3.0.4→v3.0.5。
 
+## [3.3.6] - 2026-11-19  · 引入 SDXL img2img（已下载）+ 分段外推的真实结论
+
+### 权重
+
+`stabilityai/stable-diffusion-xl-base-1.0`（fp16 diffusers 布局，约 5GB）已落到本机
+HF 缓存，`StableDiffusionXLImg2ImgPipeline` 离线加载 **4 秒**。
+
+下载过程本身就踩了两个坑，都记进工具里了：
+
+* 本机走系统代理，`resolve/main/...` 的响应**丢了 `X-Repo-Commit` 头**，`hf_hub`
+  会判定"不是 HuggingFace 端点"并拒绝（小文件侥幸过，5GB 的 UNet 过不去）；
+  `tools/hf_fetch.py` 用 urllib + Range 直连绕过这个校验，续传可用。
+* 官方端点实测 **0.33 MB/s**，`hf-mirror.com` **4.25 MB/s**（13 倍）；
+  切镜像后 2.4GB 只花了 5 分钟。
+
+### 分段外推做到什么程度
+
+`pano_views.build_multiview` 现在是：竖直渐变初值 → 6 个 100° 视角依次 img2img
+（`strength = 0.80 − 0.20 × 已知占比`，照片像素永不被覆盖）→ 余弦羽化合并。
+
+结果（`out/v3/worlds/alpine/pano.jpg`）：
+
+* 天空与水面**已经连贯**（渐变自然、没有圆盘、没有亮斑）；
+* 但视角与视角之间的**接缝仍然可见**——每格各自生成了自己的树线，拼接处是竖条。
+
+### 结论：这条路的瓶颈不是模型，是"单张 60° 照片推 360°"的信息量
+
+试过的四种初值与三种管线组合里，最好的是我们现在**已经出厂**的 `--pano-mode eq`
+（1024 / 26 步）。分段外推的代码保留为实验开关（`--pano-mode views`），默认仍走 eq。
+
+要继续往上，需要的是**相机条件化的全景模型**（PanFusion / MVDiffusion 这一类），
+不是 SDXL + img2img 能补出来的。
+
 ## [3.3.5] - 2026-11-18  · 修好桌面启动器（本机没装系统 Python）+ 接 img2img 外推
 
 ### 桌面快捷方式启动不了的真正原因

@@ -84,6 +84,32 @@ def _p_pipe():
     return _p._load_pipe()
 
 
+
+def _gradient_fill(pano0: np.ndarray, known: np.ndarray) -> np.ndarray:
+    """把未知区填成**竖直渐变**（每行取该行已知像素的中位色），不做镜像平铺。
+
+    为什么要这个：镜像平铺会把照片的列复制成一整圈，img2img 的 strength 一高
+    就保留那些竖条 —— 实测满屏"窗帘"。竖直渐变没有任何横向结构，模型可以自由
+    生成真实的地平线与云，而整体色调又被照片约束住（不会跑色）。
+    """
+    h, w = pano0.shape[:2]
+    out = pano0.copy()
+    rows = np.zeros((h, 3), dtype=np.float32)
+    have = np.zeros(h, dtype=bool)
+    for y in range(h):
+        m = known[y]
+        if m.sum() > w * 0.02:
+            rows[y] = np.median(pano0[y][m], axis=0)
+            have[y] = True
+    idx = np.nonzero(have)[0]
+    if idx.size:
+        for c in range(3):
+            rows[:, c] = np.interp(np.arange(h), idx, rows[idx, c])
+    grid = np.repeat(rows[:, None, :], w, axis=1)   # (h, w, 3)
+    out[~known] = grid[~known]
+    return out.astype(np.float32)
+
+
 def build_multiview(rgb: np.ndarray, cam, pano0: np.ndarray, known: np.ndarray,
                     prompt: str, cfg: dict) -> np.ndarray:
     import torch
@@ -101,7 +127,7 @@ def build_multiview(rgb: np.ndarray, cam, pano0: np.ndarray, known: np.ndarray,
     cfg_scale = float(cfg.get("pano_cfg", 5.2))
     seed = int(cfg.get("seed", 0))
 
-    full = _p.mirror_fill(pano0, known)
+    full = _gradient_fill(pano0, known)
     covered = known.copy()
 
     views = []
@@ -128,7 +154,8 @@ def build_multiview(rgb: np.ndarray, cam, pano0: np.ndarray, known: np.ndarray,
         neg = "text, watermark, blurry, distorted, seam, mirrored, duplicate"
         if kind == "img2img":
             # strength 越低越像原图；未知区多一些就多改一点
-            st = float(np.clip(0.62 - 0.25 * kfrac, 0.34, 0.62))
+            # 初值是平滑渐变（没有横向结构），所以强度要高一些，让模型真正生成
+            st = float(np.clip(0.80 - 0.20 * kfrac, 0.55, 0.80))
             out = pipe(prompt=prompt, negative_prompt=neg, image=img_pil,
                        height=vh, width=vw,
                        num_inference_steps=max(12, int(steps * st)),
