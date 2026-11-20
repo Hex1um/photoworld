@@ -88,6 +88,29 @@ def _find_build_python() -> str | None:
     return None
 
 
+def _cleanup_old_jobs(max_age_hours: float = 24.0) -> int:
+    """清掉超过 24 小时的上传/产物任务目录：v4 每建一次任务就留一份图+日志，
+    不清理会长期占盘（一次十几张照片就是几十 MB）。只动符合 job 命名的目录。"""
+    cutoff = time.time() - max_age_hours * 3600
+    removed = 0
+    for base in (UPLOADS, OUT):
+        if not base.is_dir():
+            continue
+        for d in base.iterdir():
+            if not d.is_dir() or not JOB_RE.match(d.name):
+                continue
+            try:
+                newest = max((p.stat().st_mtime for p in d.rglob("*") if p.is_file()),
+                             default=d.stat().st_mtime)
+            except OSError:
+                newest = d.stat().st_mtime
+            if newest < cutoff:
+                if shutil.rmtree(d, ignore_errors=True) is None and not d.exists():
+                    removed += 1
+                    print("[api] 清理过期任务：" + str(d))
+    return removed
+
+
 def _job_dir(job: str) -> Path:
     d = UPLOADS / job
     d.mkdir(parents=True, exist_ok=True)
@@ -325,6 +348,9 @@ def main() -> int:
               % ", ".join(BUILD_MODULES), file=sys.stderr)
     UPLOADS.mkdir(parents=True, exist_ok=True)
     OUT.mkdir(parents=True, exist_ok=True)
+    n = _cleanup_old_jobs()
+    if n:
+        print("已清理 %d 个过期重建任务目录（>24h）" % n)
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print("v4 重建服务：http://127.0.0.1:%d  （静态目录 %s）" % (args.port, Path(args.static).resolve()))
     try:

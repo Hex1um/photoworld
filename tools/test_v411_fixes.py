@@ -171,14 +171,17 @@ def test_frontend():
 
 
 def test_version_docs():
-    assert json.loads(read("version.json"))["version"] == "4.1.1"
+    # 版本号会随后续版本继续升；本测试只锁"v4.1.1 的修复没有被回退"，
+    # 并要求 index.html 缓存串与 version.json 始终同源。
+    ver = json.loads(read("version.json"))["version"]
+    assert tuple(int(x) for x in ver.split(".")) >= (4, 1, 1), ver
     idx = read("index.html")
     vs = set(re.findall(r"\?v=(\d+\.\d+\.\d+)", idx))
-    assert vs == {"4.1.1"}, vs
+    assert vs == {ver}, (vs, ver)
     assert read("CHANGELOG.md").startswith("# 更新日志") and "## [4.1.1]" in read("CHANGELOG.md")
     v4 = read("docs/v4.md")
     assert "前端上传未接" not in v4, "v4 文档仍有「前端上传未接」旧口径"
-    ok("版本/缓存串/CHANGELOG/v4 文档一致（4.1.1）")
+    ok("版本/缓存串/CHANGELOG/v4 文档一致（%s）" % ver)
 
 
 if __name__ == "__main__":

@@ -95,6 +95,21 @@ def run(frames, focal_ratio: float = 1.2, pair_min_inliers: int = 50,
         cams.append(Cam(estimate_K(w, h, focal_ratio), w, h))
     res.cams, res.kpts, res.dess = cams, kpts, dess
 
+    # v4.1.2：配对匹配原先在锚点、增量定位、扩充地图、视差、重投影里被重复算了
+    # 4~5 次（每次 BFMatcher.knnMatch 两趟 8000 维描述子）。这里按无序对缓存一次，
+    # 反向调用时交换两列，保持原来的 (i 的 keypoint, j 的 keypoint) 语义。
+    _match_cache: dict[tuple[int, int], np.ndarray] = {}
+
+    def matched(i: int, j: int) -> np.ndarray:
+        if i == j:
+            return np.zeros((0, 2), np.int32)
+        a, b = (i, j) if i < j else (j, i)
+        key = (a, b)
+        if key not in _match_cache:
+            _match_cache[key] = _match(dess[a], dess[b])
+        m = _match_cache[key]
+        return m if i < j else m[:, ::-1]
+
     # ---- 配对：先相邻（视频/环拍顺序），再补远距离对（最多 max_pairs）----
     cand = []
     for i in range(n):
@@ -112,7 +127,7 @@ def run(frames, focal_ratio: float = 1.2, pair_min_inliers: int = 50,
 
     pairs, Emats = [], {}
     for (i, j) in cand:
-        m = _match(dess[i], dess[j])
+        m = matched(i, j)
         if len(m) < 20:
             continue
         p1 = kpts[i][m[:, 0]].astype(np.float64)
@@ -145,7 +160,7 @@ def run(frames, focal_ratio: float = 1.2, pair_min_inliers: int = 50,
     a = max(good, key=lambda p: p.inliers)
     i0, j0 = a.i, a.j
     E, mk = Emats[(i0, j0)]
-    ma = _match(dess[i0], dess[j0])
+    ma = matched(i0, j0)
     sel0 = mk
     _, R, t, mask2 = cv2.recoverPose(E, kpts[i0][ma[sel0, 0]].astype(np.float64),
                                      kpts[j0][ma[sel0, 1]].astype(np.float64), cams[i0].K)
@@ -181,21 +196,24 @@ def run(frames, focal_ratio: float = 1.2, pair_min_inliers: int = 50,
             for g in range(n):
                 if poses[g] is None or g == f:
                     continue
-                m = _match(dess[g], dess[f])
+                m = matched(g, f)
                 if len(m) < 12:
                     continue
-                obj, img = [], []
-                for (fg, kg) in list(obs.keys()):
-                    if fg != g:
-                        continue
-                    hit = m[m[:, 0] == kg]
-                    if len(hit):
-                        obj.append(pts[0][obs[(fg, kg)]])
-                        img.append(kpts[f][hit[0, 1]])
-                if len(obj) >= 12:
-                    score = len(obj)
+                # v4.1.2：旧版对每个 3D 点做一次 m[m[:,0]==kg] 线性扫描，
+                # 随地图点增长是 O(obs×matches)。改成一次哈希建表。
+                g2f: dict[int, int] = {}
+                for a, b in m:
+                    ka = int(a)
+                    if ka not in g2f:      # 与旧版 hit[0] 保持一致：取第一条匹配
+                        g2f[ka] = int(b)
+                usable = [(int(kg), pid) for (fg, kg), pid in obs.items()
+                          if fg == g and int(kg) in g2f]
+                if len(usable) >= 12:
+                    score = len(usable)
                     if best is None or score > best[0]:
-                        best = (score, np.array(obj, np.float64), np.array(img, np.float64))
+                        obj = np.array([pts[0][pid] for _, pid in usable], np.float64)
+                        img = np.array([kpts[f][g2f[kg]] for kg, _ in usable], np.float64)
+                        best = (score, obj, img)
             if best is None:
                 continue
             _, obj, img = best
@@ -211,7 +229,7 @@ def run(frames, focal_ratio: float = 1.2, pair_min_inliers: int = 50,
             for g in range(n):
                 if g == f or poses[g] is None:
                     continue
-                m = _match(dess[g], dess[f])
+                m = matched(g, f)
                 if len(m) < 15:
                     continue
                 Rg, tg = poses[g]
@@ -243,7 +261,7 @@ def run(frames, focal_ratio: float = 1.2, pair_min_inliers: int = 50,
         if poses[p.i] is None or poses[p.j] is None:
             continue
         Ri, ti = poses[p.i]; Rj, tj = poses[p.j]
-        m = _match(dess[p.i], dess[p.j])
+        m = matched(p.i, p.j)
         if len(m) < 10:
             continue
         Xh = cv2.triangulatePoints(cams[p.i].K @ np.hstack([Ri, ti]),
@@ -261,7 +279,7 @@ def run(frames, focal_ratio: float = 1.2, pair_min_inliers: int = 50,
     for p in good:
         if poses[p.i] is None or poses[p.j] is None:
             continue
-        m = _match(dess[p.i], dess[p.j])
+        m = matched(p.i, p.j)
         if len(m) < 10:
             continue
         Ri, ti = poses[p.i]; Rj, tj = poses[p.j]
