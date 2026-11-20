@@ -9,7 +9,11 @@
 (function () {
   'use strict';
 
-  const API = (location.protocol + '//' + location.hostname + ':8200').replace('http://', 'http://');
+  // 本机重建服务只监听 HTTP；页面即使经 https/file:// 打开也必须显式拼 http。
+  // v4.1.0 这里写了 .replace('http://','http://') 空操作，https 页面会拼成 https://...:8200 直接失败。
+  const HOST = location.hostname || '127.0.0.1';
+  const API = 'http://' + HOST + ':8200';
+  const POLL_TIMEOUT_MS = 15 * 60 * 1000;
   const $ = (sel) => document.querySelector(sel);
 
   function elt(tag, cls, txt) {
@@ -80,7 +84,7 @@
   .v4w-qc{border-radius:11px;border:1px solid #2a2f37;padding:12px 14px;margin-bottom:12px;font-size:12.5px}
   .v4w-qc h4{margin:0 0 8px;font-size:13px;display:flex;align-items:center;gap:8px}
   .v4w-chip{font-size:11px;padding:2px 8px;border-radius:20px;font-weight:600}
-  .v4w-pass{background:#13351f;color:#5ee08a28;color:#63e08b;border:1px solid #235c37}
+  .v4w-pass{background:#13351f;color:#63e08b;border:1px solid #235c37}
   .v4w-warn{background:#3a2f12;color:#f0c05a;border:1px solid #5c4a1e}
   .v4w-fail{background:#3a1618;color:#ff7b7b;border:1px solid #5c2529}
   .v4w-kv{display:grid;grid-template-columns:repeat(3,1fr);gap:8px 12px;color:#9aa1ab}
@@ -94,7 +98,14 @@
   /* ---------------- 状态 ---------------- */
   let files = [];
   let job = null;
+  let token = null;
   let timer = null;
+  let pollStart = 0;
+  let pollErrors = 0;
+
+  function auth(path) {
+    return path + '?job=' + encodeURIComponent(job) + '&token=' + encodeURIComponent(token || '');
+  }
 
   function setState(txt) { $('#v4wState').textContent = txt; }
   function setBar(p) { $('#v4wBar').style.width = Math.max(0, Math.min(100, p)) + '%'; }
@@ -132,53 +143,76 @@
       setState('创建任务…'); setBar(3);
       const j = await api('/api/v4/job', { method: 'POST' });
       job = j.job;
+      token = j.token;
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         setState(`上传 ${i + 1}/${files.length}：${f.name}`);
         setBar(5 + 45 * (i / files.length));
-        await api('/api/v4/upload?job=' + encodeURIComponent(job) +
-                  '&name=' + encodeURIComponent(f.name),
+        await api(auth('/api/v4/upload') + '&name=' + encodeURIComponent(f.name),
                   { method: 'POST', body: f });
       }
       setBar(52);
       setState('启动重建（本机计算，可能需要几十秒）…');
-      await api('/api/v4/build?job=' + encodeURIComponent(job), { method: 'POST' });
+      await api(auth('/api/v4/build'), { method: 'POST' });
       poll();
     } catch (err) {
       setState('失败：' + err.message);
       $('#v4wRun').disabled = false;
       log('如果是「Failed to fetch」，说明本机重建服务没起。\n' +
-          '请运行：python tools/serve_api.py --port 8200 --static .\n' +
-          '（或双击桌面上的「PHOTOWORLD v4 - 重建服务.bat」）');
+          '请运行：python tools/start.py（它会连带拉起 v4 服务）。\n' +
+          '若服务在但报依赖错误，请安装 numpy / opencv-python / scipy / pillow。');
     }
   });
 
+  function endPoll(msg, failed) {
+    clearInterval(timer); timer = null;
+    setBar(failed ? 52 : 100);
+    setState(msg);
+    $('#v4wRun').disabled = false;
+    if (failed) $('#v4wGo').classList.add('hidden');
+  }
+
   function poll() {
     clearInterval(timer);
+    pollStart = Date.now(); pollErrors = 0;
     timer = setInterval(async () => {
+      if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
+        endPoll('重建超时（超过 15 分钟）—— 请看日志或重启本机服务', true);
+        return;
+      }
       try {
-        const s = await api('/api/v4/status?job=' + encodeURIComponent(job));
+        const s = await api(auth('/api/v4/status'));
+        pollErrors = 0;
         log(s.log || '');
         if (s.qc) renderQc(s.qc);
         if (s.state === 'running') {
-          setState('重建中…'); setBar((b) => b);
-          $('#v4wBar').style.width = '78%';
+          // v4.1.0 这里写成 setBar((b) => b)，给 width 拼出 "NaN%"；进度条实际不显示。
+          setBar(78);
+          setState('重建中…' + (s.qc ? ' · QC ' + s.qc.verdict : ''));
         } else if (s.state === 'done') {
-          clearInterval(timer); setBar(100);
-          setState('完成 —— 世界已生成');
-          if (s.glb) {
+          if (s.qc && s.qc.verdict === 'FAIL') {
+            endPoll('未通过质量门 —— 这个素材不适合重建（报告见下）', true);
+          } else if (!s.glb) {
+            endPoll('重建结束但没有生成世界，请看日志', true);
+          } else {
+            clearInterval(timer); timer = null; setBar(100);
+            setState('完成 —— 世界已生成' + (s.qc ? '（QC ' + s.qc.verdict + '）' : ''));
             $('#v4wGo').classList.remove('hidden');
             $('#v4wGo').onclick = () => {
               location.href = '?glb=' + encodeURIComponent(s.glb) + '&instant=1';
             };
+            $('#v4wRun').disabled = false;
           }
-          $('#v4wRun').disabled = false;
         } else if (s.state === 'fail') {
-          clearInterval(timer); setBar(100);
-          setState('未通过质量门 —— 这个素材不适合重建（报告见下）');
-          $('#v4wRun').disabled = false;
+          const detail = s.error ? ('：' + s.error)
+            : s.exit === 2 ? '：至少需要 2 帧'
+            : (s.qc && s.qc.verdict === 'FAIL') ? '：未通过质量门'
+            : '（退出码 ' + s.exit + '，详情见日志）';
+          endPoll('重建失败' + detail, true);
         }
-      } catch (e) { /* 网络抖动时继续轮询 */ }
+      } catch (e) {
+        if (++pollErrors >= 10) endPoll('连续 10 次读不到状态 —— 本机服务可能已退出', true);
+      }
     }, 1200);
   }
 

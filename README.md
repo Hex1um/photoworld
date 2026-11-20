@@ -19,6 +19,22 @@ python tools/start.py --stop          # 关闭本启动器起的服务（按 PID
 执行策略限制，也不再因为 v2 的可选重依赖缺失就整个起不来。默认端口 8199（v3），
 v2 静态站 8099 / GPU 8100；可用 `--port` / `--api-port` 改。
 
+## v4：多图 / 视频 → 世界（v4.1.0 起，v4.1.1 修实错）
+
+顶栏「多图重建」：选 6~20 张**走动拍**的照片（或一段环绕视频）→ 上传到本机服务 →
+质量门评估 → 出世界。启动器会自动拉起 8200 端口的重建服务，`--stop` 会一起关闭。
+本机需装 `numpy opencv-python scipy pillow`；缺依赖时面板给安装指令，不会再误报成
+「素材不合格」。命令行等价入口：
+
+```bash
+python pipeline/v4/build.py --input 我的照片目录 --qc-only   # 先只评估
+python pipeline/v4/build.py --input 我的照片目录 --out out/v4/worlds/myscene
+```
+
+QC 不过会直接拦下（定位率 <0.4 / RMSE >6px / 填充率 <0.2），并给「怎么重拍」的建议；
+默认高度场只有地面，`--mesh tsdf` 才有垂直面但对素材要求高。完整拍法与指标见
+[`docs/v4.md`](docs/v4.md)。
+
 若要完全手工启动（不依赖启动器）：
 
 ```bash

@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#08090b">
 <title>PHOTOWORLD — 走进照片里的世界</title>
 <meta name="description" content="上传一张风景照片，在浏览器里重建为可以自由行走的 3D 世界。">
-<link rel="stylesheet" href="css/style.css?v=4.1.0">
+<link rel="stylesheet" href="css/style.css?v=4.1.1">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
@@ -214,7 +214,7 @@
 /* 过期缓存自检：GitHub Pages 的 HTML 有 ~10 分钟缓存，手机浏览器更久。
    页面里的 BUILD 与 version.json 不一致就用带时间戳的 URL 重新加载一次
    （sessionStorage 防死循环）。用户拿到的永远是当前部署的 JS，而不是旧版本。 */
-window.__PW_BUILD__ = '4.1.0';
+window.__PW_BUILD__ = '4.1.1';
 (function () {
   var KEY = 'pw.reloaded';
   function check(reloadIfNewer) {
@@ -271,26 +271,26 @@ window.addEventListener('unhandledrejection', function (e) {
 });
 </script>
 
-<script src="js/mat.js?v=4.1.0"></script>
-<script src="js/glutil.js?v=4.1.0"></script>
-<script src="js/reconstruct.js?v=4.1.0"></script>
-<script src="js/depthpost.js?v=4.1.0"></script>
-<script src="js/world.js?v=4.1.0"></script>
-<script src="js/depth.js?v=4.1.0"></script>
-<script src="js/objects.js?v=4.1.0"></script>
-<script src="js/inpaint.js?v=4.1.0"></script>
-<script src="js/semantics.js?v=4.1.0"></script>
-<script src="js/intro.js?v=4.1.0"></script>
-<script src="js/glbworld.js?v=4.1.0"></script>
-<script src="js/renderer.js?v=4.1.0"></script>
-<script src="js/player.js?v=4.1.0"></script>
-<script src="js/audio.js?v=4.1.0"></script>
-<script src="js/live_params.js?v=4.1.0"></script>
-<script src="js/extend.js?v=4.1.0"></script>
-<script src="js/object3d.js?v=4.1.0"></script>
-<script src="js/caps.js?v=4.1.0"></script>
-<script src="js/app.js?v=4.1.0"></script>
+<script src="js/mat.js?v=4.1.1"></script>
+<script src="js/glutil.js?v=4.1.1"></script>
+<script src="js/reconstruct.js?v=4.1.1"></script>
+<script src="js/depthpost.js?v=4.1.1"></script>
+<script src="js/world.js?v=4.1.1"></script>
+<script src="js/depth.js?v=4.1.1"></script>
+<script src="js/objects.js?v=4.1.1"></script>
+<script src="js/inpaint.js?v=4.1.1"></script>
+<script src="js/semantics.js?v=4.1.1"></script>
+<script src="js/intro.js?v=4.1.1"></script>
+<script src="js/glbworld.js?v=4.1.1"></script>
+<script src="js/renderer.js?v=4.1.1"></script>
+<script src="js/player.js?v=4.1.1"></script>
+<script src="js/audio.js?v=4.1.1"></script>
+<script src="js/live_params.js?v=4.1.1"></script>
+<script src="js/extend.js?v=4.1.1"></script>
+<script src="js/object3d.js?v=4.1.1"></script>
+<script src="js/caps.js?v=4.1.1"></script>
+<script src="js/app.js?v=4.1.1"></script>
 <!-- v4：多图/视频重建面板（独立脚本，不依赖主程序作用域） -->
-<script src="js/v4upload.js?v=4.1.0"></script>
+<script src="js/v4upload.js?v=4.1.1"></script>
 </body>
 </html>

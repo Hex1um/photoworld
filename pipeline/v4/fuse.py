@@ -85,7 +85,13 @@ def to_world(pts: np.ndarray, cols: np.ndarray, cells: int = 220,
         wy = np.bincount(flat, weights=p[:, 1], minlength=ncell)
     y = np.zeros(ncell, np.float32)
     col = np.ones((ncell, 3), np.float32) * 0.42
-    y[has] = wy[has] / np.maximum(cnt[has], 1)
+    if base == "median":
+        # v4.1.1：median 分支算出的已经是"每格高度的中位数"，不能再除以点数。
+        # 旧版在这里统一除 cnt，导致 60 点格子的高度被缩成 1/60（合成实测 10 → 0.167），
+        # 所有 v4 默认世界的地形高度都不可信。mean 分支才需要除以 cnt。
+        y[has] = wy[has]
+    else:
+        y[has] = wy[has] / np.maximum(cnt[has], 1)
     col[has] = wc[has] / np.maximum(cnt[has], 1)[:, None]
 
     # 空洞填充：反复用邻居均值补，避免大洞变成"黑洞"
@@ -124,8 +130,10 @@ def to_world(pts: np.ndarray, cols: np.ndarray, cells: int = 220,
     # 顶点 / 法线 / 颜色
     P = np.stack([gxx, grid_y, gzz], axis=-1).reshape(-1, 3).astype(np.float32)
     C = grid_c.reshape(-1, 3)
-    gy, gx_ = np.gradient(grid_y)
-    N = np.stack([-gx_, np.ones_like(grid_y) * (span / cells), -gy], axis=-1).reshape(-1, 3)
+    # meshgrid 用 indexing="ij"：axis0 = x，axis1 = z。np.gradient 返回 (d/dx, d/dz)，
+    # 旧版把两个分量命名反了，法线的 x/z 分量随之互换（斜面上的高光方向是错的）。
+    gx_, gz_ = np.gradient(grid_y)
+    N = np.stack([-gx_, np.ones_like(grid_y) * (span / cells), -gz_], axis=-1).reshape(-1, 3)
     N /= np.maximum(np.linalg.norm(N, axis=-1, keepdims=True), 1e-9)
 
     idx = []

@@ -33,6 +33,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "logs"
 PID_FILE = LOG_DIR / "pids_v3.json"
+V4_PORT = 8200          # v4 重建服务；--stop 必须一并关闭，否则留下孤儿进程
 
 
 QUIET = False
@@ -165,7 +166,7 @@ def do_stop(port: int, api_port: int) -> int:
     killed = []
     seen = set()
     info = read_pids()
-    for key in ("static", "api"):
+    for key in ("static", "api", "v4"):
         pid = int(info.get(key) or 0)
         if pid > 0 and pid not in seen:
             seen.add(pid)
@@ -175,7 +176,7 @@ def do_stop(port: int, api_port: int) -> int:
                     killed.append("%s=%d" % (key, pid))
                 except Exception:
                     pass
-    for label, p in (("static", port), ("api", api_port)):
+    for label, p in (("static", port), ("api", api_port), ("v4", V4_PORT)):
         pid = port_owner(p)
         if pid > 0 and pid not in seen and is_python_pid(pid):
             seen.add(pid)
@@ -189,7 +190,7 @@ def do_stop(port: int, api_port: int) -> int:
     except Exception:
         pass
     time.sleep(0.5)
-    left = [p for p in (port, api_port) if port_owner(p) > 0]
+    left = [p for p in (port, api_port, V4_PORT) if port_owner(p) > 0]
     if killed:
         say("已停止：" + ", ".join(killed), "ok")
     else:
@@ -197,7 +198,7 @@ def do_stop(port: int, api_port: int) -> int:
     if left:
         say("注意：端口仍被占用 " + ", ".join(str(x) for x in left) + "（可能是别的程序）", "warn")
     else:
-        say("端口 %d / %d 已释放" % (port, api_port), "ok")
+        say("端口 %d / %d / %d 已释放" % (port, api_port, V4_PORT), "ok")
     return 0
 
 
@@ -267,21 +268,28 @@ def main() -> int:
         say("静态站就绪（PID=%d）：%s" % (static_pid, static_url), "ok")
 
     # ---- 1b) v4 重建服务（本机计算；失败只警告，不影响看世界）----
-    v4_url = "http://127.0.0.1:8200"
+    # v4.1.1：serve_api 本身零依赖，但它要起 build.py（numpy/cv2/scipy/PIL）。
+    # 用 capable 解释器拉起整条链，避免"服务在、一重建就 ModuleNotFoundError"。
+    v4_url = "http://127.0.0.1:%d" % V4_PORT
+    v4_pid = 0
     if not http_ok(v4_url + "/api/v4/status?job=probe", 1.0):
         try:
+            py4 = find_python_with(["numpy", "cv2", "scipy", "PIL"]) or sys.executable
+            argv4 = py4.split() if " " in py4 else [py4]
             v4_pid = start_background(
-                [sys.executable, str(ROOT / "tools" / "serve_api.py"),
-                 "--port", "8200", "--static", str(ROOT)],
+                argv4 + [str(ROOT / "tools" / "serve_api.py"),
+                         "--port", str(V4_PORT), "--static", str(ROOT)],
                 ROOT, "v4_api.log", args.visible,
             )
             if wait_http(v4_url + "/api/v4/status?job=probe", v4_pid, 8):
-                say("v4 重建服务就绪（PID=%d）：%s" % (v4_pid, v4_url), "ok")
+                say("v4 重建服务就绪（PID=%d，Python=%s）：%s" % (v4_pid, py4, v4_url), "ok")
             else:
                 say("v4 重建服务没起来（多图重建不可用，看世界不受影响）。", "warn")
+                v4_pid = 0
         except Exception as e:
             say("v4 重建服务启动失败：%s（多图重建不可用）" % e, "warn")
     else:
+        v4_pid = port_owner(V4_PORT)
         say("v4 重建服务已在运行（复用）：%s" % v4_url, "ok")
 
     # ---- 2) v2 GPU 服务（可选；缺依赖只警告，不拖垮静态站）----
@@ -355,7 +363,8 @@ def main() -> int:
         sep = "&" if "?" in target else "?"
         target += sep + "api=" + urllib.request.quote(api_url, safe=":/")
 
-    save_pids({"static": static_pid, "api": api_pid, "url": target, "started": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    save_pids({"static": static_pid, "api": api_pid, "v4": v4_pid,
+               "url": target, "started": time.strftime("%Y-%m-%dT%H:%M:%S")})
 
     say("")
     say("打开地址：" + target, "ok")

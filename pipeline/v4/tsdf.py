@@ -138,10 +138,19 @@ def fuse_tsdf(frames, res, disp_fn=None, voxel: float | None = None,
     if len(verts) < 100:
         return None
 
-    # 顶点颜色：就近取体素颜色均值
+    # 顶点颜色：就近取体素颜色均值。
+    # v4.1.1：等值面顶点经常落在 hit=0 的空体素里，旧版除数是 1e-6 而分子是 0，
+    # 于是那一整片面是纯黑（合成素材上的"大块黑面"）。对空体素改用**最近的有命中
+    # 体素**的颜色，而不是默认黑色；scipy 已在上面导入。
     gi = np.clip(np.floor((verts - lo) / vox).astype(np.int64), 0, dims - 1)
-    inv = np.maximum(hit[gi[:, 0], gi[:, 1], gi[:, 2]], 1e-6)[:, None]
-    vcol = colsum[gi[:, 0], gi[:, 1], gi[:, 2]] / inv
+    nearest = (gi[:, 0], gi[:, 1], gi[:, 2])
+    empty = hit == 0
+    if empty.any() and hit.any():
+        _d, inds = ndimage.distance_transform_edt(
+            empty, return_distances=False, return_indices=True)
+        nearest = tuple(inds[k][gi[:, 0], gi[:, 1], gi[:, 2]] for k in range(3))
+    hn = hit[nearest]
+    vcol = colsum[nearest] / np.maximum(hn[:, None], 1.0)
     vcol = np.where(np.isfinite(vcol), vcol, 0.45)
 
     idx = faces.astype(np.uint32)
