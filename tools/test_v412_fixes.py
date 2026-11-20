@@ -83,7 +83,9 @@ def test_qc_points_and_levels():
     assert summarize(fake_result(9, 1.0, [3.0] * 8), 9)["verdict"] == "PASS"
     assert summarize(fake_result(6, 2.0, [0.8] * 6), 9)["verdict"] == "WARN"
     assert summarize(fake_result(6, 7.0, [3.0] * 6), 9)["verdict"] == "FAIL"
-    assert summarize(fake_result(9, 1.0, [3.0] * 8), 9, fill=0.1)["verdict"] == "FAIL"
+    # v4.1.3：门槛按实测重设（0.1 已是完整绕拍的正常值，不能再判 FAIL）
+    assert summarize(fake_result(9, 1.0, [3.0] * 8), 9, fill=0.018)["verdict"] == "FAIL"
+    assert summarize(fake_result(9, 1.0, [3.0] * 8), 9, fill=0.103)["verdict"] == "PASS"
     ok("质量门：PASS/WARN/FAIL 三档边界与点数/填充率硬门槛")
 
 
@@ -169,14 +171,16 @@ def test_synthetic_gate_end_to_end():
 
 
 def test_version():
-    assert json.loads(read("version.json"))["version"] == "4.1.2"
+    # 与 v411 测试同理：本组锁的是 v4.1.2 的修复没被回退，不锁死具体版本号。
+    ver = json.loads(read("version.json"))["version"]
+    assert tuple(int(x) for x in ver.split(".")) >= (4, 1, 2), ver
     vs = set(re.findall(r"\?v=(\d+\.\d+\.\d+)", read("index.html")))
-    assert vs == {"4.1.2"}, vs
+    assert vs == {ver}, (vs, ver)
     assert "## [4.1.2]" in read("CHANGELOG.md")
     v4 = read("docs/v4.md")
     assert "< 0.5°" in v4 and "稀疏点" in v4
     assert "0.25° | 1.40px" not in v4, "实测表还是旧视差数值"
-    ok("版本/缓存串/文档一致（4.1.2）")
+    ok("版本/缓存串/文档一致（≥4.1.2，当前 %s）" % ver)
 
 
 if __name__ == "__main__":

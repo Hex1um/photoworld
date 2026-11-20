@@ -31,7 +31,7 @@ python pipeline/v4/build.py --input 我的照片目录 --qc-only   # 先只评�
 python pipeline/v4/build.py --input 我的照片目录 --out out/v4/worlds/myscene
 ```
 
-QC 不过会直接拦下（定位率 <0.4 / RMSE >6px / **视差 <0.5°** / 稀疏点 <100 / 填充率 <0.2），
+QC 不过会直接拦下（定位率 <0.4 / RMSE >6px / **视差 <0.5°** / 稀疏点 <100 / 填充率 <0.03），
 并给「怎么重拍」的建议；纯原地转圈因为没有基线，现在一定被拦，不会再生成一片假世界。
 默认高度场只有地面，`--mesh tsdf` 才有垂直面但对素材要求高。完整拍法与指标见
 [`docs/v4.md`](docs/v4.md)。

@@ -138,11 +138,14 @@ def run(frames, focal_ratio: float = 1.2, pair_min_inliers: int = 50,
             continue
         inl = int(mask.sum())
         mk = mask.ravel() > 0
-        # 极线残差
-        F = np.linalg.inv(cams[i].K).T @ E @ np.linalg.inv(cams[j].K)
-        l = np.c_[p2[mk], np.ones(mk.sum())] @ F.T
-        d = np.abs(np.sum(l * np.c_[p1[mk], np.ones(mk.sum())], axis=1)) / np.maximum(
-            np.linalg.norm(l[:, :2], axis=1), 1e-9)
+        # 极线残差。OpenCV 的 E 满足 x2^T E x1 = 0，故 F = K2^-T E K1^-1；
+        # v4.1.0 写成 K1^-T E K2^-1（i/j 反了），报出的 26~46px 是假数。
+        Fi = np.linalg.inv(cams[j].K).T @ E @ np.linalg.inv(cams[i].K)
+        q1 = np.c_[p1[mk], np.ones(mk.sum())]
+        q2 = np.c_[p2[mk], np.ones(mk.sum())]
+        fq1 = (Fi @ q1.T).T
+        d = np.abs(np.sum(q2 * fq1, axis=1)) / np.maximum(
+            np.linalg.norm(fq1[:, :2], axis=1), 1e-9)
         pairs.append(Pair(i, j, len(m), inl, float(np.median(d)), 0.0))
         Emats[(i, j)] = (E, mk)
     good = [p for p in pairs if p.inliers >= pair_min_inliers]
@@ -275,11 +278,15 @@ def run(frames, focal_ratio: float = 1.2, pair_min_inliers: int = 50,
         p.parallax = float(np.degrees(np.median(np.arccos(np.clip(c, -1, 1)))))
 
     # ---- 全局重投影 ----
+    # v4.1.3：只用 E 的 RANSAC 内点。外点是误匹配/遮挡，本来就不满足对极几何；
+    # 把它们算进来会让 RMSE 虚高（实测好素材 4.96px → 0.9px），把本该 PASS 的
+    # 素材误判为 FAIL。内点掩码在 Emats 里已经算好，这里直接复用。
     errs = []
     for p in good:
         if poses[p.i] is None or poses[p.j] is None:
             continue
-        m = matched(p.i, p.j)
+        _e, inlier_mask = Emats[(p.i, p.j)]
+        m = matched(p.i, p.j)[inlier_mask]
         if len(m) < 10:
             continue
         Ri, ti = poses[p.i]; Rj, tj = poses[p.j]

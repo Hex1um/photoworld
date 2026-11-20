@@ -50,19 +50,32 @@ def to_world(pts: np.ndarray, cols: np.ndarray, cells: int = 220,
     if len(pts) < 50:
         raise SystemExit("点太少（%d），无法成世界" % len(pts))
     cx, cz = np.median(pts[:, 0]), np.median(pts[:, 2])
+
+    # v4.1.3：水平范围必须用分位数，不能用 min/max。SfM 的三角化离群点很多
+    # （合成实测 20964 点里 x 有 -54..19、z 有 1..77，真实场景只有约 5 个单位），
+    # 旧版 min/max 把 span 拉到 75.6，200×200 网格填充率仅 3.5%，于是已经 PASS
+    # 的素材在建完后被判 FAIL 并删掉 GLB。这里按 2/98 分位裁掉离群点，
+    # 再留 15% 边距；注意是**剔除**而不是 clip，否则离群点会被贴到网格边缘
+    # 继续污染高度。高度方向也做同样裁剪（鸟/反光之类的尖峰）。
+    qx = np.percentile(pts[:, 0], [2, 98])
+    qz = np.percentile(pts[:, 2], [2, 98])
+    qy = np.percentile(pts[:, 1], [2, 98])
+    half = max(float(cx - qx[0]), float(qx[1] - cx),
+               float(cz - qz[0]), float(qz[1] - cz), 1e-3) * 1.15
+    keep = ((np.abs(pts[:, 0] - cx) <= half) & (np.abs(pts[:, 2] - cz) <= half)
+            & (pts[:, 1] >= qy[0]) & (pts[:, 1] <= qy[1]))
+    if int(keep.sum()) >= 50:
+        pts = pts[keep]
+        cols = cols[keep]
     p = pts - np.array([cx, 0.0, cz], np.float32)
 
-    xmin, xmax = float(p[:, 0].min()), float(p[:, 0].max())
-    zmin, zmax = float(p[:, 2].min()), float(p[:, 2].max())
-    span = max(xmax - xmin, zmax - zmin, 1e-3)
-    xmin, xmax = cx - span / 2, cx + span / 2
-    zmin, zmax = cz - span / 2, cz + span / 2
-    gx = np.linspace(xmin - cx, xmax - cx, cells)
-    gz = np.linspace(zmin - cz, zmax - cz, cells)
+    span = 2.0 * half
+    gx = np.linspace(-half, half, cells)
+    gz = np.linspace(-half, half, cells)
     gxx, gzz = np.meshgrid(gx, gz, indexing="ij")
 
-    ix = np.clip(((p[:, 0] - (xmin - cx)) / span * (cells - 1)).astype(np.int64), 0, cells - 1)
-    iz = np.clip(((p[:, 2] - (zmin - cz)) / span * (cells - 1)).astype(np.int64), 0, cells - 1)
+    ix = np.clip(((p[:, 0] + half) / span * (cells - 1)).astype(np.int64), 0, cells - 1)
+    iz = np.clip(((p[:, 2] + half) / span * (cells - 1)).astype(np.int64), 0, cells - 1)
     flat = ix * cells + iz
     ncell = cells * cells
     cnt = np.bincount(flat, minlength=ncell).astype(np.float32)
@@ -148,7 +161,7 @@ def to_world(pts: np.ndarray, cols: np.ndarray, cells: int = 220,
     idx = np.array(idx, np.uint32)
     col4 = np.concatenate([C, np.ones((len(C), 1), np.float32)], axis=1)
     return World(P, N.astype(np.float32), col4.astype(np.float32), idx,
-                 (xmin - cx, xmax - cx, zmin - cz, zmax - cz), float(has.mean()))
+                 (-half, half, -half, half), float(has.mean()))
 
 
 

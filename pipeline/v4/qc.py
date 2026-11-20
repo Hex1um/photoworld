@@ -11,10 +11,15 @@
 | 点云规模 | 三角化出的三维点数 | 提高分辨率 / 增加帧 |
 | 高度场填充率 | 网格里"有数据"的格子占比 | 环绕拍，不要只拍一面 |
 
-判定（v4.1.2 收紧，避免"RMSE 很小但根本没有基线"被放行）：
-  PASS  定位率 ≥ 0.7 且 视差 ≥ 1.0° 且 RMSE ≤ 3px 且 点 ≥ 100 且 填充率 ≥ 0.5
-  WARN  定位率 ≥ 0.5 且 视差 ≥ 0.5° 且 RMSE ≤ 4.5px 且 点 ≥ 100（会有洞/歪）
-  FAIL  定位率 < 0.4、RMSE > 6px、视差 < 0.5°、点 < 100、填充率 < 0.2 或其它
+判定（v4.1.2 收紧视差，v4.1.3 修正填充率门槛）：
+  PASS  定位率 ≥ 0.7 且 视差 ≥ 1.0° 且 RMSE ≤ 3px 且 点 ≥ 100 且 填充率 ≥ 0.08
+  WARN  定位率 ≥ 0.5 且 视差 ≥ 0.5° 且 RMSE ≤ 4.5px 且 点 ≥ 100、填充率 ≥ 0.03
+  FAIL  定位率 < 0.4、RMSE > 6px、视差 < 0.5°、点 < 100、填充率 < 0.03 或其它
+
+填充率门槛为什么是 0.08 而不是 0.5：fill = 有数据的格子数 / cells²，cells 默认 200，
+也就是 4 万个格子。SfM 只有 ~1~2 万个稀疏点，数学上根本填不满一半；实测完整绕拍
+的素材 fill≈0.10，只拍 18° 窄带的 fill≈0.018。旧门槛 0.2/0.5 会让**所有**合格素材
+在建完后被判 FAIL 并删掉 GLB（端到端实测复现）。0.03/0.08 是按这组对照数据定的。
 """
 from __future__ import annotations
 
@@ -39,12 +44,12 @@ def summarize(res, n_frames: int, fill: float | None = None) -> dict:
     # 硬门槛：这些情况出不了可信世界，不能因为 RMSE 恰好很小就放行。
     # v4.1.1 的 WARN 只看了 loc/rep，纯旋转素材（4/7 定位、1.40px、0.25° 视差）
     # 被判 WARN 并继续建世界，与 docs/v4.md 声称的 FAIL 直接矛盾。
-    hard_fail = (fill is not None and fill < 0.20) or med_par < 0.5 or npts < 100
+    hard_fail = (fill is not None and fill < 0.03) or med_par < 0.5 or npts < 100
     if hard_fail or loc < 0.4 or rep > 6.0:
         verdict = "FAIL"
-    elif loc >= 0.7 and med_par >= 1.0 and rep <= 3.0 and (fill is None or fill >= 0.5):
+    elif loc >= 0.7 and med_par >= 1.0 and rep <= 3.0 and (fill is None or fill >= 0.08):
         verdict = "PASS"
-    elif loc >= 0.5 and med_par >= 0.5 and rep <= 4.5 and (fill is None or fill >= 0.35):
+    elif loc >= 0.5 and med_par >= 0.5 and rep <= 4.5 and (fill is None or fill >= 0.03):
         verdict = "WARN"
     else:
         verdict = "FAIL"
@@ -61,7 +66,7 @@ def summarize(res, n_frames: int, fill: float | None = None) -> dict:
         advice.append("匹配太少：避免大片纯色（天空/白墙），可以把主体放在画面中间")
     if rep > 3.0:
         advice.append("重投影误差偏高：镜头畸变大或运动模糊，建议关防抖、慢一点走")
-    if fill is not None and fill < 0.35:
+    if fill is not None and fill < 0.08:
         advice.append("高度场填充率低：**环绕拍**一圈（或至少 180°），不要只拍一面")
 
     return {
