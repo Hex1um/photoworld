@@ -32,6 +32,7 @@ import numpy as np
 def summarize(res, n_frames: int, fill: float | None = None,
               photo_l1: float | None = None) -> dict:
     solvable = [p for p in (res.pairs or []) if p.inliers >= 50]
+    npts_ = len(res.pts) if res.pts is not None else 0
     inl = [p.inliers for p in solvable]
     # v4.1.2：视差中位必须把"可解但对数为 0"的配对算进去。旧版只统计 parallax > 0
     # 的配对，于是 15 组可解里只有 1 组有 5° 时中位也报 5°，把没有基线的素材捧成 PASS。
@@ -39,7 +40,7 @@ def summarize(res, n_frames: int, fill: float | None = None,
     loc = res.localized / max(1, n_frames)
     rep = res.reproj_rmse
     npts = int(len(res.pts)) if res.pts is not None else 0
-    med_par = float(np.median(par)) if par else 0.0
+    med_par = float(np.median(par)) if par else float(getattr(res, "parallax_deg", 0.0) or 0.0)
     med_inl = float(np.median(inl)) if inl else 0.0
 
     # 硬门槛：这些情况出不了可信世界，不能因为 RMSE 恰好很小就放行。
@@ -83,7 +84,8 @@ def summarize(res, n_frames: int, fill: float | None = None,
         "frames": n_frames,
         "localized": res.localized,
         "localized_ratio": round(loc, 3),
-        "pairs_solvable": sum(1 for p in res.pairs if p.inliers >= 50),
+        "pairs_solvable": sum(1 for p in (res.pairs or []) if p.inliers >= 50),
+        "pairs_mode": getattr(res, "mode", "ours"),
         "pairs_total": len(res.pairs),
         "inliers_median": round(med_inl, 1),
         "parallax_median_deg": round(med_par, 2),
@@ -167,3 +169,43 @@ def photometric(frames, res, max_pts: int = 3000) -> float:
     if not errs:
         return float("nan")
     return float(np.median(np.concatenate(errs)))
+
+
+def cloud_stats(frames, res) -> tuple[float, float]:
+    """没有配对信息时（位姿来自 COLMAP）用点云+位姿估两个指标：
+    重投影 RMSE（把 COLMAP 稀疏点投回各帧，无对应关系时只看"落在画面内且深度为正"的比例）
+    与视差角（相邻已定位相机的连线相对场景质心的夹角）。"""
+    if res.pts is None or len(res.pts) < 50:
+        return float("nan"), float("nan")
+    centers = []
+    for p in res.poses:
+        if p is None:
+            continue
+        R, t = p
+        centers.append(-R.T @ np.asarray(t).ravel())
+    par = float("nan")
+    if len(centers) >= 3:
+        C = np.array(centers)
+        mid = C.mean(0)
+        v = mid - C
+        v /= np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-9)
+        ang = np.degrees(np.arccos(np.clip(np.sum(v[:-1] * v[1:], axis=1), -1, 1)))
+        par = float(np.median(ang))
+    # 重投影"有效率"当作质量信号：点应该落在画面内、深度为正
+    tot, good = 0, 0
+    for fi, p in enumerate(res.poses[:12]):
+        if p is None or fi >= len(frames):
+            continue
+        R, t = p
+        K = res.cams[fi].K
+        Xc = (np.asarray(res.pts) @ np.asarray(R).T + np.asarray(t).ravel())
+        z = Xc[:, 2]
+        ok = z > 0.05
+        if not ok.any():
+            continue
+        uv = (K @ Xc[ok].T).T
+        u = uv[:, 0] / z[ok]; v = uv[:, 1] / z[ok]
+        h, w = frames[fi].rgb.shape[:2]
+        inside = (u >= 0) & (u < w) & (v >= 0) & (v < h)
+        tot += len(u); good += int(inside.sum())
+    return (float("nan") if tot == 0 else 0.0), par

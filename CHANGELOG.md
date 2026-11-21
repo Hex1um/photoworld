@@ -182,6 +182,42 @@ A/B/C(32)、PLAN_V2/V3(32)、空洞/拉丝/块数指标、判据取最差机位�
 19 套 Python 回归通过（3 套因本机缺 torch / 17MB GLB 资产未跑，与代码无关）。
 缓存串 20 处 v3.0.4→v3.0.5。
 
+## [4.3.0] - 2026-11-21  · 接入 COLMAP：位姿不再靠猜，世界终于认得出来
+
+按上一轮结论走"接 COLMAP"这条（手写 SfM 精度不够：真实素材上相机半径 10.3/13.0/8.5，
+真值恒 4.03，RMSE 却只有 0.86px）。
+
+### 新增
+
+* `pipeline/v4/colmap.py`：`feature_extractor → exhaustive_matcher → mapper`，
+  以及**稠密** `image_undistorter → patch_match_stereo → stereo_fusion`；
+  读 `cameras.txt/images.txt/points3D.txt` 与 `fused.ply`。
+  约定写清楚：COLMAP 的 `QW..TZ` 就是 world→cam、相机 +z 向前，与 cv2/本项目一致。
+* `build.py --poses {ours,auto,colmap} --dense`：位姿与点云来源可切换。
+  **默认仍是 ours**，避免"装了 COLMAP 就悄悄改变历史结果/回归"；
+  `tools/serve_api.py` 检测到 COLMAP 时**自动**加 `--poses colmap --dense`。
+* `qc.cloud_stats()`：没有配对信息时（COLMAP 路径）用点云 + 位姿估视差与重投影有效率。
+
+### 实测（testdata/lego，26 张，带真值）
+
+| 位姿来源 | 光度一致性 | 相机半径 | 结果 |
+|---|---|---|---|
+| 手写 SfM | 0.148 | 10.3/13.0/8.5 | 碎片 |
+| COLMAP 稀疏 | **0.069** | 与真值同形（整体尺度不同） | — |
+| COLMAP + 稠密 MVS | **0.059** | — | **能认出是那台乐高推土机**（`shots/v4_colmap_lego.png`）|
+
+耗时：特征+匹配+建图 ~5s，稠密立体+融合 ~7s（144,923 点），TSDF 成网 ~50s。
+
+### 顺手修
+
+* `tsdf.py` 顶点取色：`distance_transform_edt(return_distances=False)` 只返回 indices，
+  不能解包成两个（会 ValueError，v4.1.1 引入的 bug，因默认走 heightfield 一直没被发现）；
+* TSDF 体素范围改 1/99 分位（COLMAP 偶有离群点，会把体素撑成 0.46 → 只剩 886 个顶点）；
+* v4 世界的**取景**：整体退到 1.4×跨度、竖向中心抬到眼高。
+  之前要么站进模型内部（空白），要么贴脸（只看到几块巨面）。
+
+全仓回归：合作者 10 + 8 + 6 组、`test_v3` 21 条全过。
+
 ## [4.2.1] - 2026-11-21  · 用网上真实素材（NeRF-Synthetic/lego）做第一次真测：质量门太乐观，已补光度判据
 
 ### 素材来源

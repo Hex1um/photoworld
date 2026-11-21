@@ -106,11 +106,15 @@ def fuse_tsdf(frames, res, disp_fn=None, voxel: float | None = None,
     pts = res.pts
     if pts is None or len(pts) < 200:
         return None
-    span = float(np.linalg.norm(pts.max(0) - pts.min(0)))
-    vox = float(voxel) if voxel else span / max(40, cells) * 2.0
+    # 用 1/99 分位定范围：COLMAP 偶尔有离群点把 bbox 拉大 10 倍，
+    # 体素就会被撑成 0.46（对象才 4 单位），出来的网格只有几百个顶点（实测）。
+    lo_p = np.percentile(pts, 1, axis=0)
+    hi_p = np.percentile(pts, 99, axis=0)
+    span = float(np.max(hi_p - lo_p))
+    vox = float(voxel) if voxel else max(1e-4, span / max(40, cells))
 
-    lo = pts.min(0) - vox * 4
-    hi = pts.max(0) + vox * 4
+    lo = lo_p - vox * 4
+    hi = hi_p + vox * 4
     dims = np.maximum(((hi - lo) / vox).astype(np.int64) + 1, 8)
     # 控制总量：8M 体素以内（200³ = 8M）
     while np.prod(dims) > 8_000_000:
@@ -191,7 +195,8 @@ def fuse_tsdf(frames, res, disp_fn=None, voxel: float | None = None,
     nearest = (gi[:, 0], gi[:, 1], gi[:, 2])
     empty = hit == 0
     if empty.any() and hit.any():
-        _d, inds = ndimage.distance_transform_edt(
+        # return_distances=False 时只返回 indices 一个值，不能解包成两个
+        inds = ndimage.distance_transform_edt(
             empty, return_distances=False, return_indices=True)
         nearest = tuple(inds[k][gi[:, 0], gi[:, 1], gi[:, 2]] for k in range(3))
     hn = hit[nearest]
@@ -220,11 +225,12 @@ def _fit_viewer(pos: np.ndarray, target_span: float = 40.0):
     span = max(float(mx[0] - mn[0]), float(mx[2] - mn[2]), 1e-6)
     s = target_span / span
     out = (pos - np.array([(mn[0] + mx[0]) / 2, mn[1], (mn[2] + mx[2]) / 2])) * s
-    # 关键：查看器默认相机站在原点、眼高 1.6、朝 -z 看。重建出来的是"一小块场景"，
-    # 如果居中原点，人就站在模型**内部**（背面被剔除 → 一片空白，实测两次翻车）。
-    # 所以把这块场景整体挪到相机前方，地面压到脚下：
-    out[:, 2] -= target_span * 0.55
-    out[:, 1] -= 1.6
+    # 关键：查看器默认相机站在原点、眼高 1.6、朝 -z 看。
+    # 重建结果是"一块场景"，必须整块放到相机前方合适的距离；否则要么站在模型内部
+    # （背面被剔除 → 空白），要么贴到脸上（只看到几块巨大的面）。
+    # 横向居中、竖向中心抬到眼高、纵向退到 1.4×跨度 —— 60° 视场下正好占满画面。
+    out[:, 2] -= target_span * 1.4
+    out[:, 1] += 1.6 - (out[:, 1].min() + out[:, 1].max()) / 2
     return out.astype(np.float32), float(s)
 
 

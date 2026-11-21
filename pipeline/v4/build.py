@@ -37,6 +37,12 @@ def main() -> int:
     ap.add_argument("--voxel", type=float, default=0.02, help="体素降采样尺寸（SfM 单位）")
     # 默认用 heightfield：它在"素材一般"时更稳（tsdf 在稀疏输入上会出大块黑面）。
     # 素材好（稠密、位姿准）时用 --mesh tsdf 才有垂直面。
+    ap.add_argument("--dense", action="store_true",
+                    help="用 COLMAP patch_match_stereo 做真多视图立体（替代单目深度反投影）")
+    # 默认仍是 ours：COLMAP 一旦可用就"悄悄换实现"，会让既有回归（和用户的历史结果）
+    # 突然变样。要更好的效果显式加 --poses colmap（前端服务会自动加）。
+    ap.add_argument("--poses", choices=["auto", "ours", "colmap"], default="ours",
+                    help="位姿来源：ours=手写 SfM（默认）；colmap=用 COLMAP（更准，需装）；auto=有就用")
     ap.add_argument("--splat", action="store_true",
                     help="额外训练一个可微泼溅（3DGS-lite），并从插值位姿渲新视角")
     ap.add_argument("--splat-iters", type=int, default=600)
@@ -54,7 +60,39 @@ def main() -> int:
         return 2
 
     print("[1/3] 多视图几何…")
-    res = sfm.run(frames, focal_ratio=args.focal_ratio)
+    res = None
+    use_colmap = args.poses == "colmap"
+    if args.poses in ("auto", "colmap"):
+        from v4 import colmap as v4colmap
+        if v4colmap.available():
+            use_colmap = True
+        elif args.poses == "colmap":
+            raise SystemExit("找不到 colmap 可执行文件：设 COLMAP_EXE，或把 COLMAP 放到 tools/colmap/")
+    if use_colmap:
+        import types
+        from PIL import Image as _Im
+        from v4 import colmap as v4colmap
+        img_dir = os.path.join(args.out, "colmap", "images")
+        os.makedirs(img_dir, exist_ok=True)
+        for f in frames:
+            _Im.fromarray(f.rgb).save(os.path.join(img_dir, f.name if hasattr(f, "name") else "img.jpg"))
+        model = v4colmap.run(img_dir, os.path.join(args.out, "colmap"),
+                             matcher="exhaustive" if len(frames) <= 60 else "sequential")
+        cams, poses, pts, cols = v4colmap.load_model(model, frames)
+        if args.dense:
+            ply = v4colmap.run_dense(img_dir, os.path.join(args.out, "colmap"), model)
+            if ply is not None:
+                dp, dc = v4colmap.read_ply(ply)
+                print("      稠密融合：%d 点（稀疏 %d）" % (len(dp), len(pts)))
+                if len(dp) > len(pts):
+                    pts, cols = dp, dc
+        res = types.SimpleNamespace(cams=cams, poses=poses, pts=pts, colors=cols,
+                                    pairs=[], reproj_rmse=0.0, localized=sum(1 for p in poses if p is not None),
+                                    notes=["位姿来自 COLMAP"], mode="colmap", parallax_deg=0.0)
+        _, par = qc.cloud_stats(frames, res)
+        res.parallax_deg = 0.0 if par != par else par
+    else:
+        res = sfm.run(frames, focal_ratio=args.focal_ratio)
     photo = qc.photometric(frames, res)
     rep = qc.summarize(res, len(frames), photo_l1=None if not np.isfinite(photo) else photo)
     print("[2/3] 质量报告…")

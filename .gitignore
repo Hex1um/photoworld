@@ -38,3 +38,6 @@ third_party/
 uploads/
 logs/*.log
 /testdata/lego/
+/tools/colmap/
+/third_party/colmap.zip
+/third_party/colmap_pkg/
