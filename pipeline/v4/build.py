@@ -43,6 +43,9 @@ def main() -> int:
     # 突然变样。要更好的效果显式加 --poses colmap（前端服务会自动加）。
     ap.add_argument("--poses", choices=["auto", "ours", "colmap"], default="ours",
                     help="位姿来源：ours=手写 SfM（默认）；colmap=用 COLMAP（更准，需装）；auto=有就用")
+    ap.add_argument("--depth", choices=["da", "yolo"], default="da",
+                    help="单目深度来源：da=Depth-Anything（相对视差，默认）；"
+                         "yolo=Ultralytics YOLO26（**米制**，需 tools/weights/yolo26n-depth.pt）")
     ap.add_argument("--splat", action="store_true",
                     help="额外训练一个可微泼溅（3DGS-lite），并从插值位姿渲新视角")
     ap.add_argument("--splat-iters", type=int, default=600)
@@ -130,7 +133,8 @@ def main() -> int:
         print("[3/4] 训练可微泼溅（3DGS-lite）…")
         W, H = 320, 200
         from v4 import tsdf as v4tsdf
-        dp, dc = v4tsdf.dense_points(frames, res, step=4, max_points=120000)
+        dp, dc = v4tsdf.dense_points(frames, res, step=4, max_points=120000,
+                                     depth_source=args.depth)
         print("      稠密初始化：%d 点（SfM 稀疏点 %d）" % (len(dp), len(res.pts)))
         spl, hist = v4splat.train(frames, res, iters=args.splat_iters, W=W, H=H,
                                  verbose=False, init=(dp, dc) if len(dp) > 1000 else None)
@@ -204,7 +208,7 @@ def main() -> int:
         args.mesh = "heightfield"
     if args.mesh == "tsdf":
         from v4 import tsdf as v4tsdf
-        mesh = v4tsdf.fuse_tsdf(frames, res, cells=args.cells)
+        mesh = v4tsdf.fuse_tsdf(frames, res, cells=args.cells, depth_source=args.depth)
         if mesh is None:
             print("      体素融合没产出网格（深度/位姿不一致），回退到高度场")
             args.mesh = "heightfield"

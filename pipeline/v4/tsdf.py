@@ -31,7 +31,7 @@ class Mesh:
 
 
 def _align_depth(disp: np.ndarray, pts_world: np.ndarray, K: np.ndarray, R: np.ndarray,
-                 t: np.ndarray) -> tuple[float, float, int]:
+                 t: np.ndarray, metric: bool = False) -> tuple[float, float, int]:
     """用落在该帧里的 SfM 点，拟合 z = 1/(a·disp + b)。返回 (a,b,用到的点数)。"""
     h, w = disp.shape
     Xc = (R @ pts_world.T + t).T
@@ -47,14 +47,19 @@ def _align_depth(disp: np.ndarray, pts_world: np.ndarray, K: np.ndarray, R: np.n
     if len(zz) < 20:
         return 1.0, 0.0, len(zz)
     d = disp[v, u].astype(np.float64)
-    # 1/z 与 disp 线性相关：invz = a·disp + b
+    if metric:
+        # 深度已经是米：只差一个"COLMAP 单位 → 米"的尺度，用中位比值最稳
+        ratio = zz / np.maximum(d, 1e-6)
+        return float(np.median(ratio)), 0.0, int(len(zz))
+    # 相对视差：1/z 与 disp 线性相关（invz = a·disp + b）
     A = np.stack([d, np.ones_like(d)], axis=1)
     sol, *_ = np.linalg.lstsq(A, 1.0 / np.maximum(zz, 1e-6), rcond=None)
     return float(sol[0]), float(sol[1]), int(len(zz))
 
 
 
-def dense_points(frames, res, step: int = 3, max_points: int = 200000):
+def dense_points(frames, res, step: int = 3, max_points: int = 200000,
+                 depth_source: str = "da"):
     """把每帧的单目深度按 SfM 位姿反投影成**稠密点云**（给 TSDF 和泼溅初始化共用）。
 
     为什么需要它：SfM 只给几百到几千个稀疏点，泼溅/体素都覆盖不了画面；
@@ -71,8 +76,13 @@ def dense_points(frames, res, step: int = 3, max_points: int = 200000):
         if p is None:
             continue
         R, t = p
-        disp = v3depth.disparity(f.rgb)
-        a, b, npts = _align_depth(disp, pts, res.cams[fi].K, R, t)
+        metric = depth_source == "yolo"
+        if metric:
+            from v4 import yolodepth
+            disp = yolodepth.depth_m(f.rgb)          # 米
+        else:
+            disp = v3depth.disparity(f.rgb)          # 相对视差
+        a, b, npts = _align_depth(disp, pts, res.cams[fi].K, R, t, metric=metric)
         if npts < 30 or not np.isfinite(a) or a <= 1e-4:
             continue
         h, w = disp.shape
@@ -99,7 +109,7 @@ def dense_points(frames, res, step: int = 3, max_points: int = 200000):
 
 
 def fuse_tsdf(frames, res, disp_fn=None, voxel: float | None = None,
-              cells: int = 200, min_ratio: float = 0.02):
+              cells: int = 200, min_ratio: float = 0.02, depth_source: str = "da"):
     """frames/res 来自 v4.ingest / v4.sfm。返回 Mesh 或 None（点太少时）。"""
     from v3 import depth as v3depth      # 复用 Depth-Anything 封装
 
@@ -130,8 +140,15 @@ def fuse_tsdf(frames, res, disp_fn=None, voxel: float | None = None,
         if p is None:
             continue
         R, t = p
-        disp = disp_fn(f.rgb) if disp_fn else v3depth.disparity(f.rgb)
-        a, b, npts = _align_depth(disp, pts, res.cams[fi].K, R, t)
+        metric = depth_source == "yolo"
+        if disp_fn is not None:
+            disp = disp_fn(f.rgb)
+        elif metric:
+            from v4 import yolodepth
+            disp = yolodepth.depth_m(f.rgb)
+        else:
+            disp = v3depth.disparity(f.rgb)
+        a, b, npts = _align_depth(disp, pts, res.cams[fi].K, R, t, metric=metric)
         if npts < 30:
             print("        帧 %d：可用的 SfM 点太少（%d），跳过" % (fi, npts))
             continue

@@ -41,3 +41,4 @@ logs/*.log
 /tools/colmap/
 /third_party/colmap.zip
 /third_party/colmap_pkg/
+/tools/weights/

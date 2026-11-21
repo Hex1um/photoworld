@@ -182,6 +182,35 @@ A/B/C(32)、PLAN_V2/V3(32)、空洞/拉丝/块数指标、判据取最差机位�
 19 套 Python 回归通过（3 套因本机缺 torch / 17MB GLB 资产未跑，与代码无关）。
 缓存串 20 处 v3.0.4→v3.0.5。
 
+## [4.4.0] - 2026-11-21  · 通读 Ultralytics 文档：没有生成模型，但两项可用（见 docs/acc_ultralytics.md）
+
+### 结论
+
+Ultralytics 是**感知**工具箱（检测/分割/深度/姿态/跟踪/OBB + SAM3/FastSAM + 部署导出），
+**没有任何生成模型**（无 diffusion / NeRF / 3DGS / mesh 重建）。"生成世界"仍靠我们自己的
+SDXL + COLMAP + TSDF 那条线。
+
+### 可用①：米制单目深度（已接入，实测更差）
+
+`yolo26n-depth.pt`：`exp(logit)` 无界头，**输出即米**，内置全局尺度校准
+（NYU v2 δ1=0.882 / RMSE=0.414m）。lego 实测 1.04~2.54m，主体 1.17m / 背景 1.66m，
+遮挡边界比 Depth-Anything 更干净（`out/v4/yolo_depth_vis.jpg`）。
+
+但接进 v4 反而更差（`--depth yolo --mesh tsdf` → 一排竖直薄片）：
+它给的是**每帧自己的米制尺度**，而 COLMAP 尺度是全局单值；按帧拟合
+`a = median(z_sfm/depth_m)` 的帧间差异把点云拉成扇面。→ **默认仍是 `da`**，
+`--depth yolo` 留作实验。要做对需改成全局单尺度联合拟合（未做）。
+
+### 可用②：SAM3/FastSAM 分割（未接，推荐下一步）
+
+价值：给 SfM 做**背景掩码**。lego 素材背景是大片纯灰，SIFT 无特征、稠密匹配大量外点；
+掩出主体只在其内提特征，理论上能显著提升点云密度与位姿精度。也可用于 v3 的 `--bg-fill`。
+
+### 顺带记录
+
+`ultralytics` 自动下载权重在本机代理下会报 `CERTIFICATE_VERIFY_FAILED`，
+需用 `tools/hf_fetch.py` 手动下到 `tools/weights/`（已 gitignore）。
+
 ## [4.3.2] - 2026-11-21  · 全局法线一致化（做了）→ 泊松仍不行：真因是点云太稀疏
 
 上一条结论说"要上泊松得先做法线全局一致化"，这一版把它做了，然后把剩下能想到的
