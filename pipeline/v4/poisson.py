@@ -1,12 +1,23 @@
 """Poisson 重建：把点云补成干净、封闭的实心网格。
 
-⚠️ 实测结论（lego，14 万 MVS 点）：**在当前 MVS 法线下不如 TSDF 好用**。
-   Poisson 对法线朝向极其敏感，COLMAP `stereo_fusion` 输出的法线只在每个参考视图内
-   自洽、整体并**不是**全局一致朝向，于是泊松在正反之间来回，出来是一片"拉丝面条"。
-   试过：直接用法线 / 自己估+一致定向 / 统计离群剔除 / depth 9~10，都不行。
-   → 物体类素材请用 `--mesh tsdf`；要真上泊松，得先做**全局法线一致化**
-   （Open3D 的 `orient_normals_consistent_tangent_plane` 在 360° 环绕上也常失败，
-   业界做法是用相机位姿做可见性投票）。本模块保留为可选实验。
+⚠️ 实测结论（lego，14 万 MVS 点）：**当前质量还不如 TSDF，不建议作为默认**。
+
+排查过程（都试过，逐步排除）：
+  1. 直接用 `fused.ply` 的 MVS 法线 → 拉丝；
+  2. 自己估法线 + `orient_normals_consistent_tangent_plane` → 拉丝；
+  3. `normals.orient_by_visibility()`（相机可见性投票，全局一致化）→ 仍然拉丝；
+  4. 统计离群剔除 + depth 8~10 → 仍然拉丝；
+  5. `orient_triangles()` 统一绕向 → 无变化；
+  6. 换 GLB 索引类型（u16/u32 核对）、缩放尺度（40 / 10）→ 无变化。
+
+结论：**不是法线、不是绕向、不是导出，是点云本身太稀疏**。COLMAP 的 MVS 点在
+地面/大平面上是"条带分布"，泊松在没有支撑的地方会去插值出薄片，密度裁剪再把
+支撑削掉，于是出现一条条横向缺口。TSDF（占据率）对稀疏更鲁棒，所以更适用。
+
+`normals.py`（可见性投票）本身是对的、也通用，保留；本模块保留为可选实验。
+想真正用好泊松，需要先**加密点云**（多视角 + 更高分辨率 + `patch_match` 的
+geom_consistency 放宽），或者直接上 COLMAP 的 `poisson_mesher`（它内置了同一套流程，
+但会在内部做点云平滑）。
 
 
 为什么需要（对比实测）：
@@ -137,7 +148,9 @@ def to_glb(mesh: Mesh, path: str, name: str = "world-v4") -> dict:
     from v4.fuse import _fit_viewer
     buf = io.BytesIO()
     Image.new("RGB", (8, 8), (255, 255, 255)).save(buf, format="JPEG", quality=90)
-    pos, _s = _fit_viewer(mesh.pos)
+    # 泊松出来是**闭合薄壳**，在 v3 默认尺度（跨度 40、相机退到 56 单位）下
+    # 前后面会 z-fighting，渲出来是一条条横带（实测）。缩到跨度 10 让深度精度够用。
+    pos, _s = _fit_viewer(mesh.pos, target_span=10.0)
     uv = np.tile(np.array([[0.5, 0.5]], np.float32), (len(pos), 1))
     layer = {"name": "terrain", "pos": pos, "nrm": mesh.nrm, "uv": uv,
              "color": mesh.col, "index": mesh.idx}

@@ -179,8 +179,19 @@ def main() -> int:
     if args.mesh == "poisson":
         try:
             from v4 import poisson as v4poisson
+            nrm = getattr(res, "normals", None)
+            orig_n = len(res.pts)
+            if nrm is not None:
+                # 泊松的前提是**全局一致朝向**；MVS 法线只在每个参考视图内自洽，
+                # 先按"相机可见性投票"统一，不然后面必然是一团拉丝。
+                from v4 import normals as v4normals
+                pts2, nrm, idx = v4normals.orient_by_visibility(
+                    res.pts, nrm, res.cams, res.poses, min_views=2)
+                res.pts = pts2
+                if res.colors is not None and len(res.colors) == orig_n:
+                    res.colors = res.colors[idx]
             mesh = v4poisson.reconstruct(res.pts, res.colors, depth=args.poisson_depth,
-                                         normals=getattr(res, "normals", None))
+                                         normals=nrm)
         except Exception as e:
             print("      Poisson 失败（%s），回退 heightfield" % e)
             mesh = None
