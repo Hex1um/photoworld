@@ -37,6 +37,9 @@ def main() -> int:
     ap.add_argument("--voxel", type=float, default=0.02, help="体素降采样尺寸（SfM 单位）")
     # 默认用 heightfield：它在"素材一般"时更稳（tsdf 在稀疏输入上会出大块黑面）。
     # 素材好（稠密、位姿准）时用 --mesh tsdf 才有垂直面。
+    ap.add_argument("--splat", action="store_true",
+                    help="额外训练一个可微泼溅（3DGS-lite），并从插值位姿渲新视角")
+    ap.add_argument("--splat-iters", type=int, default=600)
     ap.add_argument("--mesh", choices=["heightfield", "tsdf"], default="heightfield",
                     help="世界表示：heightfield=高度场（默认，稳）；tsdf=体素融合+marching cubes（有垂直面，需好素材）")
     args = ap.parse_args()
@@ -72,6 +75,57 @@ def main() -> int:
     if res.pts is None or len(res.pts) < 50:
         print("      稀疏点太少（%d），无法成世界" % (0 if res.pts is None else len(res.pts)))
         return 1
+
+    if args.splat:
+        from PIL import Image
+        from v4 import splat as v4splat
+        print("[3/4] 训练可微泼溅（3DGS-lite）…")
+        W, H = 320, 200
+        from v4 import tsdf as v4tsdf
+        dp, dc = v4tsdf.dense_points(frames, res, step=4, max_points=120000)
+        print("      稠密初始化：%d 点（SfM 稀疏点 %d）" % (len(dp), len(res.pts)))
+        spl, hist = v4splat.train(frames, res, iters=args.splat_iters, W=W, H=H,
+                                 verbose=False, init=(dp, dc) if len(dp) > 1000 else None)
+        if spl is not None:
+            l80 = hist[int(len(hist) * 0.8)] if len(hist) > 5 else hist[0]
+            print("      loss %.4f → %.4f（末 20%% 均值 %.4f）"
+                  % (hist[0], hist[-1], float(np.mean(hist[int(len(hist) * 0.8):]))))
+            k0 = res.cams[0].K
+            sx, sy = W / res.cams[0].w, H / res.cams[0].h
+            import torch as _t
+            K = _t.tensor([[k0[0, 0] * sx, 0, k0[0, 2] * sx],
+                           [0, k0[1, 1] * sy, k0[1, 2] * sy], [0, 0, 1]],
+                          dtype=_t.float32, device="cuda")
+            # 新视角：相邻两个已定位帧之间插值（位置线性、旋转取反后线性再正交化）
+            valid = [i for i, p in enumerate(res.poses) if p is not None]
+            os.makedirs(os.path.join(args.out, "splat"), exist_ok=True)
+            made = 0
+            for k in range(min(3, max(1, len(valid) - 1))):
+                ia, ib = valid[k], valid[k + 1]
+                Ra, ta = res.poses[ia]; Rb, tb2 = res.poses[ib]
+                ca = -np.asarray(Ra).T @ np.asarray(ta).ravel()
+                cb = -np.asarray(Rb).T @ np.asarray(tb2).ravel()
+                # 点云已被归一化（s, c），位姿也要跟着变
+                cN = np.median(res.pts, axis=0).astype(np.float32)
+                span = float(np.percentile(np.linalg.norm(res.pts - cN, axis=1), 90)) or 1.0
+                sc = 1.6 / span
+                ca = (ca - cN) * sc; cb = (cb - cN) * sc
+                mid = (ca + cb) * 0.5
+                # 新相机要**看向场景中心**（归一化后的原点），而不是沿着基线看——
+                # 沿基线看会拍到空处，渲出来只有背景色（踩过）。
+                fwd = -mid
+                n = np.linalg.norm(fwd)
+                fwd = fwd / n if n > 1e-6 else np.array([0.0, 0.0, -1.0])
+                up = np.array([0.0, 1.0, 0.0])
+                right = np.cross(fwd, up); right /= max(1e-6, np.linalg.norm(right))
+                up2 = np.cross(right, fwd)
+                Rm = np.stack([right, up2, -fwd]).astype(np.float32)
+                tm = -Rm @ mid
+                img = v4splat.render_novel(spl, Rm, tm, K, W, H)
+                p_out = os.path.join(args.out, "splat", "novel_%02d.png" % k)
+                Image.fromarray(img).save(p_out)
+                made += 1
+            print("      新视角 %d 张 → %s/splat/" % (made, args.out))
 
     print("[3/3] 拼世界（%s）…" % args.mesh)
     if args.mesh == "tsdf":

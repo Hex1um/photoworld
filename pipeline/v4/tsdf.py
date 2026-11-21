@@ -53,6 +53,51 @@ def _align_depth(disp: np.ndarray, pts_world: np.ndarray, K: np.ndarray, R: np.n
     return float(sol[0]), float(sol[1]), int(len(zz))
 
 
+
+def dense_points(frames, res, step: int = 3, max_points: int = 200000):
+    """把每帧的单目深度按 SfM 位姿反投影成**稠密点云**（给 TSDF 和泼溅初始化共用）。
+
+    为什么需要它：SfM 只给几百到几千个稀疏点，泼溅/体素都覆盖不了画面；
+    单目深度能给出每帧 5~7 万个点，代价是深度有偏差（已按 SfM 点逐帧线性对齐）。
+    """
+    from v3 import depth as v3depth
+    pts = res.pts
+    out_p, out_c = [], []
+    if pts is None or len(pts) < 100:
+        return np.zeros((0, 3), np.float32), np.zeros((0, 3), np.float32)
+    span = float(np.linalg.norm(pts.max(0) - pts.min(0)))
+    for fi, f in enumerate(frames):
+        p = res.poses[fi] if fi < len(res.poses) else None
+        if p is None:
+            continue
+        R, t = p
+        disp = v3depth.disparity(f.rgb)
+        a, b, npts = _align_depth(disp, pts, res.cams[fi].K, R, t)
+        if npts < 30 or not np.isfinite(a) or a <= 1e-4:
+            continue
+        h, w = disp.shape
+        vv, uu = np.mgrid[0:h:step, 0:w:step]
+        d = disp[vv, uu].astype(np.float64)
+        z = 1.0 / np.maximum(a * d + b, 1e-6)
+        ok = np.isfinite(z) & (z > 0.02) & (z < span * 20)
+        if ok.sum() < 200:
+            continue
+        K = res.cams[fi].K
+        ray = np.stack([(uu - K[0, 2]) / K[0, 0], (vv - K[1, 2]) / K[1, 1],
+                        np.ones_like(uu, np.float64)], axis=-1)
+        Xc = (ray * z[..., None])[ok]
+        Xw = (R.T @ (Xc - t.ravel()).T).T
+        rgb = f.rgb[vv[ok], uu[ok]].astype(np.float32) / 255.0
+        out_p.append(Xw.astype(np.float32)); out_c.append(rgb)
+    if not out_p:
+        return np.zeros((0, 3), np.float32), np.zeros((0, 3), np.float32)
+    P = np.vstack(out_p); C = np.vstack(out_c)
+    if len(P) > max_points:
+        sel = np.random.default_rng(0).choice(len(P), max_points, replace=False)
+        P, C = P[sel], C[sel]
+    return P, C
+
+
 def fuse_tsdf(frames, res, disp_fn=None, voxel: float | None = None,
               cells: int = 200, min_ratio: float = 0.02):
     """frames/res 来自 v4.ingest / v4.sfm。返回 Mesh 或 None（点太少时）。"""
