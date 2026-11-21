@@ -71,15 +71,21 @@ def main() -> int:
     aligned = (s * (R @ est.T).T) + t
     err = np.linalg.norm(aligned - dst, axis=1)
     scale_ref = float(np.linalg.norm(dst - dst.mean(0), axis=1).mean())
-    # 旋转误差
+    # 旋转误差：**必须用相对旋转**。重建与真值之间差一个相似变换（含整体旋转），
+    # 直接比较绝对姿态没有意义（之前报出 88°/137° 全是这个原因）。
+    FLIP = np.diag([1.0, 1.0, -1.0])
+    Rg = {i: FLIP @ np.array(gt["views"][i]["R"], np.float64) for i in idx}
+    Re = {i: np.asarray(res.poses[i][0], np.float64) for i in idx}
+    ang = lambda M: float(np.degrees(np.arccos(np.clip((np.trace(M) - 1) / 2, -1, 1))))
     rot_err = []
-    for k, i in enumerate(idx):
-        Rg = np.array(gt["views"][i]["R"], np.float64)
-        Re = res.poses[i][0]
-        dR = Rg @ Re.T
-        ang = np.degrees(np.arccos(np.clip((np.trace(dR) - 1) / 2, -1, 1)))
-        rot_err.append(ang)
-    rot_err = np.array(rot_err)
+    ids = list(idx)
+    for a in range(len(ids)):
+        for b in range(a + 1, len(ids)):
+            i, j = ids[a], ids[b]
+            rel_gt = Rg[j] @ Rg[i].T
+            rel_es = Re[j] @ Re[i].T
+            rot_err.append(ang(rel_gt.T @ rel_es))
+    rot_err = np.array(rot_err) if rot_err else np.array([0.0])
 
     print("\n================ v4 重建评估（%s）================" % args.data)
     print("定位        %d/%d 帧" % (len(idx), n))

@@ -55,13 +55,15 @@ def main() -> int:
 
     print("[1/3] 多视图几何…")
     res = sfm.run(frames, focal_ratio=args.focal_ratio)
-    rep = qc.summarize(res, len(frames))
+    photo = qc.photometric(frames, res)
+    rep = qc.summarize(res, len(frames), photo_l1=None if not np.isfinite(photo) else photo)
     print("[2/3] 质量报告…")
     os.makedirs(args.out, exist_ok=True)
     qc.write(rep, args.out)
-    print("      判定 %s  定位 %d/%d  重投影 %.2fpx  点 %d  视差 %.2f°"
+    print("      判定 %s  定位 %d/%d  重投影 %.2fpx  点 %d  视差 %.2f°  光度 %.3f"
           % (rep["verdict"], rep["localized"], rep["frames"],
-             rep["reproj_rmse_px"], rep["points"], rep["parallax_median_deg"]))
+             rep["reproj_rmse_px"], rep["points"], rep["parallax_median_deg"],
+             -1 if rep["photo_l1"] is None else rep["photo_l1"]))
     if rep["verdict"] == "FAIL" and not args.force:
         print("      报告：%s/qc.md（判定 FAIL，未生成世界；加 --force 可强行生成）"
               % args.out)
@@ -143,7 +145,8 @@ def main() -> int:
 
     pts, cols = fuse.voxel_downsample(res.pts, res.colors, args.voxel)
     world = fuse.to_world(pts, cols, cells=args.cells)
-    rep2 = qc.summarize(res, len(frames), fill=world.fill)
+    rep2 = qc.summarize(res, len(frames), fill=world.fill,
+                        photo_l1=None if not np.isfinite(photo) else photo)
     qc.write(rep2, args.out)
     glb = os.path.join(args.out, "world-v4.glb")
     info = fuse.to_glb(world, glb)

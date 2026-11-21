@@ -12,7 +12,7 @@
 | 高度场填充率 | 网格里"有数据"的格子占比 | 环绕拍，不要只拍一面 |
 
 判定（v4.1.2 收紧视差，v4.1.3 修正填充率门槛）：
-  PASS  定位率 ≥ 0.7 且 视差 ≥ 1.0° 且 RMSE ≤ 3px 且 点 ≥ 100 且 填充率 ≥ 0.08
+  PASS  定位率 ≥ 0.7 且 视差 ≥ 1.0° 且 RMSE ≤ 3px 且 点 ≥ 100 且 填充率 ≥ 0.08 且 光度 ≤ 0.09
   WARN  定位率 ≥ 0.5 且 视差 ≥ 0.5° 且 RMSE ≤ 4.5px 且 点 ≥ 100、填充率 ≥ 0.03
   FAIL  定位率 < 0.4、RMSE > 6px、视差 < 0.5°、点 < 100、填充率 < 0.03 或其它
 
@@ -29,7 +29,8 @@ import os
 import numpy as np
 
 
-def summarize(res, n_frames: int, fill: float | None = None) -> dict:
+def summarize(res, n_frames: int, fill: float | None = None,
+              photo_l1: float | None = None) -> dict:
     solvable = [p for p in (res.pairs or []) if p.inliers >= 50]
     inl = [p.inliers for p in solvable]
     # v4.1.2：视差中位必须把"可解但对数为 0"的配对算进去。旧版只统计 parallax > 0
@@ -53,6 +54,15 @@ def summarize(res, n_frames: int, fill: float | None = None) -> dict:
         verdict = "WARN"
     else:
         verdict = "FAIL"
+
+    # 光度一致性（必须放在判定链**之后**，否则会被后面的 PASS 覆盖）
+    # 这是唯一能发现"位姿整体错位"的指标：RMSE 只看点与位姿自洽，错位时照样很小。
+    # 实测 lego 真素材：RMSE 0.86px / 26 帧全定位 / 视差 11°，但光度 0.148 → 世界是碎片。
+    if photo_l1 is not None and photo_l1 == photo_l1:
+        if photo_l1 > 0.13:
+            verdict = "FAIL"
+        elif photo_l1 > 0.09 and verdict == "PASS":
+            verdict = "WARN"
 
     advice = []
     if npts < 100:
@@ -80,6 +90,7 @@ def summarize(res, n_frames: int, fill: float | None = None) -> dict:
         "reproj_rmse_px": round(rep, 2),
         "points": int(len(res.pts)) if res.pts is not None else 0,
         "fill_ratio": None if fill is None else round(fill, 3),
+        "photo_l1": None if photo_l1 is None else round(float(photo_l1), 4),
         "verdict": verdict,
         "advice": advice,
     }
@@ -117,3 +128,42 @@ def write(report: dict, out_dir: str) -> str:
     with open(md, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     return p
+
+
+def photometric(frames, res, max_pts: int = 3000) -> float:
+    """光度一致性：把三维点的颜色投回每一帧，和该帧真实像素比。
+
+    为什么必须有这一项：重投影 RMSE 只能说明"点和位姿自洽"，**位姿整体错位时它照样很小**
+    （实测 lego 素材：RMSE 1.21px、26/26 定位，但相机半径 10.3/13.0/8.5 完全不成圆，
+    和真值差 120°+）。颜色对不上才说明几何真的错了。
+    返回中位 L1 颜色误差（0..1，越小越好）。
+    """
+    if res.pts is None or len(res.pts) < 200 or res.colors is None:
+        return float("nan")
+    rng = np.random.default_rng(0)
+    sel = rng.choice(len(res.pts), min(max_pts, len(res.pts)), replace=False)
+    X = res.pts[sel]
+    C = res.colors[sel]
+    errs = []
+    for fi, p in enumerate(res.poses):
+        if p is None or fi >= len(frames):
+            continue
+        R, t = p
+        K = res.cams[fi].K
+        Xc = (R @ X.T + t).T
+        z = Xc[:, 2]
+        ok = z > 0.05
+        if ok.sum() < 30:
+            continue
+        uv = (K @ Xc[ok].T).T
+        u = uv[:, 0] / z[ok] + 0.0
+        v = uv[:, 1] / z[ok] + 0.0
+        h, w = frames[fi].rgb.shape[:2]
+        m = (u >= 0) & (u < w) & (v >= 0) & (v < h)
+        if m.sum() < 30:
+            continue
+        px = frames[fi].rgb[v[m].astype(int), u[m].astype(int)].astype(np.float32) / 255.0
+        errs.append(np.abs(px - C[ok][m]).mean(axis=1))
+    if not errs:
+        return float("nan")
+    return float(np.median(np.concatenate(errs)))

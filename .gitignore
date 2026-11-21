@@ -37,3 +37,4 @@ third_party/
 /testdata/synth1/
 uploads/
 logs/*.log
+/testdata/lego/

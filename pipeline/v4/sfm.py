@@ -72,9 +72,12 @@ def _match(da, db, ratio=0.78):
 
 
 def _project(K, R, t, X):
+    # 位姿来自 cv2.recoverPose / solvePnP，都是 **OpenCV 约定（相机朝 +z）**，
+    # 所以深度就是 Xc[:, 2]；早先这里写成了 -Xc[:,2]，导致绝大多数点被判"在相机背后"，
+    # 重投影统计只在极少数点上算（RMSE 假性小到 0.38px），自检完全看不出问题。
     Xc = (R @ X.T + t).T
     uv = (K @ Xc.T).T
-    z = uv[:, 2]
+    z = Xc[:, 2]
     return uv[:, :2] / np.where(np.abs(z) < 1e-9, 1e-9, z)[:, None], z
 
 
@@ -252,6 +255,61 @@ def run(frames, focal_ratio: float = 1.2, pair_min_inliers: int = 50,
                 for k, idx in enumerate(np.nonzero(kn)[0]):
                     obs[(g, int(m[idx, 0]))] = base + k
                     obs[(f, int(m[idx, 1]))] = base + k
+
+    # ---- 2b) 全局精修：把"只有链式位姿"的问题压一压 ----
+    # 纯增量链会累积漂移（实测 lego：相机半径 10.3/13.0/8.5 完全不成圆）。
+    # 这里做几轮"全配对三角化 → 全帧 PnP"：用**所有**可解配对的对应点重建地图，
+    # 再让每帧对着更大的地图重新求位姿，误差不会只在链上滚。
+    for _round in range(3):
+        m_pts, m_obs = [], {}
+        base = 0
+        for p in good:
+            if poses[p.i] is None or poses[p.j] is None:
+                continue
+            m = matched(p.i, p.j)
+            if len(m) < 15:
+                continue
+            Ri, ti = poses[p.i]; Rj, tj = poses[p.j]
+            Xh = cv2.triangulatePoints(cams[p.i].K @ np.hstack([Ri, ti]),
+                                       cams[p.j].K @ np.hstack([Rj, tj]),
+                                       kpts[p.i][m[:, 0]].astype(np.float64).T,
+                                       kpts[p.j][m[:, 1]].astype(np.float64).T)
+            Xw = (Xh[:3] / np.where(np.abs(Xh[3]) < 1e-9, 1e-9, Xh[3])).T
+            z1 = (Ri @ Xw.T + ti).T[:, 2]
+            z2 = (Rj @ Xw.T + tj).T[:, 2]
+            keep = (z1 > 0.02) & (z2 > 0.02) & np.isfinite(Xw).all(1)
+            if keep.sum() < 10:
+                continue
+            m_pts.append(Xw[keep])
+            for k, idx in enumerate(np.nonzero(keep)[0]):
+                m_obs[(p.i, int(m[idx, 0]))] = base + k
+                m_obs[(p.j, int(m[idx, 1]))] = base + k
+            base += int(keep.sum())
+        if not m_pts:
+            break
+        M = np.vstack(m_pts)
+        improved = 0
+        for f in range(n):
+            obj, img = [], []
+            for g in range(n):
+                if g == f or poses[g] is None:
+                    continue
+                m = matched(g, f)
+                for a, b in m:
+                    pid = m_obs.get((g, int(a)))
+                    if pid is not None:
+                        obj.append(M[pid]); img.append(kpts[f][b])
+            if len(obj) < 15:
+                continue
+            ok, rvec, tvec, inls = cv2.solvePnPRansac(
+                np.array(obj, np.float64), np.array(img, np.float64), cams[f].K, None,
+                reprojectionError=2.5, iterationsCount=400, flags=cv2.SOLVEPNP_ITERATIVE)
+            if ok and inls is not None and len(inls) >= 12:
+                Rf, _ = cv2.Rodrigues(rvec)
+                poses[f] = (Rf, tvec)
+                improved += 1
+        if verbose:
+            print("  全局精修第 %d 轮：%d 帧重定位，地图 %d 点" % (_round + 1, improved, len(M)))
 
     res.poses = poses
     res.localized = sum(1 for p in poses if p is not None)
