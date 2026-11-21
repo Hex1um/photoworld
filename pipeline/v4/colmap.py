@@ -125,11 +125,15 @@ def read_ply(path: str | Path):
         arr = np.frombuffer(f.read(n_vert * np.dtype(dtype).itemsize), dtype=np.dtype(dtype))
     names = [n for n, _ in props]
     P = np.stack([arr["x"], arr["y"], arr["z"]], axis=1).astype(np.float32)
+    N = None
+    if all(c in names for c in ("nx", "ny", "nz")):
+        # fused.ply 自带法线（MVS 估的，方向一致）——泊松重建靠它，别自己再猜
+        N = np.stack([arr["nx"], arr["ny"], arr["nz"]], axis=1).astype(np.float32)
     if all(c in names for c in ("red", "green", "blue")):
         C = np.stack([arr["red"], arr["green"], arr["blue"]], axis=1).astype(np.float32) / 255.0
     else:
         C = np.full((len(P), 3), 0.6, np.float32)
-    return P, C
+    return (P, C) if N is None else (P, C, N)
 
 
 def run(img_dir: str, work: str, matcher: str = "exhaustive", quiet: bool = False) -> Path:

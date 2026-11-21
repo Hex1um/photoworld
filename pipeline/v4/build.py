@@ -46,8 +46,11 @@ def main() -> int:
     ap.add_argument("--splat", action="store_true",
                     help="额外训练一个可微泼溅（3DGS-lite），并从插值位姿渲新视角")
     ap.add_argument("--splat-iters", type=int, default=600)
-    ap.add_argument("--mesh", choices=["heightfield", "tsdf"], default="heightfield",
-                    help="世界表示：heightfield=高度场（默认，稳）；tsdf=体素融合+marching cubes（有垂直面，需好素材）")
+    ap.add_argument("--mesh", choices=["heightfield", "tsdf", "poisson"], default="heightfield",
+                    help="世界表示：heightfield=高度场（默认，适合地形）；"
+                         "tsdf=体素融合（物体/室内推荐，薄壳）；"
+                         "poisson=泊松（实验：MVS 法线不一致时会拉丝）")
+    ap.add_argument("--poisson-depth", type=int, default=9)
     args = ap.parse_args()
 
     from v4 import fuse, ingest, qc, sfm
@@ -79,16 +82,21 @@ def main() -> int:
         model = v4colmap.run(img_dir, os.path.join(args.out, "colmap"),
                              matcher="exhaustive" if len(frames) <= 60 else "sequential")
         cams, poses, pts, cols = v4colmap.load_model(model, frames)
+        dense_normals = None
         if args.dense:
             ply = v4colmap.run_dense(img_dir, os.path.join(args.out, "colmap"), model)
             if ply is not None:
-                dp, dc = v4colmap.read_ply(ply)
+                got = v4colmap.read_ply(ply)
+                dp, dc = got[0], got[1]
+                dn = got[2] if len(got) > 2 else None
                 print("      稠密融合：%d 点（稀疏 %d）" % (len(dp), len(pts)))
                 if len(dp) > len(pts):
                     pts, cols = dp, dc
+                    dense_normals = dn
         res = types.SimpleNamespace(cams=cams, poses=poses, pts=pts, colors=cols,
                                     pairs=[], reproj_rmse=0.0, localized=sum(1 for p in poses if p is not None),
                                     notes=["位姿来自 COLMAP"], mode="colmap", parallax_deg=0.0)
+        res.normals = dense_normals
         _, par = qc.cloud_stats(frames, res)
         res.parallax_deg = 0.0 if par != par else par
     else:
@@ -168,6 +176,21 @@ def main() -> int:
             print("      新视角 %d 张 → %s/splat/" % (made, args.out))
 
     print("[3/3] 拼世界（%s）…" % args.mesh)
+    if args.mesh == "poisson":
+        try:
+            from v4 import poisson as v4poisson
+            mesh = v4poisson.reconstruct(res.pts, res.colors, depth=args.poisson_depth,
+                                         normals=getattr(res, "normals", None))
+        except Exception as e:
+            print("      Poisson 失败（%s），回退 heightfield" % e)
+            mesh = None
+        if mesh is not None:
+            glb = os.path.join(args.out, "world-v4.glb")
+            v4poisson.to_glb(mesh, glb)
+            print("      %s  顶点 %d  三角 %d  用时 %.1fs"
+                  % (glb, len(mesh.pos), len(mesh.idx), time.monotonic() - t0))
+            return 0
+        args.mesh = "heightfield"
     if args.mesh == "tsdf":
         from v4 import tsdf as v4tsdf
         mesh = v4tsdf.fuse_tsdf(frames, res, cells=args.cells)
